@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"dirfuzz/pkg/engine"
+	"dirfuzz/pkg/httpclient"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,10 +16,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/wrap"
 )
 
 // TUI Colors (Dracula Theme)
@@ -97,11 +100,15 @@ var (
 		Bold(true).
 		Padding(0, 1)
 
-	requestPaneHeaderStyle = detailPaneHeaderBaseStyle.Copy().
+	requestPaneHeaderStyle = lipgloss.NewStyle().
+		Bold(true).
+		Padding(0, 1).
 		Foreground(DraculaBg).
 		Background(DraculaCyan)
 
-	responsePaneHeaderStyle = detailPaneHeaderBaseStyle.Copy().
+	responsePaneHeaderStyle = lipgloss.NewStyle().
+		Bold(true).
+		Padding(0, 1).
 		Foreground(DraculaBg).
 		Background(DraculaOrange)
 
@@ -124,32 +131,55 @@ var (
 		Bold(true).
 		Padding(0, 1)
 
-	badge2xxStyle = badgeBaseStyle.Copy().
+	badge2xxStyle = lipgloss.NewStyle().
+		Bold(true).
+		Padding(0, 1).
 		Foreground(DraculaBg).
 		Background(DraculaGreen)
 
-	badge403Style = badgeBaseStyle.Copy().
+	badge403Style = lipgloss.NewStyle().
+		Bold(true).
+		Padding(0, 1).
 		Foreground(DraculaBg).
 		Background(DraculaOrange)
 
-	badge404Style = badgeBaseStyle.Copy().
+	badge404Style = lipgloss.NewStyle().
+		Bold(true).
+		Padding(0, 1).
 		Foreground(DraculaFg).
 		Background(DraculaComment)
 
-	badge429Style = badgeBaseStyle.Copy().
+	badge429Style = lipgloss.NewStyle().
+		Bold(true).
+		Padding(0, 1).
 		Foreground(DraculaBg).
 		Background(DraculaYellow)
 
-	badge5xxStyle = badgeBaseStyle.Copy().
+	badge5xxStyle = lipgloss.NewStyle().
+		Bold(true).
+		Padding(0, 1).
 		Foreground(DraculaFg).
 		Background(DraculaRed)
 
-	badgeErrStyle = badgeBaseStyle.Copy().
+	badgeErrStyle = lipgloss.NewStyle().
+		Bold(true).
+		Padding(0, 1).
 		Foreground(DraculaBg).
 		Background(DraculaPink)
+
+	status2xxStyle        = lipgloss.NewStyle().Foreground(DraculaGreen)
+	status3xxStyle        = lipgloss.NewStyle().Foreground(DraculaCyan)
+	status403Style        = lipgloss.NewStyle().Foreground(DraculaOrange)
+	status4xxStyle        = lipgloss.NewStyle().Foreground(DraculaYellow)
+	status5xxStyle        = lipgloss.NewStyle().Foreground(DraculaRed)
+	forbiddenCFWAFStyle   = lipgloss.NewStyle().Foreground(DraculaRed)
+	forbiddenCFAdminStyle = lipgloss.NewStyle().Foreground(DraculaOrange)
+	forbiddenNginxStyle   = lipgloss.NewStyle().Foreground(DraculaCyan)
 )
 
 var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+const maxLogEntries = 10000
 
 func renderStatusBadge(style lipgloss.Style, icon, label string, count int64) string {
 	return style.Render(fmt.Sprintf("%s %s: %d", icon, label, count))
@@ -192,7 +222,7 @@ func renderPaneHeader(style lipgloss.Style, width int, title string) string {
 	if width < 1 {
 		width = 1
 	}
-	return style.Copy().Width(width).Align(lipgloss.Left).Render(title)
+	return style.Width(width).Align(lipgloss.Left).Render(title)
 }
 
 func renderSparkline(values []int64, width int) string {
@@ -406,6 +436,7 @@ const (
 	StateList ViewState = iota
 	StateDetail
 	StateCommand
+	StateRepeater
 )
 
 // Model is the BubbleTea model for the TUI.
@@ -428,12 +459,21 @@ type Model struct {
 	// List View Selection
 	selectedIndex int
 	listScrollIdx int // How far down the list we have scrolled
+	atBottom      bool
 
 	// Detail Viewports
 	reqViewport viewport.Model
 	resViewport viewport.Model
 	cmdOutput   []string
 	cmdViewport viewport.Model
+
+	// Repeater state
+	repeaterInput    textarea.Model
+	repeaterRespVp   viewport.Model
+	repeaterTarget   string
+	repeaterSending  bool
+	repeaterFocusReq bool
+	suiteAddr        string
 
 	// Telemetry display
 	startTime time.Time
@@ -453,10 +493,18 @@ type Model struct {
 	quitting       bool
 	pendingTarget  string
 	commandPulseOn bool
+	logsChanged    bool
 
 	// Status messages
 	statusMessage string
 	statusExpiry  time.Time
+}
+
+// RepeaterResultMsg is the message returned after a repeater request.
+type RepeaterResultMsg struct {
+	RawResponse *httpclient.RawResponse
+	Err         error
+	Duration    time.Duration
 }
 
 // NewModel initializes the TUI model.
@@ -474,22 +522,33 @@ func NewModel(eng *engine.Engine, resultsCh <-chan engine.Result) Model {
 	resVp := viewport.New(40, 20)
 	cmdVp := viewport.New(80, 10)
 
+	ta := textarea.New()
+	ta.Placeholder = "GET / HTTP/1.1..."
+	ta.ShowLineNumbers = true
+
+	repeaterVp := viewport.New(40, 20)
+
 	m := Model{
-		Engine:         eng,
-		resultsCh:      resultsCh,
-		viewport:       vp,
-		reqViewport:    reqVp,
-		resViewport:    resVp,
-		cmdViewport:    cmdVp,
-		textInput:      ti,
-		logs:           []string{},
-		logLineHits:    []*engine.Result{},
-		hits:           []engine.Result{},
-		rpsHistory:     []int64{},
-		cmdOutput:      []string{},
-		startTime:      time.Now(),
-		state:          StateList,
-		commandPulseOn: true,
+		Engine:           eng,
+		resultsCh:        resultsCh,
+		viewport:         vp,
+		reqViewport:      reqVp,
+		resViewport:      resVp,
+		cmdViewport:      cmdVp,
+		textInput:        ti,
+		logs:             []string{},
+		logLineHits:      []*engine.Result{},
+		hits:             []engine.Result{},
+		rpsHistory:       []int64{},
+		cmdOutput:        []string{},
+		startTime:        time.Now(),
+		state:            StateList,
+		commandPulseOn:   true,
+		atBottom:         true,
+		repeaterInput:    ta,
+		repeaterRespVp:   repeaterVp,
+		repeaterFocusReq: true,
+		suiteAddr:        "http://127.0.0.1:8888",
 	}
 	m.initCommands()
 	return m
@@ -509,6 +568,14 @@ func (m *Model) initCommands() {
 				sb.WriteString(highlightStyle.Render(line) + " - " + mutedStyle.Render(cmd.Description) + "\n")
 			}
 			return sb.String()
+		}},
+		{Name: "suiteaddr", Description: "Set Suite API address", Args: "<url>", Handler: func(m *Model, args string) string {
+			addr := strings.TrimSpace(args)
+			if addr == "" {
+				return errorStyle.Render("Usage: :suiteaddr <url>")
+			}
+			m.suiteAddr = addr
+			return statusStyle.Render(fmt.Sprintf("[*] Suite API address set to: %s", addr))
 		}},
 		{Name: "pause", Description: "Pause/resume scanning", Args: "", Handler: func(m *Model, args string) string {
 			m.Engine.Config.RLock()
@@ -1108,48 +1175,6 @@ func (m *Model) initCommands() {
 	}
 }
 
-// sendToSuite sends the selected result to the Suite API
-func sendToSuite(baseURL, sessionType string, result *engine.Result) error {
-	if result == nil {
-		return fmt.Errorf("no result selected")
-	}
-
-	var apiURL string
-	var payload map[string]interface{}
-
-	if sessionType == "repeater" {
-		apiURL = "http://127.0.0.1:8888/api/repeater/sessions"
-		payload = map[string]interface{}{
-			"name":        "TUI: " + result.Path,
-			"target":      baseURL,
-			"raw_request": result.Request,
-		}
-	} else {
-		return fmt.Errorf("unknown session type: %s", sessionType)
-	}
-
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
-	client := &http.Client{
-		Timeout: 2 * time.Second,
-	}
-
-	resp, err := client.Post(apiURL, "application/json", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("suite not running or unreachable: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("suite API returned status %d", resp.StatusCode)
-	}
-
-	return nil
-}
-
 func tickCmd() tea.Cmd {
 	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
 		return TickMsg(t)
@@ -1176,6 +1201,7 @@ func (m Model) listenForResults() tea.Cmd {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -1236,6 +1262,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rpsHistory = m.rpsHistory[len(m.rpsHistory)-30:]
 		}
 		m.commandPulseOn = !m.commandPulseOn
+		if m.logsChanged {
+			m.renderListView()
+			m.logsChanged = false
+		}
 		cmds = append(cmds, tickCmd())
 
 	case ResultMsg:
@@ -1255,7 +1285,50 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, m.listenForResults())
 
+	case RepeaterResultMsg:
+		m.repeaterSending = false
+		if msg.Err != nil {
+			m.repeaterRespVp.SetContent(errorStyle.Render(fmt.Sprintf("Error: %v", msg.Err)))
+		} else {
+			var b strings.Builder
+			b.WriteString(fmt.Sprintf("HTTP/1.1 %d\n", msg.RawResponse.StatusCode))
+			b.WriteString(msg.RawResponse.Headers)
+			b.WriteString("\n\n")
+			b.Write(msg.RawResponse.Body)
+			m.repeaterRespVp.SetContent(b.String())
+		}
+
 	case tea.KeyMsg:
+		if m.state == StateRepeater {
+			switch msg.String() {
+			case "ctrl+r":
+				if !m.repeaterSending {
+					m.repeaterSending = true
+					m.repeaterRespVp.SetContent("Sending...")
+					rawReq := m.repeaterInput.Value()
+					return m, sendRepeaterRequest(m, rawReq)
+				}
+			case "tab":
+				m.repeaterFocusReq = !m.repeaterFocusReq
+				if m.repeaterFocusReq {
+					m.repeaterInput.Focus()
+				} else {
+					m.repeaterInput.Blur()
+				}
+			case "esc":
+				m.state = StateList
+			default:
+				if m.repeaterFocusReq {
+					m.repeaterInput, cmd = m.repeaterInput.Update(msg)
+					cmds = append(cmds, cmd)
+				} else {
+					m.repeaterRespVp, cmd = m.repeaterRespVp.Update(msg)
+					cmds = append(cmds, cmd)
+				}
+			}
+			return m, tea.Batch(cmds...)
+		}
+
 		switch msg.String() {
 		case "ctrl+c":
 			m.quitting = true
@@ -1318,45 +1391,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-			if m.state == StateList && len(m.hits) > 0 {
-				// We don't track selection across all logs, only hits, but we want to show the detail of the 'last' selected one.
-				// However, if we implement true list selection, we would transition to state detail here
-				// For now, if they press enter in list mode and have hits, let's just show the last one, or maybe we build a selection.
-				if m.selectedIndex >= 0 && m.selectedIndex < len(m.logs) {
-					// We need a way to map log lines back to results. Let's just enter detail mode for the last hit for simplicity if not selected properly,
-					// or we implement a full selection mechanism.
-					// We'll implement basic selection.
-					if len(m.hits) > 0 {
-						// Calculate which hit corresponds to the selected log line
-						// This is tricky because logs contain non-hit messages.
-						// Instead, let's make selection navigate through 'hits' directly, and just highlight the line in the text.
-						m.state = StateDetail
-						m.updateDetailView()
-					}
+			if m.state == StateList {
+				if m.selectedIndex >= 0 && m.selectedIndex < len(m.logLineHits) && m.logLineHits[m.selectedIndex] != nil {
+					m.state = StateDetail
+					m.updateDetailView()
+				} else {
+					m.statusMessage = mutedStyle.Render("No request data for this line.")
+					m.statusExpiry = time.Now().Add(2 * time.Second)
 				}
 				return m, nil
 			}
 
 		case "up", "k":
-			if m.commandMode && m.state != StateCommand && len(m.suggestions) > 0 {
+			if m.commandMode && len(m.suggestions) > 0 {
 				m.selectedSugIdx--
 				if m.selectedSugIdx < 0 {
 					m.selectedSugIdx = len(m.suggestions) - 1
 				}
 				return m, nil
 			}
-			if m.commandMode && m.state != StateCommand && len(m.cmdHistory) > 0 {
+			if m.commandMode && len(m.cmdHistory) > 0 {
 				if m.cmdHistoryIdx > 0 {
 					m.cmdHistoryIdx--
 					m.textInput.SetValue(m.cmdHistory[m.cmdHistoryIdx])
 					m.textInput.SetCursor(len(m.textInput.Value()))
+					return m, nil
 				}
-				return m, nil
 			}
 
 			if m.state == StateList {
 				if m.selectedIndex > 0 {
 					m.selectedIndex--
+					m.atBottom = false
 					// Adjust scroll if necessary
 					if m.selectedIndex < m.listScrollIdx {
 						m.listScrollIdx = m.selectedIndex
@@ -1376,20 +1442,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "down", "j":
-			if m.commandMode && m.state != StateCommand && len(m.suggestions) > 0 {
+			if m.commandMode && len(m.suggestions) > 0 {
 				m.selectedSugIdx++
 				if m.selectedSugIdx >= len(m.suggestions) {
 					m.selectedSugIdx = 0
 				}
 				return m, nil
 			}
-			if m.commandMode && m.state != StateCommand && len(m.cmdHistory) > 0 {
+			if m.commandMode && len(m.cmdHistory) > 0 {
 				if m.cmdHistoryIdx < len(m.cmdHistory)-1 {
 					m.cmdHistoryIdx++
 					m.textInput.SetValue(m.cmdHistory[m.cmdHistoryIdx])
 					m.textInput.SetCursor(len(m.textInput.Value()))
+					return m, nil
 				}
-				return m, nil
 			}
 
 			if m.state == StateList {
@@ -1400,6 +1466,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.listScrollIdx++
 					}
 					m.renderListView()
+				}
+				if m.selectedIndex == len(m.logs)-1 {
+					m.atBottom = true
 				}
 				return m, nil
 			}
@@ -1416,8 +1485,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "pagedown":
 			if m.state == StateList {
 				m.selectedIndex += m.viewport.Height
-				if m.selectedIndex >= len(m.logs) {
+				if m.selectedIndex >= len(m.logs)-1 {
 					m.selectedIndex = len(m.logs) - 1
+					m.atBottom = true
+				} else {
+					m.atBottom = false
 				}
 				m.listScrollIdx += m.viewport.Height
 				if m.listScrollIdx > len(m.logs)-m.viewport.Height {
@@ -1435,6 +1507,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "pageup":
 			if m.state == StateList {
+				m.atBottom = false
 				m.selectedIndex -= m.viewport.Height
 				if m.selectedIndex < 0 {
 					m.selectedIndex = 0
@@ -1501,33 +1574,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Non-command mode key shortcuts
 		switch msg.String() {
 		case "r":
-			// Send to Suite Repeater
-			if m.state == StateList && m.selectedIndex >= 0 && m.selectedIndex < len(m.logLineHits) && m.logLineHits[m.selectedIndex] != nil {
+			if m.state == StateList && m.selectedIndex >= 0 && m.selectedIndex < len(m.logLineHits) {
 				selectedHit := m.logLineHits[m.selectedIndex]
-				if err := sendToSuite(m.Engine.BaseURL(), "repeater", selectedHit); err != nil {
+				if selectedHit != nil && selectedHit.Request != "" {
+					m.repeaterTarget = m.Engine.BaseURL()
+					m.repeaterInput.SetValue(selectedHit.Request)
+					m.repeaterRespVp.SetContent("")
+					m.state = StateRepeater
+					m.repeaterFocusReq = true
+					m.repeaterInput.Focus()
+				} else {
+					m.statusMessage = errorStyle.Render("No raw request available. Use --save-raw and restart.")
+					m.statusExpiry = time.Now().Add(3 * time.Second)
+				}
+			}
+		case "R":
+			if m.state == StateList && m.selectedIndex >= 0 && m.selectedIndex < len(m.logLineHits) {
+				selectedHit := m.logLineHits[m.selectedIndex]
+				if err := sendToSuite(m.suiteAddr, m.Engine.BaseURL(), selectedHit); err != nil {
 					m.statusMessage = errorStyle.Render(fmt.Sprintf("✗ Error: %v", err))
 				} else {
 					m.statusMessage = statusStyle.Render("✓ Sent to Suite Repeater!")
 				}
 				m.statusExpiry = time.Now().Add(3 * time.Second)
-			} else if m.state == StateDetail && len(m.hits) > 0 {
-				// In detail view, send the currently viewed hit
-				var selectedHit *engine.Result
-				if m.selectedIndex >= 0 && m.selectedIndex < len(m.logLineHits) && m.logLineHits[m.selectedIndex] != nil {
-					selectedHit = m.logLineHits[m.selectedIndex]
-				} else if len(m.hits) > 0 {
-					selectedHit = &m.hits[len(m.hits)-1]
-				}
-				if selectedHit != nil {
-					if err := sendToSuite(m.Engine.BaseURL(), "repeater", selectedHit); err != nil {
-						m.statusMessage = errorStyle.Render(fmt.Sprintf("✗ Error: %v", err))
-					} else {
-						m.statusMessage = statusStyle.Render("✓ Sent to Suite Repeater!")
-					}
-					m.statusExpiry = time.Now().Add(3 * time.Second)
-				}
 			}
-
 		case "p":
 			m.Engine.Config.RLock()
 			p := m.Engine.Config.IsPaused
@@ -1551,55 +1621,31 @@ func wrapText(text string, width int) string {
 	if width <= 0 {
 		return text
 	}
-	var wrapped strings.Builder
-	lines := strings.Split(text, "\n")
-	for _, line := range lines {
-		// Handle carriage returns
-		line = strings.ReplaceAll(line, "\r", "")
-		for len(line) > width {
-			wrapped.WriteString(line[:width] + "\n")
-			line = line[width:]
-		}
-		wrapped.WriteString(line + "\n")
-	}
-	return strings.TrimSuffix(wrapped.String(), "\n")
+	return wrap.String(text, width)
 }
 
 func (m *Model) updateDetailView() {
-	if len(m.hits) == 0 {
-		return
-	}
-
-	// Figure out which hit corresponds to the selected log line.
 	var selectedHit *engine.Result
-	if m.selectedIndex >= 0 && m.selectedIndex < len(m.logLineHits) && m.logLineHits[m.selectedIndex] != nil {
+	if m.selectedIndex >= 0 && m.selectedIndex < len(m.logLineHits) {
 		selectedHit = m.logLineHits[m.selectedIndex]
 	}
 
-	if selectedHit == nil && m.selectedIndex >= 0 && m.selectedIndex < len(m.logs) {
-		selectedText := m.logs[m.selectedIndex]
-		for i := len(m.hits) - 1; i >= 0; i-- {
-			// Basic heuristic: if the log line contains the path of the hit
-			if strings.Contains(selectedText, m.hits[i].Path) {
-				selectedHit = &m.hits[i]
-				break
-			}
+	var reqContent, resContent string
+
+	if selectedHit != nil {
+		reqContent = "No raw request available. Use --save-raw to include raw request/response; set follow redirects or disable body filters if using HEAD."
+		if selectedHit.Request != "" {
+			reqContent = selectedHit.Request
 		}
-	}
 
-	if selectedHit == nil {
-		// Fallback to the last hit
-		selectedHit = &m.hits[len(m.hits)-1]
-	}
-
-	reqContent := "No raw request available. Use --save-raw to include raw request/response; set follow redirects or disable body filters if using HEAD."
-	if selectedHit.Request != "" {
-		reqContent = selectedHit.Request
-	}
-
-	resContent := "No raw response available. Use --save-raw to include raw request/response."
-	if selectedHit.Response != "" {
-		resContent = selectedHit.Response
+		resContent = "No raw response available. Use --save-raw to include raw request/response."
+		if selectedHit.Response != "" {
+			resContent = selectedHit.Response
+		}
+	} else {
+		placeholder := mutedStyle.Render("\n\n  (Select a valid hit to view request/response details)")
+		reqContent = placeholder
+		resContent = placeholder
 	}
 
 	// Wrap text to viewport width to prevent horizontal overflow
@@ -1697,14 +1743,30 @@ func (m *Model) clearScanLogs() {
 	m.viewport.SetContent("")
 	m.selectedIndex = 0
 	m.listScrollIdx = 0
+	m.atBottom = true
 }
 
 func (m *Model) appendLog(text string, hit *engine.Result) {
 	if text == "" {
 		return
 	}
+
+	if len(m.logs) >= maxLogEntries {
+		m.logs = m.logs[1:]
+		m.logLineHits = m.logLineHits[1:]
+		if m.selectedIndex > 0 {
+			m.selectedIndex--
+		}
+		if m.listScrollIdx > 0 {
+			m.listScrollIdx--
+		}
+	}
+
 	m.logs = append(m.logs, text)
 	if hit != nil {
+		if len(m.hits) >= maxLogEntries {
+			m.hits = m.hits[1:]
+		}
 		m.hits = append(m.hits, *hit)
 		hitCopy := *hit
 		m.logLineHits = append(m.logLineHits, &hitCopy)
@@ -1713,7 +1775,7 @@ func (m *Model) appendLog(text string, hit *engine.Result) {
 	}
 
 	// Auto-scroll to bottom if we are at the bottom
-	if m.selectedIndex >= len(m.logs)-2 {
+	if m.atBottom {
 		m.selectedIndex = len(m.logs) - 1
 		m.listScrollIdx = len(m.logs) - m.viewport.Height
 		if m.listScrollIdx < 0 {
@@ -1721,8 +1783,7 @@ func (m *Model) appendLog(text string, hit *engine.Result) {
 		}
 	}
 
-	m.renderListView()
-	m.viewport.GotoBottom()
+	m.logsChanged = true
 }
 
 func (m *Model) appendCmd(text string) {
@@ -1765,15 +1826,15 @@ func formatResult(r engine.Result) string {
 	statusColor := statusStyle
 	switch {
 	case r.StatusCode >= 200 && r.StatusCode < 300:
-		statusColor = lipgloss.NewStyle().Foreground(DraculaGreen)
+		statusColor = status2xxStyle
 	case r.StatusCode >= 300 && r.StatusCode < 400:
-		statusColor = lipgloss.NewStyle().Foreground(DraculaCyan)
+		statusColor = status3xxStyle
 	case r.StatusCode == 403:
-		statusColor = lipgloss.NewStyle().Foreground(DraculaOrange)
+		statusColor = status403Style
 	case r.StatusCode >= 400 && r.StatusCode < 500:
-		statusColor = lipgloss.NewStyle().Foreground(DraculaYellow)
+		statusColor = status4xxStyle
 	case r.StatusCode >= 500:
-		statusColor = lipgloss.NewStyle().Foreground(DraculaRed)
+		statusColor = status5xxStyle
 	}
 
 	extras := ""
@@ -1781,11 +1842,11 @@ func formatResult(r engine.Result) string {
 		forbidden403Style := mutedStyle
 		switch r.Forbidden403Type {
 		case "CF_WAF_BLOCK":
-			forbidden403Style = lipgloss.NewStyle().Foreground(DraculaRed)
+			forbidden403Style = forbiddenCFWAFStyle
 		case "CF_ADMIN_403":
-			forbidden403Style = lipgloss.NewStyle().Foreground(DraculaOrange)
+			forbidden403Style = forbiddenCFAdminStyle
 		case "NGINX_403":
-			forbidden403Style = lipgloss.NewStyle().Foreground(DraculaCyan)
+			forbidden403Style = forbiddenNginxStyle
 		case "GENERIC_403":
 			forbidden403Style = mutedStyle
 		}
@@ -1995,6 +2056,11 @@ func (m Model) View() string {
 		cmdPanel := cmdPanelStyle.Render(cmdContent)
 
 		mainContent = lipgloss.JoinVertical(lipgloss.Top, frozenVp, cmdPanel)
+	} else if m.state == StateRepeater {
+		// Repeater view
+		reqPane := paneStyle.Width(m.repeaterInput.Width()).Height(m.repeaterInput.Height()).Render(m.repeaterInput.View())
+		resPane := paneStyle.Width(m.repeaterRespVp.Width).Height(m.repeaterRespVp.Height).Render(m.repeaterRespVp.View())
+		mainContent = lipgloss.JoinHorizontal(lipgloss.Top, reqPane, resPane)
 	}
 
 	// Footer
@@ -2011,8 +2077,10 @@ func (m Model) View() string {
 			footer = footerBarStyle.Render("Esc: close panel | Enter: run command | Up/Down: scroll output")
 		} else if m.state == StateDetail {
 			footer = footerBarStyle.Render("Press 'Esc' or 'q' to return to list | Up/Down to scroll")
+		} else if m.state == StateRepeater {
+			footer = footerBarStyle.Render("Tab: switch focus | Ctrl+R: send | Esc: back to list")
 		} else {
-			footer = footerBarStyle.Render("Press ':' for commands | 'p' to pause | '?' for help | 'q' to quit | 'Enter' on hit to view")
+			footer = footerBarStyle.Render("Press ':' for commands | 'p' to pause | '?' for help | 'q' to quit | 'r' for repeater | 'R' for Suite")
 		}
 	}
 	footerSep := separatorStyle.Render(strings.Repeat("─", m.width))
@@ -2026,4 +2094,97 @@ func (m Model) View() string {
 
 	// Compose
 	return lipgloss.JoinVertical(lipgloss.Top, header, paddedContent, footer)
+}
+
+func sendToSuite(suiteAddr, baseURL string, result *engine.Result) error {
+	if result == nil {
+		return fmt.Errorf("no result selected")
+	}
+
+	var payload map[string]interface{}
+	apiURL := suiteAddr + "/api/repeater/sessions"
+	payload = map[string]interface{}{
+		"name":        "TUI: " + result.Path,
+		"target":      baseURL,
+		"raw_request": result.Request,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+	}
+
+	resp, err := client.Post(apiURL, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("suite not running or unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("suite API returned status %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+func parseRawRequestTarget(rawReq, baseURL string) (string, error) {
+	lines := strings.Split(strings.ReplaceAll(rawReq, "\r\n", "\n"), "\n")
+	if len(lines) == 0 {
+		return "", fmt.Errorf("empty request")
+	}
+
+	parts := strings.SplitN(lines[0], " ", 3)
+	if len(parts) < 2 {
+		return "", fmt.Errorf("invalid request line")
+	}
+	path := parts[1]
+
+	host := ""
+	for _, line := range lines[1:] {
+		if strings.HasPrefix(strings.ToLower(line), "host:") {
+			hostParts := strings.SplitN(line, ":", 2)
+			if len(hostParts) == 2 {
+				host = strings.TrimSpace(hostParts[1])
+				break
+			}
+		}
+	}
+	if host == "" {
+		return "", fmt.Errorf("host header not found")
+	}
+
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return "", err
+	}
+
+	scheme := base.Scheme
+	if !strings.Contains(host, ":") {
+		if scheme == "https" {
+			host += ":443"
+		} else {
+			host += ":80"
+		}
+	}
+
+	return fmt.Sprintf("%s://%s%s", scheme, host, path), nil
+}
+
+func sendRepeaterRequest(m Model, rawReq string) tea.Cmd {
+	return func() tea.Msg {
+		targetURL, err := parseRawRequestTarget(rawReq, m.repeaterTarget)
+		if err != nil {
+			return RepeaterResultMsg{Err: err}
+		}
+
+		start := time.Now()
+		resp, err := httpclient.SendRawRequest(targetURL, []byte(rawReq), 10*time.Second, "")
+		duration := time.Since(start)
+
+		return RepeaterResultMsg{RawResponse: resp, Err: err, Duration: duration}
+	}
 }

@@ -195,7 +195,7 @@ func SendRawRequestWithContext(
 	// was fully consumed. If the body was truncated we must not reuse the
 	// connection because unread bytes will remain on the socket and will
 	// corrupt the next response parsing.
-	if proxyAddr == "" && responseAllowsKeepalive(resp.Headers) && resp.BodyComplete {
+	if proxyAddr == "" && responseAllowsKeepalive(strings.HasPrefix(resp.Headers, "HTTP/1.0"), resp.HeaderMap) && resp.BodyComplete {
 		DefaultPool.Put(poolKey, u.Scheme, conn)
 	} else {
 		conn.Close()
@@ -738,7 +738,8 @@ func parseRawResponse(conn net.Conn) (*RawResponse, error) {
 		if headerParsed {
 			bodyLen := buf.Len() - (headerEndIdx + sepLen)
 			if isChunked {
-				if bytes.HasSuffix(rawBytes, []byte("0\r\n\r\n")) || bytes.HasSuffix(rawBytes, []byte("0\n\n")) {
+				bodySoFar := rawBytes[headerEndIdx+sepLen:]
+				if bytes.Contains(bodySoFar, []byte("\r\n0\r\n")) || bytes.Contains(bodySoFar, []byte("\n0\n")) {
 					break
 				}
 			} else if contentLength != -1 {
@@ -767,7 +768,8 @@ func parseRawResponse(conn net.Conn) (*RawResponse, error) {
 	bodyComplete := false
 	if headerEndIdx != -1 {
 		if isChunked {
-			if bytes.HasSuffix(rawBytes, []byte("0\r\n\r\n")) || bytes.HasSuffix(rawBytes, []byte("0\n\n")) {
+			bodySoFar := rawBytes[headerEndIdx+sepLen:]
+			if bytes.Contains(bodySoFar, []byte("\r\n0\r\n\r\n")) || bytes.Contains(bodySoFar, []byte("\n0\n\n")) {
 				bodyComplete = true
 			}
 		} else if contentLength != -1 {

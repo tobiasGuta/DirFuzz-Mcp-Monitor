@@ -133,34 +133,19 @@ func (p *ConnPool) Close() {
 
 // responseAllowsKeepalive returns true when the HTTP response indicates
 // the server is willing to keep the connection open.
-func responseAllowsKeepalive(headers string) bool {
+func responseAllowsKeepalive(isHTTP10 bool, headerMap map[string]string) bool {
 	// HTTP/1.1 defaults to keep-alive unless Connection: close is present.
 	// HTTP/1.0 defaults to close unless Connection: keep-alive is present.
-	isHTTP10 := false
-	connectionHeader := ""
-
-	lines := strings.Split(headers, "\n")
-	for i, line := range lines {
-		line = strings.TrimSpace(line)
-		if i == 0 && strings.HasPrefix(strings.ToUpper(line), "HTTP/1.0") {
-			isHTTP10 = true
-		}
-		if strings.HasPrefix(strings.ToLower(line), "connection:") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				connectionHeader = strings.TrimSpace(parts[1])
-			}
-			break
-		}
-	}
+	connectionHeader := headerMap["connection"]
 
 	if connectionHeader != "" {
 		values := strings.Split(connectionHeader, ",")
 		for _, val := range values {
-			if strings.EqualFold(strings.TrimSpace(val), "close") {
+			trimmed := strings.TrimSpace(val)
+			if strings.EqualFold(trimmed, "close") {
 				return false
 			}
-			if strings.EqualFold(strings.TrimSpace(val), "keep-alive") {
+			if strings.EqualFold(trimmed, "keep-alive") {
 				return true
 			}
 		}
@@ -171,32 +156,4 @@ func responseAllowsKeepalive(headers string) bool {
 	}
 
 	return true // Default for HTTP/1.1 is keep-alive
-}
-
-// asciiToLower is a fast ASCII-only toLower (avoids unicode overhead).
-func asciiToLower(s string) string {
-	b := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 32
-		}
-		b[i] = c
-	}
-	return string(b)
-}
-
-func contains(s, sub string) bool {
-	if len(sub) == 0 {
-		return true
-	}
-	if len(s) < len(sub) {
-		return false
-	}
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

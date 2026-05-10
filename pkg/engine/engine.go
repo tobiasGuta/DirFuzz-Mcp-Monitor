@@ -130,10 +130,11 @@ type configSnapshot struct {
 
 // Job represents a single scan task.
 type Job struct {
-	Path   string
-	Depth  int
-	Method string
-	RunID  int64
+	Path         string
+	Depth        int
+	Method       string
+	RunID        int64
+	ExtraHeaders map[string]string
 }
 
 // Result holds the details of a successful fuzzing hit.
@@ -2079,6 +2080,13 @@ func (e *Engine) worker(id int) {
 			// header value produces a syntactically valid injected header.
 			headerSafePayload := strings.NewReplacer("\r", "", "\n", "").Replace(payload)
 			headersStr := strings.ReplaceAll(snap.HeadersTemplate, "{PAYLOAD}", headerSafePayload)
+			if len(job.ExtraHeaders) > 0 {
+				var extraHdrBuf strings.Builder
+				for k, v := range job.ExtraHeaders {
+					extraHdrBuf.WriteString(fmt.Sprintf("%s: %s\r\n", k, v))
+				}
+				headersStr += extraHdrBuf.String()
+			}
 
 			var proxyAddr string
 			if e.proxyDialer {
@@ -2279,12 +2287,7 @@ func (e *Engine) worker(id int) {
 						strategies := EvasionStrategiesFor(wafRes.Vendor)
 						for _, strategy := range strategies {
 							newPath, newHeaders := strategy.ModifyRequest(payload, headers)
-							e.Config.Lock()
-							// Ensure we don't accidentally recurse endlessly with evasions.
-							e.Config.Headers = newHeaders
-							e.Config.Unlock()
-							e.buildAndStoreConfigSnapshot()
-							e.Submit(Job{Path: newPath, Depth: depth, Method: successfulMethod, RunID: job.RunID})
+							e.Submit(Job{Path: newPath, Depth: depth, Method: successfulMethod, RunID: job.RunID, ExtraHeaders: newHeaders})
 						}
 					}
 				}
@@ -2459,6 +2462,11 @@ func (e *Engine) worker(id int) {
 							go func(runID int64, basePath string, nextDepth int, wlPath string) {
 								defer e.scannerWg.Done()
 								defer func() { <-e.recursiveSem }()
+								
+								snap := e.configSnap.Load()
+								if snap == nil {
+									return
+								}
 
 								f, err := os.Open(wlPath)
 								if err != nil {
