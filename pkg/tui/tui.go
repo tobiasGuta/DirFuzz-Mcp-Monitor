@@ -468,6 +468,20 @@ const (
 	StateRepeater
 )
 
+// RepeaterResultMsg is the message returned after a repeater request.
+type RepeaterResultMsg struct {
+	RawResponse *httpclient.RawResponse
+	Err         error
+	Duration    time.Duration
+}
+
+type RepeaterHistoryEntry struct {
+	Request    string
+	Response   string
+	StatusCode int
+	Duration   time.Duration
+}
+
 // Model is the BubbleTea model for the TUI.
 type Model struct {
 	Engine        *engine.Engine
@@ -505,6 +519,8 @@ type Model struct {
 	repeaterLastStatus   int
 	repeaterLastDuration time.Duration
 	repeaterCancelFn     context.CancelFunc
+	repeaterHistory      []RepeaterHistoryEntry
+	repeaterHistoryIdx   int
 
 	// Telemetry display
 	startTime       time.Time
@@ -532,13 +548,6 @@ type Model struct {
 	// Status messages
 	statusMessage string
 	statusExpiry  time.Time
-}
-
-// RepeaterResultMsg is the message returned after a repeater request.
-type RepeaterResultMsg struct {
-	RawResponse *httpclient.RawResponse
-	Err         error
-	Duration    time.Duration
 }
 
 // NewModel initializes the TUI model.
@@ -1365,6 +1374,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.repeaterLastStatus = msg.RawResponse.StatusCode
 			m.repeaterLastDuration = msg.Duration
 			m.repeaterRespVp.GotoTop()
+
+			// Truncate 'future' history if we went back in time and sent a new request
+			if m.repeaterHistoryIdx < len(m.repeaterHistory)-1 {
+				m.repeaterHistory = m.repeaterHistory[:m.repeaterHistoryIdx+1]
+			}
+			// Append the snapshot
+			m.repeaterHistory = append(m.repeaterHistory, RepeaterHistoryEntry{
+				Request:    m.repeaterInput.Value(),
+				Response:   content,
+				StatusCode: msg.RawResponse.StatusCode,
+				Duration:   msg.Duration,
+			})
+			// Cap history at 15 items to save memory
+			if len(m.repeaterHistory) > 15 {
+				m.repeaterHistory = m.repeaterHistory[1:]
+			}
+			m.repeaterHistoryIdx = len(m.repeaterHistory) - 1
 		}
 
 	case tea.KeyMsg:
@@ -1376,6 +1402,28 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.quitting = true
 				return m, tea.Quit
+			case "ctrl+p":
+				if m.repeaterHistoryIdx > 0 {
+					m.repeaterHistoryIdx--
+					entry := m.repeaterHistory[m.repeaterHistoryIdx]
+					m.repeaterInput.SetValue(entry.Request)
+					m.repeaterRespVp.SetContent(wrapText(entry.Response, m.repeaterRespVp.Width))
+					m.repeaterLastStatus = entry.StatusCode
+					m.repeaterLastDuration = entry.Duration
+					m.repeaterRespVp.GotoTop()
+				}
+				return m, nil
+			case "ctrl+n":
+				if m.repeaterHistoryIdx < len(m.repeaterHistory)-1 {
+					m.repeaterHistoryIdx++
+					entry := m.repeaterHistory[m.repeaterHistoryIdx]
+					m.repeaterInput.SetValue(entry.Request)
+					m.repeaterRespVp.SetContent(wrapText(entry.Response, m.repeaterRespVp.Width))
+					m.repeaterLastStatus = entry.StatusCode
+					m.repeaterLastDuration = entry.Duration
+					m.repeaterRespVp.GotoTop()
+				}
+				return m, nil
 			case "ctrl+r":
 				if !m.repeaterSending {
 					m.repeaterSending = true
@@ -1663,6 +1711,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cleanReq := strings.ReplaceAll(selectedHit.Request, "\r\n", "\n")
 					m.repeaterInput.SetValue(cleanReq)
 					m.repeaterRespVp.SetContent("")
+					
+					// Initialize history with this baseline request
+					m.repeaterHistory = []RepeaterHistoryEntry{{
+						Request:    cleanReq,
+						Response:   "",
+						StatusCode: 0,
+						Duration:   0,
+					}}
+					m.repeaterHistoryIdx = 0
+					
 					m.state = StateRepeater
 					m.repeaterFocusReq = true
 					m.repeaterInput.Focus()
@@ -2204,7 +2262,7 @@ func (m *Model) View() string {
 		} else if m.state == StateDetail {
 			footer = m.footerBarStyle.Render("Press 'Esc' or 'q' to return to list | Up/Down to scroll")
 		} else if m.state == StateRepeater {
-			footer = m.footerBarStyle.Render("Tab: switch focus | Ctrl+R: send | Esc/q: back to list | q: quit")
+			footer = m.footerBarStyle.Render("Tab: focus | Ctrl+R: send | Ctrl+P/N: history | Esc/q: back")
 		} else {
 			footer = m.footerBarStyle.Render("Press ':' for commands | 'p' to pause | '?' for help | 'q' to quit | 'r' for repeater")
 		}
