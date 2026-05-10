@@ -94,17 +94,20 @@ var (
 	paneStyle = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(DraculaPurple).
-		Padding(0, 1)
+		Padding(0, 1).
+		Background(DraculaBg)
 
 	paneActiveStyle = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(DraculaCyan).
-		Padding(0, 1)
+		Padding(0, 1).
+		Background(DraculaBg)
 
 	paneInactiveStyle = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(DraculaComment).
-		Padding(0, 1)
+		Padding(0, 1).
+		Background(DraculaBg)
 
 	detailPaneHeaderBaseStyle = lipgloss.NewStyle().
 		Bold(true).
@@ -554,6 +557,10 @@ func NewModel(eng *engine.Engine, resultsCh <-chan engine.Result) Model {
 	ta := textarea.New()
 	ta.Placeholder = "GET / HTTP/1.1..."
 	ta.ShowLineNumbers = false
+	ta.FocusedStyle.Base = ta.FocusedStyle.Base.Background(DraculaBg)
+	ta.BlurredStyle.Base = ta.BlurredStyle.Base.Background(DraculaBg)
+	ta.Prompt = ""
+	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 
 	repeaterVp := viewport.New(40, 20)
 
