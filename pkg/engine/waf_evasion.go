@@ -122,7 +122,7 @@ func FingerprintWAF(body []byte, headers string, statusCode int, durationMs int6
 // EvasionTechnique is a single WAF bypass strategy.
 type EvasionTechnique struct {
 	Name          string
-	ModifyRequest func(rawPath string, headers map[string]string) (string, map[string]string)
+	ModifyRequest func(rawPath string, headers map[string]string, method string) (string, map[string]string)
 }
 
 // EvasionStrategiesFor returns evasion techniques for the given WAF vendor.
@@ -140,23 +140,27 @@ func EvasionStrategiesFor(vendor string) []EvasionTechnique {
 		return []EvasionTechnique{
 			{
 				Name: "double-slash",
-				ModifyRequest: func(p string, h map[string]string) (string, map[string]string) {
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
 					nh := cloneHeaders(h)
-					nh["Transfer-Encoding"] = "chunked"
+					if method != "GET" && method != "HEAD" {
+						nh["Transfer-Encoding"] = "chunked"
+					}
 					return "//" + strings.TrimPrefix(p, "/"), nh
 				},
 			},
 			{
 				Name: "null-byte",
-				ModifyRequest: func(p string, h map[string]string) (string, map[string]string) {
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
 					return p + "%00", cloneHeaders(h)
 				},
 			},
 			{
 				Name: "chunked-encoding",
-				ModifyRequest: func(p string, h map[string]string) (string, map[string]string) {
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
 					nh := cloneHeaders(h)
-					nh["Transfer-Encoding"] = "chunked"
+					if method != "GET" && method != "HEAD" {
+						nh["Transfer-Encoding"] = "chunked"
+					}
 					return p, nh
 				},
 			},
@@ -165,7 +169,7 @@ func EvasionStrategiesFor(vendor string) []EvasionTechnique {
 		return []EvasionTechnique{
 			{
 				Name: "case-variation",
-				ModifyRequest: func(p string, h map[string]string) (string, map[string]string) {
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
 					var sb strings.Builder
 					for i, c := range p {
 						if i%2 == 0 {
@@ -179,7 +183,7 @@ func EvasionStrategiesFor(vendor string) []EvasionTechnique {
 			},
 			{
 				Name: "cache-buster",
-				ModifyRequest: func(p string, h map[string]string) (string, map[string]string) {
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
 					return fmt.Sprintf("%s?cb=%d", p, rand.Int64()), cloneHeaders(h)
 				},
 			},
@@ -188,7 +192,7 @@ func EvasionStrategiesFor(vendor string) []EvasionTechnique {
 		return []EvasionTechnique{
 			{
 				Name: "xff-localhost",
-				ModifyRequest: func(p string, h map[string]string) (string, map[string]string) {
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
 					nh := cloneHeaders(h)
 					nh["X-Forwarded-For"] = "127.0.0.1"
 					nh["X-Remote-IP"] = "127.0.0.1"
@@ -201,7 +205,7 @@ func EvasionStrategiesFor(vendor string) []EvasionTechnique {
 		return []EvasionTechnique{
 			{
 				Name: "cf-connecting-ip",
-				ModifyRequest: func(p string, h map[string]string) (string, map[string]string) {
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
 					nh := cloneHeaders(h)
 					nh["CF-Connecting-IP"] = "127.0.0.1"
 					nh["X-Forwarded-For"] = "127.0.0.1"
@@ -210,7 +214,7 @@ func EvasionStrategiesFor(vendor string) []EvasionTechnique {
 			},
 			{
 				Name: "path-dotslash",
-				ModifyRequest: func(p string, h map[string]string) (string, map[string]string) {
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
 					return "/%2e" + p, cloneHeaders(h)
 				},
 			},
@@ -219,19 +223,19 @@ func EvasionStrategiesFor(vendor string) []EvasionTechnique {
 		return []EvasionTechnique{
 			{
 				Name: "head-method",
-				ModifyRequest: func(p string, h map[string]string) (string, map[string]string) {
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
 					return p, cloneHeaders(h)
 				},
 			},
 			{
 				Name: "trailing-dot-slash",
-				ModifyRequest: func(p string, h map[string]string) (string, map[string]string) {
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
 					return p + "/./", cloneHeaders(h)
 				},
 			},
 			{
 				Name: "unicode-first-char",
-				ModifyRequest: func(p string, h map[string]string) (string, map[string]string) {
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
 					if len(p) > 1 {
 						return fmt.Sprintf("/%s%s", "%C0%AF", p[1:]), cloneHeaders(h)
 					}

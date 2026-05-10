@@ -328,7 +328,7 @@ func runTUI(eng *engine.Engine, cfg cliConfig, writeResult func(engine.Result)) 
 	}()
 
 	model := tui.NewModel(eng, tuiCh)
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(&model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI error: %w", err)
 	}

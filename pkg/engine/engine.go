@@ -2286,7 +2286,7 @@ func (e *Engine) worker(id int) {
 					if wafRes.Detected {
 						strategies := EvasionStrategiesFor(wafRes.Vendor)
 						for _, strategy := range strategies {
-							newPath, newHeaders := strategy.ModifyRequest(payload, headers)
+							newPath, newHeaders := strategy.ModifyRequest(payload, headers, job.Method)
 							e.Submit(Job{Path: newPath, Depth: depth, Method: successfulMethod, RunID: job.RunID, ExtraHeaders: newHeaders})
 						}
 					}

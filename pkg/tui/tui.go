@@ -2,10 +2,12 @@ package tui
 
 import (
 	"bytes"
+	"context"
 	"dirfuzz/pkg/engine"
 	"dirfuzz/pkg/httpclient"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -96,6 +98,16 @@ var (
 		BorderForeground(DraculaPurple).
 		Padding(0, 1)
 
+	paneActiveStyle = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(DraculaCyan).
+		Padding(0, 1)
+
+	paneInactiveStyle = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(DraculaComment).
+		Padding(0, 1)
+
 	detailPaneHeaderBaseStyle = lipgloss.NewStyle().
 		Bold(true).
 		Padding(0, 1)
@@ -175,11 +187,26 @@ var (
 	forbiddenCFWAFStyle   = lipgloss.NewStyle().Foreground(DraculaRed)
 	forbiddenCFAdminStyle = lipgloss.NewStyle().Foreground(DraculaOrange)
 	forbiddenNginxStyle   = lipgloss.NewStyle().Foreground(DraculaCyan)
+
+	pauseBannerOrangeStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(DraculaYellow).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(DraculaOrange).
+				Align(lipgloss.Center)
+
+	pauseBannerYellowStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(DraculaOrange).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(DraculaYellow).
+				Align(lipgloss.Center)
 )
 
 var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 const maxLogEntries = 10000
+const maxCmdLines = 500
 
 func renderStatusBadge(style lipgloss.Style, icon, label string, count int64) string {
 	return style.Render(fmt.Sprintf("%s %s: %d", icon, label, count))
@@ -310,7 +337,7 @@ func progressFillColor(progressPct float64) lipgloss.Color {
 	return lipgloss.Color(lerpHexColor(string(DraculaYellow), string(DraculaOrange), t))
 }
 
-func renderProgressBar(width int, progressPct float64) string {
+func renderProgressBar(width int, progressPct float64, style lipgloss.Style) string {
 	if width < 1 {
 		return ""
 	}
@@ -351,9 +378,8 @@ func renderProgressBar(width int, progressPct float64) string {
 	}
 
 	empty := strings.Repeat("░", width-used)
-	fillStyle := lipgloss.NewStyle().Foreground(progressFillColor(progressPct))
 
-	return fillStyle.Render(fill.String()) + mutedStyle.Render(empty)
+	return style.Render(fill.String()) + mutedStyle.Render(empty)
 }
 
 func suggestionDropdownWidth(suggestions []string, maxWidth int) int {
@@ -468,15 +494,21 @@ type Model struct {
 	cmdViewport viewport.Model
 
 	// Repeater state
-	repeaterInput    textarea.Model
-	repeaterRespVp   viewport.Model
-	repeaterTarget   string
-	repeaterSending  bool
-	repeaterFocusReq bool
-	suiteAddr        string
+	repeaterInput        textarea.Model
+	repeaterRespVp       viewport.Model
+	repeaterTarget       string
+	repeaterSending      bool
+	repeaterFocusReq     bool
+	suiteAddr            string
+	repeaterLastStatus   int
+	repeaterLastDuration time.Duration
+	repeaterCancelFn     context.CancelFunc
 
 	// Telemetry display
-	startTime time.Time
+	startTime       time.Time
+	lastProgressPct float64
+	cachedFillStyle lipgloss.Style
+	footerBarStyle  lipgloss.Style
 
 	// Command history
 	cmdHistory    []string
@@ -524,7 +556,7 @@ func NewModel(eng *engine.Engine, resultsCh <-chan engine.Result) Model {
 
 	ta := textarea.New()
 	ta.Placeholder = "GET / HTTP/1.1..."
-	ta.ShowLineNumbers = true
+	ta.ShowLineNumbers = false
 
 	repeaterVp := viewport.New(40, 20)
 
@@ -549,6 +581,7 @@ func NewModel(eng *engine.Engine, resultsCh <-chan engine.Result) Model {
 		repeaterRespVp:   repeaterVp,
 		repeaterFocusReq: true,
 		suiteAddr:        "http://127.0.0.1:8888",
+		lastProgressPct:  -1,
 	}
 	m.initCommands()
 	return m
@@ -1199,7 +1232,7 @@ func (m Model) listenForResults() tea.Cmd {
 	}
 }
 
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
 
@@ -1242,12 +1275,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resViewport.Width = paneWidth
 			m.resViewport.Height = vpHeight - 2
 		}
+		m.repeaterInput.SetWidth(paneWidth)
+		m.repeaterInput.SetHeight(vpHeight - 4)
+		m.repeaterRespVp.Width = paneWidth
+		m.repeaterRespVp.Height = vpHeight - 4
 		m.cmdViewport.Width = vpWidth
 		m.cmdViewport.Height = 12
 		m.textInput.Width = vpWidth - 7
 		if m.textInput.Width < 10 {
 			m.textInput.Width = 10
 		}
+		m.footerBarStyle = lipgloss.NewStyle().Foreground(DraculaCyan).Bold(true).Width(m.width).PaddingLeft(2)
 
 	case TickMsg:
 		// Clear expired status messages
@@ -1289,6 +1327,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.repeaterSending = false
 		if msg.Err != nil {
 			m.repeaterRespVp.SetContent(errorStyle.Render(fmt.Sprintf("Error: %v", msg.Err)))
+			m.repeaterLastStatus = 0
+			m.repeaterLastDuration = 0
 		} else {
 			var b strings.Builder
 			b.WriteString(fmt.Sprintf("HTTP/1.1 %d\n", msg.RawResponse.StatusCode))
@@ -1296,17 +1336,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			b.WriteString("\n\n")
 			b.Write(msg.RawResponse.Body)
 			m.repeaterRespVp.SetContent(b.String())
+			m.repeaterLastStatus = msg.RawResponse.StatusCode
+			m.repeaterLastDuration = msg.Duration
 		}
+		m.repeaterRespVp.GotoTop()
 
 	case tea.KeyMsg:
 		if m.state == StateRepeater {
 			switch msg.String() {
+			case "ctrl+c":
+				if m.repeaterCancelFn != nil {
+					m.repeaterCancelFn()
+				}
+				m.quitting = true
+				return m, tea.Quit
 			case "ctrl+r":
 				if !m.repeaterSending {
 					m.repeaterSending = true
 					m.repeaterRespVp.SetContent("Sending...")
 					rawReq := m.repeaterInput.Value()
-					return m, sendRepeaterRequest(m, rawReq)
+					ctx, cancel := context.WithCancel(context.Background())
+					m.repeaterCancelFn = cancel
+					return m, sendRepeaterRequest(m, rawReq, ctx)
 				}
 			case "tab":
 				m.repeaterFocusReq = !m.repeaterFocusReq
@@ -1316,6 +1367,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.repeaterInput.Blur()
 				}
 			case "esc":
+				if m.repeaterCancelFn != nil {
+					m.repeaterCancelFn()
+				}
 				m.state = StateList
 			default:
 				if m.repeaterFocusReq {
@@ -1335,7 +1389,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "q":
-			if m.state == StateDetail {
+			if m.state == StateDetail || m.state == StateRepeater {
 				m.state = StateList
 				return m, nil
 			}
@@ -1609,7 +1663,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.appendCmd(orangeStyle.Render("[*] Scan paused"))
 			}
 		case "?":
-			output := m.commands[0].Handler(&m, "")
+			output := m.commands[0].Handler(m, "")
 			m.appendCmd(output)
 		}
 	}
@@ -1790,10 +1844,14 @@ func (m *Model) appendCmd(text string) {
 	if text == "" {
 		return
 	}
-	for _, line := range strings.Split(text, "\n") {
+	lines := strings.Split(text, "\n")
+	for _, line := range lines {
 		if line != "" {
 			m.cmdOutput = append(m.cmdOutput, line)
 		}
+	}
+	if len(m.cmdOutput) > maxCmdLines {
+		m.cmdOutput = m.cmdOutput[len(m.cmdOutput)-maxCmdLines:]
 	}
 	m.cmdViewport.SetContent(strings.Join(m.cmdOutput, "\n"))
 	m.cmdViewport.GotoBottom()
@@ -1879,7 +1937,7 @@ func formatResult(r engine.Result) string {
 	)
 }
 
-func (m Model) View() string {
+func (m *Model) View() string {
 	if m.quitting {
 		return "\n  " + mutedStyle.Render("DirFuzz finished. Goodbye!") + "\n"
 	}
@@ -1917,28 +1975,27 @@ func (m Model) View() string {
 	if m.width > 60 {
 		barWidth = m.width / 4
 	}
-	bar := renderProgressBar(barWidth, progressPct)
+
+	if math.Abs(progressPct-m.lastProgressPct) > 1.0 {
+		m.lastProgressPct = progressPct
+		m.cachedFillStyle = lipgloss.NewStyle().Foreground(progressFillColor(progressPct))
+	}
+
+	bar := renderProgressBar(barWidth, progressPct, m.cachedFillStyle)
 
 	pauseBanner := ""
 	if paused {
-		borderColor := DraculaOrange
-		textColor := DraculaYellow
-		if m.commandPulseOn {
-			borderColor = DraculaYellow
-			textColor = DraculaOrange
-		}
-
 		bannerWidth := m.width - 2
 		if bannerWidth < 20 {
 			bannerWidth = 20
 		}
 
-		bannerStyle := lipgloss.NewStyle().
-			Bold(true).
-			Foreground(textColor).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(borderColor).
-			Align(lipgloss.Center)
+		var bannerStyle lipgloss.Style
+		if m.commandPulseOn {
+			bannerStyle = pauseBannerYellowStyle
+		} else {
+			bannerStyle = pauseBannerOrangeStyle
+		}
 
 		pauseBanner = bannerStyle.Width(bannerWidth).Render("PAUSED - Press 'p' or :pause to resume")
 	}
@@ -2057,9 +2114,59 @@ func (m Model) View() string {
 
 		mainContent = lipgloss.JoinVertical(lipgloss.Top, frozenVp, cmdPanel)
 	} else if m.state == StateRepeater {
-		// Repeater view
-		reqPane := paneStyle.Width(m.repeaterInput.Width()).Height(m.repeaterInput.Height()).Render(m.repeaterInput.View())
-		resPane := paneStyle.Width(m.repeaterRespVp.Width).Height(m.repeaterRespVp.Height).Render(m.repeaterRespVp.View())
+		reqHeader := renderPaneHeader(requestPaneHeaderStyle, m.repeaterInput.Width(), "✏ Repeater ─── [Ctrl+R: send]")
+		var resHeader string
+		if m.repeaterSending {
+			resHeader = renderPaneHeader(responsePaneHeaderStyle, m.repeaterRespVp.Width, "Response ─── [⟳ Sending…]")
+		} else {
+			statusColor := statusStyle
+			switch {
+			case m.repeaterLastStatus >= 200 && m.repeaterLastStatus < 300:
+				statusColor = status2xxStyle
+			case m.repeaterLastStatus >= 300 && m.repeaterLastStatus < 400:
+				statusColor = status3xxStyle
+			case m.repeaterLastStatus == 403:
+				statusColor = status403Style
+			case m.repeaterLastStatus >= 400 && m.repeaterLastStatus < 500:
+				statusColor = status4xxStyle
+			case m.repeaterLastStatus >= 500:
+				statusColor = status5xxStyle
+			}
+			resHeaderText := "Response"
+			if m.repeaterLastStatus > 0 {
+				statusText := http.StatusText(m.repeaterLastStatus)
+				if statusText == "" {
+					statusText = "Status"
+				}
+				resHeaderText = fmt.Sprintf("Response ─── [%s %s · %s]",
+					statusColor.Render(strconv.Itoa(m.repeaterLastStatus)),
+					statusColor.Render(statusText),
+					mutedStyle.Render(m.repeaterLastDuration.Round(time.Millisecond).String()),
+				)
+			}
+			resHeader = renderPaneHeader(responsePaneHeaderStyle, m.repeaterRespVp.Width, resHeaderText)
+		}
+
+		leftStyle := paneInactiveStyle
+		rightStyle := paneInactiveStyle
+		if m.repeaterFocusReq {
+			leftStyle = paneActiveStyle
+		} else {
+			rightStyle = paneActiveStyle
+		}
+
+		reqPane := leftStyle.Width(m.repeaterInput.Width()).Height(m.repeaterInput.Height()).Render(
+			lipgloss.JoinVertical(lipgloss.Top,
+				reqHeader,
+				m.repeaterInput.View(),
+			),
+		)
+		resPane := rightStyle.Width(m.repeaterRespVp.Width).Height(m.repeaterRespVp.Height).Render(
+			lipgloss.JoinVertical(lipgloss.Top,
+				resHeader,
+				m.repeaterRespVp.View(),
+			),
+		)
 		mainContent = lipgloss.JoinHorizontal(lipgloss.Top, reqPane, resPane)
 	}
 
@@ -2068,19 +2175,14 @@ func (m Model) View() string {
 	if m.statusMessage != "" {
 		footer = m.statusMessage
 	} else {
-		footerBarStyle := lipgloss.NewStyle().
-			Foreground(DraculaCyan).
-			Bold(true).
-			Width(m.width).
-			PaddingLeft(2)
 		if m.state == StateCommand {
-			footer = footerBarStyle.Render("Esc: close panel | Enter: run command | Up/Down: scroll output")
+			footer = m.footerBarStyle.Render("Esc: close panel | Enter: run command | Up/Down: scroll output")
 		} else if m.state == StateDetail {
-			footer = footerBarStyle.Render("Press 'Esc' or 'q' to return to list | Up/Down to scroll")
+			footer = m.footerBarStyle.Render("Press 'Esc' or 'q' to return to list | Up/Down to scroll")
 		} else if m.state == StateRepeater {
-			footer = footerBarStyle.Render("Tab: switch focus | Ctrl+R: send | Esc: back to list")
+			footer = m.footerBarStyle.Render("Tab: switch focus | Ctrl+R: send | Esc: back to list")
 		} else {
-			footer = footerBarStyle.Render("Press ':' for commands | 'p' to pause | '?' for help | 'q' to quit | 'r' for repeater | 'R' for Suite")
+			footer = m.footerBarStyle.Render("Press ':' for commands | 'p' to pause | '?' for help | 'q' to quit | 'r' for repeater | 'R' for Suite")
 		}
 	}
 	footerSep := separatorStyle.Render(strings.Repeat("─", m.width))
@@ -2163,6 +2265,12 @@ func parseRawRequestTarget(rawReq, baseURL string) (string, error) {
 	}
 
 	scheme := base.Scheme
+	if strings.HasSuffix(host, ":443") {
+		scheme = "https"
+	} else if strings.HasSuffix(host, ":80") {
+		scheme = "http"
+	}
+
 	if !strings.Contains(host, ":") {
 		if scheme == "https" {
 			host += ":443"
@@ -2174,15 +2282,25 @@ func parseRawRequestTarget(rawReq, baseURL string) (string, error) {
 	return fmt.Sprintf("%s://%s%s", scheme, host, path), nil
 }
 
-func sendRepeaterRequest(m Model, rawReq string) tea.Cmd {
+func sendRepeaterRequest(m *Model, rawReq string, ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
 		targetURL, err := parseRawRequestTarget(rawReq, m.repeaterTarget)
 		if err != nil {
 			return RepeaterResultMsg{Err: err}
 		}
 
+		m.Engine.Config.RLock()
+		proxy := m.Engine.Config.ProxyOut
+		insecure := m.Engine.Config.Insecure
+		timeout := m.Engine.Config.Timeout
+		m.Engine.Config.RUnlock()
+
+		if timeout <= 0 {
+			timeout = 10 * time.Second
+		}
+
 		start := time.Now()
-		resp, err := httpclient.SendRawRequest(targetURL, []byte(rawReq), 10*time.Second, "")
+		resp, err := httpclient.SendRawRequestWithContext(ctx, targetURL, []byte(rawReq), timeout, proxy, insecure)
 		duration := time.Since(start)
 
 		return RepeaterResultMsg{RawResponse: resp, Err: err, Duration: duration}
