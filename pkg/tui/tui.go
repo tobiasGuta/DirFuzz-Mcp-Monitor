@@ -1,11 +1,9 @@
 package tui
 
 import (
-	"bytes"
 	"context"
 	"dirfuzz/pkg/engine"
 	"dirfuzz/pkg/httpclient"
-	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
@@ -499,7 +497,6 @@ type Model struct {
 	repeaterTarget       string
 	repeaterSending      bool
 	repeaterFocusReq     bool
-	suiteAddr            string
 	repeaterLastStatus   int
 	repeaterLastDuration time.Duration
 	repeaterCancelFn     context.CancelFunc
@@ -580,7 +577,6 @@ func NewModel(eng *engine.Engine, resultsCh <-chan engine.Result) Model {
 		repeaterInput:    ta,
 		repeaterRespVp:   repeaterVp,
 		repeaterFocusReq: true,
-		suiteAddr:        "http://127.0.0.1:8888",
 		lastProgressPct:  -1,
 	}
 	m.initCommands()
@@ -601,14 +597,6 @@ func (m *Model) initCommands() {
 				sb.WriteString(highlightStyle.Render(line) + " - " + mutedStyle.Render(cmd.Description) + "\n")
 			}
 			return sb.String()
-		}},
-		{Name: "suiteaddr", Description: "Set Suite API address", Args: "<url>", Handler: func(m *Model, args string) string {
-			addr := strings.TrimSpace(args)
-			if addr == "" {
-				return errorStyle.Render("Usage: :suiteaddr <url>")
-			}
-			m.suiteAddr = addr
-			return statusStyle.Render(fmt.Sprintf("[*] Suite API address set to: %s", addr))
 		}},
 		{Name: "pause", Description: "Pause/resume scanning", Args: "", Handler: func(m *Model, args string) string {
 			m.Engine.Config.RLock()
@@ -1026,10 +1014,10 @@ func (m *Model) initCommands() {
 				writeLine(fmt.Sprintf("  -ml %d", matchLines))
 			}
 			if filterDurMin > 0 {
-				writeLine(fmt.Sprintf("  -rt-min %s", filterDurMin))
+				writeLine(fmt.Sprintf("RTmin: %s", filterDurMin))
 			}
 			if filterDurMax > 0 {
-				writeLine(fmt.Sprintf("  -rt-max %s", filterDurMax))
+				writeLine(fmt.Sprintf("RTmax: %s", filterDurMax))
 			}
 			if outputFmt != "" {
 				writeLine(fmt.Sprintf("  -of %s", outputFmt))
@@ -1276,9 +1264,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resViewport.Height = vpHeight - 2
 		}
 		m.repeaterInput.SetWidth(paneWidth)
-		m.repeaterInput.SetHeight(vpHeight - 4)
+		m.repeaterInput.SetHeight(vpHeight - 6)
 		m.repeaterRespVp.Width = paneWidth
-		m.repeaterRespVp.Height = vpHeight - 4
+		m.repeaterRespVp.Height = vpHeight - 6
 		m.cmdViewport.Width = vpWidth
 		m.cmdViewport.Height = 12
 		m.textInput.Width = vpWidth - 7
@@ -1330,12 +1318,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.repeaterLastStatus = 0
 			m.repeaterLastDuration = 0
 		} else {
-			var b strings.Builder
-			b.WriteString(fmt.Sprintf("HTTP/1.1 %d\n", msg.RawResponse.StatusCode))
-			b.WriteString(msg.RawResponse.Headers)
-			b.WriteString("\n\n")
-			b.Write(msg.RawResponse.Body)
-			m.repeaterRespVp.SetContent(b.String())
+			content := strings.ReplaceAll(string(msg.RawResponse.Raw), "\r\n", "\n")
+			if len(content) > 50_000 {
+				content = content[:50_000] + "\n\n[... truncated for display ...]"
+			}
+			m.repeaterRespVp.SetContent(wrapText(content, m.repeaterRespVp.Width))
 			m.repeaterLastStatus = msg.RawResponse.StatusCode
 			m.repeaterLastDuration = msg.Duration
 		}
@@ -1357,7 +1344,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					rawReq := m.repeaterInput.Value()
 					ctx, cancel := context.WithCancel(context.Background())
 					m.repeaterCancelFn = cancel
-					return m, sendRepeaterRequest(m, rawReq, ctx)
+					return m, sendRepeaterRequest(m.Engine, m.repeaterTarget, rawReq, ctx)
 				}
 			case "tab":
 				m.repeaterFocusReq = !m.repeaterFocusReq
@@ -1641,16 +1628,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.statusMessage = errorStyle.Render("No raw request available. Use --save-raw and restart.")
 					m.statusExpiry = time.Now().Add(3 * time.Second)
 				}
-			}
-		case "R":
-			if m.state == StateList && m.selectedIndex >= 0 && m.selectedIndex < len(m.logLineHits) {
-				selectedHit := m.logLineHits[m.selectedIndex]
-				if err := sendToSuite(m.suiteAddr, m.Engine.BaseURL(), selectedHit); err != nil {
-					m.statusMessage = errorStyle.Render(fmt.Sprintf("✗ Error: %v", err))
-				} else {
-					m.statusMessage = statusStyle.Render("✓ Sent to Suite Repeater!")
-				}
-				m.statusExpiry = time.Now().Add(3 * time.Second)
 			}
 		case "p":
 			m.Engine.Config.RLock()
@@ -2114,7 +2091,7 @@ func (m *Model) View() string {
 
 		mainContent = lipgloss.JoinVertical(lipgloss.Top, frozenVp, cmdPanel)
 	} else if m.state == StateRepeater {
-		reqHeader := renderPaneHeader(requestPaneHeaderStyle, m.repeaterInput.Width(), "✏ Repeater ─── [Ctrl+R: send]")
+		reqHeader := renderPaneHeader(requestPaneHeaderStyle, m.repeaterInput.Width(), "✏  Repeater")
 		var resHeader string
 		if m.repeaterSending {
 			resHeader = renderPaneHeader(responsePaneHeaderStyle, m.repeaterRespVp.Width, "Response ─── [⟳ Sending…]")
@@ -2147,23 +2124,28 @@ func (m *Model) View() string {
 			resHeader = renderPaneHeader(responsePaneHeaderStyle, m.repeaterRespVp.Width, resHeaderText)
 		}
 
-		leftStyle := paneInactiveStyle
-		rightStyle := paneInactiveStyle
+		leftStyle := paneStyle
+		rightStyle := paneStyle
 		if m.repeaterFocusReq {
 			leftStyle = paneActiveStyle
 		} else {
 			rightStyle = paneActiveStyle
 		}
 
-		reqPane := leftStyle.Width(m.repeaterInput.Width()).Height(m.repeaterInput.Height()).Render(
+		separatorReq := separatorStyle.Render(strings.Repeat("─", m.repeaterInput.Width()))
+		separatorRes := separatorStyle.Render(strings.Repeat("─", m.repeaterRespVp.Width))
+
+		reqPane := leftStyle.Width(m.repeaterInput.Width() + 2).Height(m.repeaterInput.Height() + 2 + 2).Render(
 			lipgloss.JoinVertical(lipgloss.Top,
 				reqHeader,
+				separatorReq,
 				m.repeaterInput.View(),
 			),
 		)
-		resPane := rightStyle.Width(m.repeaterRespVp.Width).Height(m.repeaterRespVp.Height).Render(
+		resPane := rightStyle.Width(m.repeaterRespVp.Width + 2).Height(m.repeaterRespVp.Height + 2 + 2).Render(
 			lipgloss.JoinVertical(lipgloss.Top,
 				resHeader,
+				separatorRes,
 				m.repeaterRespVp.View(),
 			),
 		)
@@ -2180,9 +2162,9 @@ func (m *Model) View() string {
 		} else if m.state == StateDetail {
 			footer = m.footerBarStyle.Render("Press 'Esc' or 'q' to return to list | Up/Down to scroll")
 		} else if m.state == StateRepeater {
-			footer = m.footerBarStyle.Render("Tab: switch focus | Ctrl+R: send | Esc: back to list")
+			footer = m.footerBarStyle.Render("Tab: switch focus | Ctrl+R: send | Esc/q: back to list | q: quit")
 		} else {
-			footer = m.footerBarStyle.Render("Press ':' for commands | 'p' to pause | '?' for help | 'q' to quit | 'r' for repeater | 'R' for Suite")
+			footer = m.footerBarStyle.Render("Press ':' for commands | 'p' to pause | '?' for help | 'q' to quit | 'r' for repeater")
 		}
 	}
 	footerSep := separatorStyle.Render(strings.Repeat("─", m.width))
@@ -2196,41 +2178,6 @@ func (m *Model) View() string {
 
 	// Compose
 	return lipgloss.JoinVertical(lipgloss.Top, header, paddedContent, footer)
-}
-
-func sendToSuite(suiteAddr, baseURL string, result *engine.Result) error {
-	if result == nil {
-		return fmt.Errorf("no result selected")
-	}
-
-	var payload map[string]interface{}
-	apiURL := suiteAddr + "/api/repeater/sessions"
-	payload = map[string]interface{}{
-		"name":        "TUI: " + result.Path,
-		"target":      baseURL,
-		"raw_request": result.Request,
-	}
-
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
-	client := &http.Client{
-		Timeout: 2 * time.Second,
-	}
-
-	resp, err := client.Post(apiURL, "application/json", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("suite not running or unreachable: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("suite API returned status %d", resp.StatusCode)
-	}
-
-	return nil
 }
 
 func parseRawRequestTarget(rawReq, baseURL string) (string, error) {
@@ -2282,18 +2229,18 @@ func parseRawRequestTarget(rawReq, baseURL string) (string, error) {
 	return fmt.Sprintf("%s://%s%s", scheme, host, path), nil
 }
 
-func sendRepeaterRequest(m *Model, rawReq string, ctx context.Context) tea.Cmd {
+func sendRepeaterRequest(eng *engine.Engine, repeaterTarget string, rawReq string, ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
-		targetURL, err := parseRawRequestTarget(rawReq, m.repeaterTarget)
+		targetURL, err := parseRawRequestTarget(rawReq, repeaterTarget)
 		if err != nil {
 			return RepeaterResultMsg{Err: err}
 		}
 
-		m.Engine.Config.RLock()
-		proxy := m.Engine.Config.ProxyOut
-		insecure := m.Engine.Config.Insecure
-		timeout := m.Engine.Config.Timeout
-		m.Engine.Config.RUnlock()
+		eng.Config.RLock()
+		proxy := eng.Config.ProxyOut
+		insecure := eng.Config.Insecure
+		timeout := eng.Config.Timeout
+		eng.Config.RUnlock()
 
 		if timeout <= 0 {
 			timeout = 10 * time.Second
