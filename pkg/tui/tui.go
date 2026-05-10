@@ -1349,6 +1349,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.repeaterSending = true
 					m.repeaterRespVp.SetContent("Sending...")
 					rawReq := m.repeaterInput.Value()
+					rawReq = strings.ReplaceAll(rawReq, "\r\n", "\n") // Sanitize mixed endings
+					rawReq = strings.ReplaceAll(rawReq, "\n", "\r\n") // Enforce strict HTTP CRLF
 					ctx, cancel := context.WithCancel(context.Background())
 					m.repeaterCancelFn = cancel
 					return m, sendRepeaterRequest(m.Engine, m.repeaterTarget, rawReq, ctx)
@@ -1626,7 +1628,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				selectedHit := m.logLineHits[m.selectedIndex]
 				if selectedHit != nil && selectedHit.Request != "" {
 					m.repeaterTarget = m.Engine.BaseURL()
-					m.repeaterInput.SetValue(selectedHit.Request)
+					cleanReq := strings.ReplaceAll(selectedHit.Request, "\r\n", "\n")
+					m.repeaterInput.SetValue(cleanReq)
 					m.repeaterRespVp.SetContent("")
 					m.state = StateRepeater
 					m.repeaterFocusReq = true
