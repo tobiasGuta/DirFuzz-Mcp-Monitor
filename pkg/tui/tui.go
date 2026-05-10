@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"dirfuzz/pkg/engine"
 	"dirfuzz/pkg/httpclient"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
@@ -41,97 +43,97 @@ var (
 // Styles
 var (
 	titleStyle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(DraculaPurple).
-		Background(DraculaBg).
-		PaddingLeft(1).
-		PaddingRight(1)
+			Bold(true).
+			Foreground(DraculaPurple).
+			Background(DraculaBg).
+			PaddingLeft(1).
+			PaddingRight(1)
 
 	statusStyle = lipgloss.NewStyle().
-		Foreground(DraculaGreen)
+			Foreground(DraculaGreen)
 
 	errorStyle = lipgloss.NewStyle().
-		Foreground(DraculaRed)
+			Foreground(DraculaRed)
 
 	mutedStyle = lipgloss.NewStyle().
-		Foreground(DraculaComment)
+			Foreground(DraculaComment)
 
 	highlightStyle = lipgloss.NewStyle().
-		Foreground(DraculaCyan)
+			Foreground(DraculaCyan)
 
 	orangeStyle = lipgloss.NewStyle().
-		Foreground(DraculaOrange)
+			Foreground(DraculaOrange)
 
 	pinkStyle = lipgloss.NewStyle().
-		Foreground(DraculaPink)
+			Foreground(DraculaPink)
 
 	yellowStyle = lipgloss.NewStyle().
-		Foreground(DraculaYellow)
+			Foreground(DraculaYellow)
 
 	logStyle = lipgloss.NewStyle().
-		Foreground(DraculaFg)
+			Foreground(DraculaFg)
 
 	cmdPromptStyle = lipgloss.NewStyle().
-		Foreground(DraculaPurple).
-		Bold(true)
+			Foreground(DraculaPurple).
+			Bold(true)
 
 	separatorStyle = lipgloss.NewStyle().
-		Foreground(DraculaComment)
+			Foreground(DraculaComment)
 
 	autocompleteBoxStyle = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(DraculaCyan).
-		Padding(0, 1)
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(DraculaCyan).
+				Padding(0, 1)
 
 	autocompleteItemStyle = lipgloss.NewStyle().
-		Foreground(DraculaFg)
+				Foreground(DraculaFg)
 
 	autocompleteSelectedStyle = lipgloss.NewStyle().
-		Foreground(DraculaBg).
-		Background(DraculaPurple).
-		Bold(true)
+					Foreground(DraculaBg).
+					Background(DraculaPurple).
+					Bold(true)
 
 	paneStyle = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(DraculaPurple).
-		Padding(0, 1).
-		Background(DraculaBg)
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(DraculaPurple).
+			Padding(0, 1).
+			Background(DraculaBg)
 
 	paneActiveStyle = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(DraculaCyan).
-		Padding(0, 1).
-		Background(DraculaBg)
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(DraculaCyan).
+			Padding(0, 1).
+			Background(DraculaBg)
 
 	paneInactiveStyle = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(DraculaComment).
-		Padding(0, 1).
-		Background(DraculaBg)
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(DraculaComment).
+				Padding(0, 1).
+				Background(DraculaBg)
 
 	detailPaneHeaderBaseStyle = lipgloss.NewStyle().
-		Bold(true).
-		Padding(0, 1)
+					Bold(true).
+					Padding(0, 1)
 
 	requestPaneHeaderStyle = lipgloss.NewStyle().
-		Bold(true).
-		Padding(0, 1).
-		Foreground(DraculaBg).
-		Background(DraculaCyan)
+				Bold(true).
+				Padding(0, 1).
+				Foreground(DraculaBg).
+				Background(DraculaCyan)
 
 	responsePaneHeaderStyle = lipgloss.NewStyle().
-		Bold(true).
-		Padding(0, 1).
-		Foreground(DraculaBg).
-		Background(DraculaOrange)
+				Bold(true).
+				Padding(0, 1).
+				Foreground(DraculaBg).
+				Background(DraculaOrange)
 
 	selectedRowStyle = lipgloss.NewStyle().
-		Background(DraculaPurple).
-		Foreground(DraculaBg)
+				Background(DraculaPurple).
+				Foreground(DraculaBg)
 
 	selectedCursorStyle = lipgloss.NewStyle().
-		Foreground(DraculaPurple).
-		Bold(true)
+				Foreground(DraculaPurple).
+				Bold(true)
 
 	severity2xxStyle     = lipgloss.NewStyle().Foreground(DraculaGreen)
 	severity3xxStyle     = lipgloss.NewStyle().Foreground(DraculaCyan)
@@ -141,44 +143,44 @@ var (
 	severityNeutralStyle = lipgloss.NewStyle().Foreground(DraculaComment)
 
 	badgeBaseStyle = lipgloss.NewStyle().
-		Bold(true).
-		Padding(0, 1)
+			Bold(true).
+			Padding(0, 1)
 
 	badge2xxStyle = lipgloss.NewStyle().
-		Bold(true).
-		Padding(0, 1).
-		Foreground(DraculaBg).
-		Background(DraculaGreen)
+			Bold(true).
+			Padding(0, 1).
+			Foreground(DraculaBg).
+			Background(DraculaGreen)
 
 	badge403Style = lipgloss.NewStyle().
-		Bold(true).
-		Padding(0, 1).
-		Foreground(DraculaBg).
-		Background(DraculaOrange)
+			Bold(true).
+			Padding(0, 1).
+			Foreground(DraculaBg).
+			Background(DraculaOrange)
 
 	badge404Style = lipgloss.NewStyle().
-		Bold(true).
-		Padding(0, 1).
-		Foreground(DraculaFg).
-		Background(DraculaComment)
+			Bold(true).
+			Padding(0, 1).
+			Foreground(DraculaFg).
+			Background(DraculaComment)
 
 	badge429Style = lipgloss.NewStyle().
-		Bold(true).
-		Padding(0, 1).
-		Foreground(DraculaBg).
-		Background(DraculaYellow)
+			Bold(true).
+			Padding(0, 1).
+			Foreground(DraculaBg).
+			Background(DraculaYellow)
 
 	badge5xxStyle = lipgloss.NewStyle().
-		Bold(true).
-		Padding(0, 1).
-		Foreground(DraculaFg).
-		Background(DraculaRed)
+			Bold(true).
+			Padding(0, 1).
+			Foreground(DraculaFg).
+			Background(DraculaRed)
 
 	badgeErrStyle = lipgloss.NewStyle().
-		Bold(true).
-		Padding(0, 1).
-		Foreground(DraculaBg).
-		Background(DraculaPink)
+			Bold(true).
+			Padding(0, 1).
+			Foreground(DraculaBg).
+			Background(DraculaPink)
 
 	status2xxStyle        = lipgloss.NewStyle().Foreground(DraculaGreen)
 	status3xxStyle        = lipgloss.NewStyle().Foreground(DraculaCyan)
@@ -1227,6 +1229,34 @@ func (m Model) listenForResults() tea.Cmd {
 	}
 }
 
+func formatHTTPResponse(raw string) string {
+	// Split headers and body
+	parts := strings.SplitN(raw, "\n\n", 2)
+	if len(parts) != 2 {
+		return raw // Fallback if no body
+	}
+	headers := parts[0]
+	body := parts[1]
+
+	// Attempt 1: Pretty Print JSON
+	var prettyJSON bytes.Buffer
+	if err := json.Indent(&prettyJSON, []byte(body), "", "  "); err == nil {
+		return headers + "\n\n" + prettyJSON.String()
+	}
+
+	// Attempt 2: Un-minify HTML/XML
+	if strings.Contains(strings.ToLower(headers), "text/html") || strings.Contains(strings.ToLower(headers), "xml") {
+		// Force newlines between adjacent tags
+		body = strings.ReplaceAll(body, "><", ">\n<")
+		// Force newlines after common block endings
+		body = strings.ReplaceAll(body, "</script>", "</script>\n")
+		body = strings.ReplaceAll(body, "</div>", "</div>\n")
+		return headers + "\n\n" + body
+	}
+
+	return raw
+}
+
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
@@ -1324,16 +1354,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.repeaterRespVp.SetContent(errorStyle.Render(fmt.Sprintf("Error: %v", msg.Err)))
 			m.repeaterLastStatus = 0
 			m.repeaterLastDuration = 0
+			m.repeaterRespVp.GotoTop()
 		} else {
 			content := strings.ReplaceAll(string(msg.RawResponse.Raw), "\r\n", "\n")
+			content = formatHTTPResponse(content)
 			if len(content) > 50_000 {
 				content = content[:50_000] + "\n\n[... truncated for display ...]"
 			}
 			m.repeaterRespVp.SetContent(wrapText(content, m.repeaterRespVp.Width))
 			m.repeaterLastStatus = msg.RawResponse.StatusCode
 			m.repeaterLastDuration = msg.Duration
+			m.repeaterRespVp.GotoTop()
 		}
-		m.repeaterRespVp.GotoTop()
 
 	case tea.KeyMsg:
 		if m.state == StateRepeater {
