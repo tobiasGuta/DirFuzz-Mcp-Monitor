@@ -114,7 +114,7 @@ The scanning engine is implemented in `pkg/engine`. It is designed to be embedde
 Place Lua scripts in the `plugins/` directory or point the CLI at a plugin file using `--plugin-match` / `--plugin-mutate`.
 -   Matchers expose a `match(tbl)` function receiving `status_code`, `size`, `words`, `lines`, `body`, and `content_type` returning a boolean.
 -   Mutators expose a `mutate(original)` function returning an array of payload variants.
-Plugins are executed inside a pool of Lua VMs, allowing parallel execution without serializing workers.
+    Plugins are executed inside a pool of Lua VMs, allowing parallel execution without serializing workers.
 
 * * * * *
 
@@ -133,6 +133,10 @@ When running as an MCP tool, the server strictly validates targets against loopb
 Eagle Mode loads a previous JSONL state file and highlights changed or newly discovered endpoints when comparing scan results.
 
 * * * * *
+
+## Example:
+
+https://github.com/user-attachments/assets/e1c5b488-870a-40f4-ac21-d8cbe4349752
 
 ## Contributing
 
