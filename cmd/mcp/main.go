@@ -9,6 +9,7 @@
 //
 //	DIRFUZZ_WORDLIST_DIR   directory that contains wordlist .txt files
 //	DIRFUZZ_SCOPE_DIR      directory that contains H1-Scope-Watcher .json files
+//	DIRFUZZ_OUTPUT_DIR     directory that contains scan output files for analysis
 //
 // Optional environment variables:
 //
@@ -20,8 +21,10 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -52,6 +55,7 @@ const (
 type mcpConfig struct {
 	wordlistDir string
 	scopeDir    string
+	outputDir   string
 	maxThreads  int
 	maxResults  int
 }
@@ -76,6 +80,14 @@ func loadConfig() (mcpConfig, error) {
 	}
 	if info, err := os.Stat(cfg.scopeDir); err != nil || !info.IsDir() {
 		return mcpConfig{}, fmt.Errorf("DIRFUZZ_SCOPE_DIR %q is not a readable directory", cfg.scopeDir)
+	}
+
+	cfg.outputDir = strings.TrimSpace(os.Getenv("DIRFUZZ_OUTPUT_DIR"))
+	if cfg.outputDir == "" {
+		return mcpConfig{}, fmt.Errorf("DIRFUZZ_OUTPUT_DIR is required")
+	}
+	if info, err := os.Stat(cfg.outputDir); err != nil || !info.IsDir() {
+		return mcpConfig{}, fmt.Errorf("DIRFUZZ_OUTPUT_DIR %q is not a readable directory", cfg.outputDir)
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("DIRFUZZ_MAX_THREADS")); raw != "" {
@@ -154,7 +166,7 @@ func main() {
 
 	analyzeTool := mcp.NewTool("dirfuzz_analyze",
 		mcp.WithDescription("Analyze a DirFuzz JSONL results file. Groups findings by severity, identifies high-value targets, flags WAF-blocked paths worth bypassing."),
-		mcp.WithString("results_file", mcp.Required(), mcp.Description("Absolute path to the JSONL results file.")),
+		mcp.WithString("results_file", mcp.Required(), mcp.Description("Path to the JSONL results file under DIRFUZZ_OUTPUT_DIR (absolute or relative).")),
 		mcp.WithString("target", mcp.Description("The base URL that was scanned (for context).")),
 	)
 	s.AddTool(analyzeTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -182,8 +194,8 @@ func main() {
 		return handleExpand(ctx, req, cfg)
 	})
 
-	log.Printf("dirfuzz-mcp: starting (wordlist_dir=%s scope_dir=%s max_threads=%d max_results=%d)",
-		cfg.wordlistDir, cfg.scopeDir, cfg.maxThreads, cfg.maxResults)
+	log.Printf("dirfuzz-mcp: starting (wordlist_dir=%s scope_dir=%s output_dir=%s max_threads=%d max_results=%d)",
+		cfg.wordlistDir, cfg.scopeDir, cfg.outputDir, cfg.maxThreads, cfg.maxResults)
 
 	if err := server.ServeStdio(s); err != nil {
 		log.Fatalf("dirfuzz-mcp: stdio server error: %v", err)
@@ -236,26 +248,12 @@ func handleScan(ctx context.Context, req mcp.CallToolRequest, cfg mcpConfig) (*m
 	// Reject any path-traversal attempt in the wordlist name before filepath.Join.
 	// The AI must only be able to reach files inside DIRFUZZ_WORDLIST_DIR.
 
-	wordlistPath := filepath.Join(cfg.wordlistDir, wordlistName)
-	absWordlist, err := filepath.Abs(wordlistPath)
+	resolvedWordlist, err := resolvePathInAllowedDir(cfg.wordlistDir, wordlistName)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("invalid wordlist path: %v", err)), nil
-	}
-	absDir, err := filepath.Abs(cfg.wordlistDir)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("invalid wordlist directory: %v", err)), nil
-	}
-	// Evaluate symlinks so a symlink inside wordlistDir pointing outside is caught.
-	resolvedWordlist, err := filepath.EvalSymlinks(absWordlist)
-	if err != nil {
+		if errors.Is(err, errPathEscapesAllowedDir) {
+			return mcp.NewToolResultError("wordlist path escapes the allowed directory"), nil
+		}
 		return mcp.NewToolResultError(fmt.Sprintf("wordlist %q not found in wordlist directory", wordlistName)), nil
-	}
-	resolvedDir, err := filepath.EvalSymlinks(absDir)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("wordlist directory resolution failed: %v", err)), nil
-	}
-	if !strings.HasPrefix(resolvedWordlist, resolvedDir+string(filepath.Separator)) {
-		return mcp.NewToolResultError("wordlist path escapes the allowed directory"), nil
 	}
 
 	// ── 4. Parse optional parameters ─────────────────────────────────────────
@@ -503,11 +501,84 @@ func parseHeaders(raw []string) (map[string]string, error) {
 	return headers, nil
 }
 
+var errPathEscapesAllowedDir = errors.New("path escapes allowed directory")
+
+func resolvePathInAllowedDir(allowedDir, requestedPath string) (string, error) {
+	joinedPath := filepath.Join(allowedDir, requestedPath)
+	absPath, err := filepath.Abs(joinedPath)
+	if err != nil {
+		return "", err
+	}
+	absAllowedDir, err := filepath.Abs(allowedDir)
+	if err != nil {
+		return "", err
+	}
+
+	// Evaluate symlinks so a symlink inside allowedDir pointing outside is caught.
+	resolvedPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return "", err
+	}
+	resolvedAllowedDir, err := filepath.EvalSymlinks(absAllowedDir)
+	if err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(resolvedPath, resolvedAllowedDir+string(filepath.Separator)) {
+		return "", errPathEscapesAllowedDir
+	}
+	return resolvedPath, nil
+}
+
 func secondsDuration(seconds float64, fallback time.Duration) time.Duration {
 	if seconds <= 0 {
 		return fallback
 	}
 	return time.Duration(seconds * float64(time.Second))
+}
+
+func pathSegments(rawPath string) []string {
+	rawPath = strings.TrimSpace(rawPath)
+	if rawPath == "" {
+		return nil
+	}
+
+	if parsed, err := url.Parse(rawPath); err == nil && parsed.Path != "" {
+		rawPath = parsed.Path
+	}
+	rawPath = strings.Trim(rawPath, "/")
+	if rawPath == "" {
+		return nil
+	}
+
+	parts := strings.Split(strings.ToLower(rawPath), "/")
+	segments := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" {
+			segments = append(segments, part)
+		}
+	}
+	return segments
+}
+
+func pathContainsAnySegment(segments []string, keywords map[string]struct{}) bool {
+	for _, segment := range segments {
+		if _, ok := keywords[segment]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func isHighSeverityPath(segments []string, highSegments map[string]struct{}) bool {
+	if pathContainsAnySegment(segments, highSegments) {
+		return true
+	}
+	for i := 0; i < len(segments)-1; i++ {
+		if segments[i] == "api" && segments[i+1] == "internal" {
+			return true
+		}
+	}
+	return false
 }
 
 // ── MCP Tool: dirfuzz_analyze ─────────────────────────────────────────────────
@@ -521,7 +592,15 @@ func handleAnalyze(ctx context.Context, req mcp.CallToolRequest, cfg mcpConfig) 
 		return mcp.NewToolResultText("error: results_file is required"), nil
 	}
 
-	f, err := os.Open(resultsFile)
+	resolvedResultsFile, err := resolvePathInAllowedDir(cfg.outputDir, resultsFile)
+	if err != nil {
+		if errors.Is(err, errPathEscapesAllowedDir) {
+			return mcp.NewToolResultText("error opening results file: results_file path escapes DIRFUZZ_OUTPUT_DIR"), nil
+		}
+		return mcp.NewToolResultText("error opening results file: results_file not found in DIRFUZZ_OUTPUT_DIR"), nil
+	}
+
+	f, err := os.Open(resolvedResultsFile)
 	if err != nil {
 		return mcp.NewToolResultText(fmt.Sprintf("error opening results file: %v", err)), nil
 	}
@@ -536,8 +615,26 @@ func handleAnalyze(ctx context.Context, req mcp.CallToolRequest, cfg mcpConfig) 
 	}
 
 	var critical, high, medium, info []scanResult
-	criticalPaths := []string{"/.git/", "/backup", "/.env", "/config", "/database", "/dump", "/phpinfo", "/server-status", "/actuator", "/.aws/", "/.ssh/"}
-	highPaths := []string{"/admin", "/panel", "/dashboard", "/management", "/console", "/api/internal"}
+	criticalSegments := map[string]struct{}{
+		".git":          {},
+		"backup":        {},
+		".env":          {},
+		"config":        {},
+		"database":      {},
+		"dump":          {},
+		"phpinfo":       {},
+		"server-status": {},
+		"actuator":      {},
+		".aws":          {},
+		".ssh":          {},
+	}
+	highSegments := map[string]struct{}{
+		"admin":      {},
+		"panel":      {},
+		"dashboard":  {},
+		"management": {},
+		"console":    {},
+	}
 
 	contentTypes := make(map[string]int)
 	total := 0
@@ -555,24 +652,13 @@ func handleAnalyze(ctx context.Context, req mcp.CallToolRequest, cfg mcpConfig) 
 		total++
 		contentTypes[r.ContentType]++
 
-		isCritical := false
-		for _, cp := range criticalPaths {
-			if strings.Contains(r.Path, cp) && r.StatusCode == 200 {
-				isCritical = true
-				break
-			}
-		}
+		segments := pathSegments(r.Path)
+		isCritical := r.StatusCode == 200 && pathContainsAnySegment(segments, criticalSegments)
 		if isCritical {
 			critical = append(critical, r)
 			continue
 		}
-		isHigh := false
-		for _, hp := range highPaths {
-			if strings.Contains(r.Path, hp) && r.StatusCode == 200 {
-				isHigh = true
-				break
-			}
-		}
+		isHigh := r.StatusCode == 200 && isHighSeverityPath(segments, highSegments)
 		if isHigh {
 			high = append(high, r)
 			continue
@@ -820,10 +906,16 @@ func handleExpand(ctx context.Context, req mcp.CallToolRequest, cfg mcpConfig) (
 		candidates = candidates[:maxTargets]
 	}
 
-	wl := wordlistArg
-	if wl == "" {
-		wl = bestWordlist(cfg.wordlistDir, []string{"common.txt"})
-		wl = filepath.Join(cfg.wordlistDir, wl)
+	wlName := strings.TrimSpace(wordlistArg)
+	if wlName == "" {
+		wlName = bestWordlist(cfg.wordlistDir, []string{"common.txt"})
+	}
+	wl, err := resolvePathInAllowedDir(cfg.wordlistDir, wlName)
+	if err != nil {
+		if errors.Is(err, errPathEscapesAllowedDir) {
+			return mcp.NewToolResultText("error: wordlist path escapes DIRFUZZ_WORDLIST_DIR"), nil
+		}
+		return mcp.NewToolResultText("error: wordlist not found in DIRFUZZ_WORDLIST_DIR"), nil
 	}
 
 	_ = maxDepth // depth respected via MaxDepth config
@@ -835,36 +927,62 @@ func handleExpand(ctx context.Context, req mcp.CallToolRequest, cfg mcpConfig) (
 	totalNew := 0
 	for _, c := range candidates {
 		subTarget := strings.TrimRight(baseTarget, "/") + c.result.Path
-		_ = subTarget // TODO: wire up engine.SetTarget(subTarget) — scan loop is incomplete
-		subCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		subResults, err := func() ([]scanResult, error) {
+			subCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
 
-		eng := engine.NewEngine(cfg.maxThreads, 1_000_000, 0.001)
-		eng.Config.Lock()
-		eng.Config.MaxWorkers = cfg.maxThreads
-		eng.Config.MatchCodes = map[int]bool{200: true, 301: true, 302: true, 403: true}
-		eng.Config.MaxDepth = 1
-		eng.Config.Timeout = 5 * time.Second
-		eng.Config.Unlock()
+			eng := engine.NewEngine(cfg.maxThreads, 1_000_000, 0.001)
+			defer eng.Shutdown()
+			eng.Config.Lock()
+			eng.Config.MaxWorkers = cfg.maxThreads
+			eng.Config.MatchCodes = map[int]bool{200: true, 301: true, 302: true, 403: true}
+			eng.Config.MaxDepth = 1
+			eng.Config.Timeout = 5 * time.Second
+			eng.Config.Unlock()
 
-		var subResults []scanResult
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			for r := range eng.Results {
-				if len(subResults) >= 50 {
-					break
-				}
-				subResults = append(subResults, scanResult{
-					Path:       r.Path,
-					StatusCode: r.StatusCode,
-					Size:       r.Size,
-				})
+			if err := eng.SetTarget(subTarget); err != nil {
+				return nil, fmt.Errorf("invalid expansion target %q: %w", subTarget, err)
 			}
-		}()
 
-		_ = subCtx
-		cancel()
-		<-done
+			eng.Start()
+			eng.KickoffScanner(wl, 0)
+
+			go func() {
+				eng.Wait()
+				cancel()
+				eng.Shutdown()
+			}()
+			go func() {
+				<-subCtx.Done()
+				eng.Shutdown()
+			}()
+
+			subResults := make([]scanResult, 0, 16)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for r := range eng.Results {
+					if len(subResults) >= 50 {
+						continue
+					}
+					subResults = append(subResults, scanResult{
+						Path:       r.Path,
+						StatusCode: r.StatusCode,
+						Size:       r.Size,
+					})
+				}
+			}()
+			<-done
+
+			if err := subCtx.Err(); err != nil && err != context.Canceled && err != context.DeadlineExceeded {
+				return subResults, err
+			}
+			return subResults, nil
+		}()
+		if err != nil {
+			sb.WriteString(fmt.Sprintf("### %s → error: %v\n\n", c.result.Path, err))
+			continue
+		}
 
 		sb.WriteString(fmt.Sprintf("### %s → %d new findings\n", c.result.Path, len(subResults)))
 		for _, sr := range subResults {

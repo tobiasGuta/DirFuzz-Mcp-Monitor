@@ -25,6 +25,7 @@ const tuiResultBufSize = engine.ResultsChannelSize
 func run(cfg cliConfig) error {
 	// ── 1. Engine ─────────────────────────────────────────────────────────────
 	eng := engine.NewEngine(cfg.Threads, engine.DefaultBloomFilterSize, engine.DefaultBloomFilterFP)
+	eng.ResumeFile = cfg.ResumeFile
 
 	// ── 2. Match / filter codes ───────────────────────────────────────────────
 	matchCodes := mustCSVInts(cfg.MatchCodes, "-mc")

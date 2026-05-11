@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -218,6 +219,63 @@ func (sbf *shardedBloomFilter) TestAndAddString(key string) bool {
 	isDuplicate := sbf.filters[shardIndex].TestAndAddString(key)
 	sbf.locks[shardIndex].Unlock()
 	return isDuplicate
+}
+
+func (sbf *shardedBloomFilter) marshalBinary() ([]byte, error) {
+	var out bytes.Buffer
+	if err := binary.Write(&out, binary.LittleEndian, sbf.numShards); err != nil {
+		return nil, err
+	}
+	for i := uint32(0); i < sbf.numShards; i++ {
+		sbf.locks[i].Lock()
+		var shardBuf bytes.Buffer
+		_, err := sbf.filters[i].WriteTo(&shardBuf)
+		sbf.locks[i].Unlock()
+		if err != nil {
+			return nil, err
+		}
+		shardBytes := shardBuf.Bytes()
+		if err := binary.Write(&out, binary.LittleEndian, uint64(len(shardBytes))); err != nil {
+			return nil, err
+		}
+		if _, err := out.Write(shardBytes); err != nil {
+			return nil, err
+		}
+	}
+	return out.Bytes(), nil
+}
+
+func (sbf *shardedBloomFilter) unmarshalBinary(data []byte) error {
+	r := bytes.NewReader(data)
+	var numShards uint32
+	if err := binary.Read(r, binary.LittleEndian, &numShards); err != nil {
+		return err
+	}
+	if numShards != sbf.numShards {
+		return fmt.Errorf("bloom shard mismatch: file=%d engine=%d", numShards, sbf.numShards)
+	}
+
+	for i := uint32(0); i < sbf.numShards; i++ {
+		var shardLen uint64
+		if err := binary.Read(r, binary.LittleEndian, &shardLen); err != nil {
+			return err
+		}
+		if shardLen > uint64(r.Len()) {
+			return fmt.Errorf("invalid bloom shard length %d", shardLen)
+		}
+		shardBytes := make([]byte, shardLen)
+		if _, err := io.ReadFull(r, shardBytes); err != nil {
+			return err
+		}
+
+		sbf.locks[i].Lock()
+		_, err := sbf.filters[i].ReadFrom(bytes.NewReader(shardBytes))
+		sbf.locks[i].Unlock()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ─── Engine ───────────────────────────────────────────────────────────────────
@@ -572,15 +630,26 @@ func (e *Engine) LoadPreviousScan(path string) error {
 // SetRPS updates the rate limiter settings dynamically.
 func (e *Engine) SetRPS(rps int) {
 	var limit rate.Limit
+	var burst int
 	if rps <= 0 {
 		limit = rate.Inf
+		burst = e.currentBurst
+		if burst < MinRateLimitBurst {
+			burst = MinRateLimitBurst
+		}
 	} else {
 		limit = rate.Limit(rps)
+		burst = rps
+		if burst < MinRateLimitBurst {
+			burst = MinRateLimitBurst
+		}
 	}
 	e.limitersLock.Lock()
 	e.currentLimit = limit
+	e.currentBurst = burst
 	for _, l := range e.limiters {
 		l.SetLimit(limit)
+		l.SetBurst(burst)
 	}
 	e.limitersLock.Unlock()
 }
@@ -986,6 +1055,17 @@ func (e *Engine) markHeadRejected(host string) {
 
 // ─── Target management ────────────────────────────────────────────────────────
 
+func validateOutboundHostname(hostname string, allowPrivate bool) error {
+	if !allowPrivate && netutil.IsPrivateHost(hostname) {
+		return fmt.Errorf("SSRF protection: target %q resolves to a private or loopback address", hostname)
+	}
+	return nil
+}
+
+func sanitizeHeaderToken(s string) string {
+	return strings.NewReplacer("\r", "", "\n", "").Replace(s)
+}
+
 // SetTarget sets the target URL and extracts the host.
 // It rejects private/loopback IP ranges to prevent SSRF when driven via MCP.
 func (e *Engine) SetTarget(targetURL string) error {
@@ -1004,8 +1084,8 @@ func (e *Engine) SetTarget(targetURL string) error {
 	e.Config.RLock()
 	allow := e.Config.AllowPrivateTargets
 	e.Config.RUnlock()
-	if !allow && netutil.IsPrivateHost(hostname) {
-		return fmt.Errorf("SSRF protection: target %q resolves to a private or loopback address", hostname)
+	if err := validateOutboundHostname(hostname, allow); err != nil {
+		return err
 	}
 
 	e.targetLock.Lock()
@@ -1175,7 +1255,7 @@ func (e *Engine) StartWordlistScanner(ctx context.Context, runID int64, path str
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
-			e.saveResumeState(path, lineNum)
+			e.saveResumeState(path, lineNum, true)
 			return
 		default:
 		}
@@ -1194,7 +1274,7 @@ func (e *Engine) StartWordlistScanner(ctx context.Context, runID int64, path str
 			time.Sleep(100 * time.Millisecond)
 			select {
 			case <-ctx.Done():
-				e.saveResumeState(path, lineNum)
+				e.saveResumeState(path, lineNum, true)
 				return
 			default:
 			}
@@ -1215,7 +1295,7 @@ func (e *Engine) StartWordlistScanner(ctx context.Context, runID int64, path str
 
 		select {
 		case <-ticker.C:
-			e.saveResumeState(path, lineNum)
+			e.saveResumeState(path, lineNum, false)
 		default:
 		}
 
@@ -1374,7 +1454,7 @@ func isAPIPath(line string) bool {
 
 // ─── Resume support ───────────────────────────────────────────────────────────
 
-func (e *Engine) saveResumeState(wordlist string, lineNum int64) {
+func (e *Engine) saveResumeState(wordlist string, lineNum int64, persistBloom bool) {
 	if e.ResumeFile == "" {
 		return
 	}
@@ -1393,9 +1473,51 @@ func (e *Engine) saveResumeState(wordlist string, lineNum int64) {
 	if err := os.WriteFile(e.ResumeFile, data, 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to write resume file: %v\n", err)
 	}
+	if persistBloom {
+		if err := e.saveBloomResumeState(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to write bloom resume state: %v\n", err)
+		}
+	}
+}
+
+func (e *Engine) bloomResumePath() string {
+	if e.ResumeFile == "" {
+		return ""
+	}
+	return e.ResumeFile + ".bloom"
+}
+
+func (e *Engine) saveBloomResumeState() error {
+	path := e.bloomResumePath()
+	if path == "" {
+		return nil
+	}
+	data, err := e.shardedFilter.marshalBinary()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func (e *Engine) loadBloomResumeState() error {
+	path := e.bloomResumePath()
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return e.shardedFilter.unmarshalBinary(data)
 }
 
 func (e *Engine) LoadResumeState(path string) (string, int64, error) {
+	if e.ResumeFile == "" {
+		e.ResumeFile = path
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", 0, err
@@ -1406,6 +1528,9 @@ func (e *Engine) LoadResumeState(path string) (string, int64, error) {
 	}
 	wordlist, _ := state["wordlist"].(string)
 	lineF, _ := state["line"].(float64)
+	if err := e.loadBloomResumeState(); err != nil {
+		return "", 0, fmt.Errorf("loading bloom resume state: %w", err)
+	}
 	return wordlist, int64(lineF), nil
 }
 
@@ -1415,11 +1540,9 @@ func (e *Engine) LoadResumeState(path string) (string, int64, error) {
 // Body comparison uses a normalised hash so that path-reflecting wildcard
 // pages (which vary in size) are still detected correctly.
 func (e *Engine) AutoCalibrate() error {
-	randPaths := make([]string, CalibrationTestCount)
 	randoms := make([]string, CalibrationTestCount)
-	for i := range randPaths {
+	for i := range randoms {
 		randoms[i] = randomString(CalibrationRandomStringLen)
-		randPaths[i] = "/" + randoms[i]
 	}
 
 	type sample struct {
@@ -1431,7 +1554,28 @@ func (e *Engine) AutoCalibrate() error {
 	var first *sample
 	consistent := true
 
-	for i, path := range randPaths {
+	for i := range randoms {
+		word := randoms[i]
+		currentBaseURL := e.BaseURL()
+		fullURL := ""
+		if strings.Contains(currentBaseURL, "{PAYLOAD}") {
+			fullURL = strings.Replace(currentBaseURL, "{PAYLOAD}", word, 1)
+		} else {
+			fullURL = strings.TrimRight(currentBaseURL, "/") + "/" + word
+		}
+
+		parsedURL, errURL := url.Parse(fullURL)
+		if errURL != nil {
+			return fmt.Errorf("invalid calibration URL: %w", errURL)
+		}
+		reqPath := parsedURL.Path
+		if parsedURL.RawQuery != "" {
+			reqPath += "?" + parsedURL.RawQuery
+		}
+		if reqPath == "" {
+			reqPath = "/"
+		}
+
 		var ua string
 		if snapshot := e.configSnap.Load(); snapshot != nil {
 			ua = snapshot.UserAgent
@@ -1442,8 +1586,8 @@ func (e *Engine) AutoCalibrate() error {
 		}
 
 		rawRequest := []byte(fmt.Sprintf(
-			"GET %s HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\nUser-Agent: %s\r\nAccept: */*\r\n\r\n",
-			path, e.Host(), ua,
+			"GET %s HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\nUser-Agent: %s\r\nAccept: */*\r\nAccept-Encoding: identity\r\n\r\n",
+			reqPath, parsedURL.Host, ua,
 		))
 
 		var proxyAddr string
@@ -1456,7 +1600,7 @@ func (e *Engine) AutoCalibrate() error {
 			return fmt.Errorf("scanner context not available")
 		}
 
-		resp, err := e.executeRequestWithRetry(sc.ctx, e.BaseURL(), rawRequest, CalibrationTimeout, proxyAddr)
+		resp, err := e.executeRequestWithRetry(sc.ctx, fullURL, rawRequest, CalibrationTimeout, proxyAddr)
 		if err != nil {
 			return fmt.Errorf("calibration request failed: %v", err)
 		}
@@ -1469,7 +1613,7 @@ func (e *Engine) AutoCalibrate() error {
 		s := &sample{
 			statusCode: resp.StatusCode,
 			bodyHash:   h,
-			bodySize:   len(resp.Body),
+			bodySize:   len(normBody),
 		}
 
 		if first == nil {
@@ -1680,7 +1824,7 @@ func (e *Engine) followRedirectChain(
 		e.Config.RLock()
 		allow := e.Config.AllowPrivateTargets
 		e.Config.RUnlock()
-		if !allow && netutil.IsPrivateHost(parsedLoc.Hostname()) {
+		if err := validateOutboundHostname(parsedLoc.Hostname(), allow); err != nil {
 			break
 		}
 
@@ -1797,14 +1941,21 @@ func buildRequest(method, reqPath, reqHost, ua, headersStr, bodyContent string) 
 
 	if bodyContent != "" {
 		return []byte(fmt.Sprintf(
-			"%s %s HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\nUser-Agent: %s\r\n%sAccept: */*\r\n\r\n%s",
+			"%s %s HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\nUser-Agent: %s\r\n%sAccept: */*\r\nAccept-Encoding: identity\r\n\r\n%s",
 			method, reqPath, reqHost, ua, headersStr, bodyContent,
 		))
 	}
 	return []byte(fmt.Sprintf(
-		"%s %s HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\nUser-Agent: %s\r\n%sAccept: */*\r\n\r\n",
+		"%s %s HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\nUser-Agent: %s\r\n%sAccept: */*\r\nAccept-Encoding: identity\r\n\r\n",
 		method, reqPath, reqHost, ua, headersStr,
 	))
+}
+
+func isSameSpiderScopeHost(baseHostname string, parsedLink *url.URL) bool {
+	if !parsedLink.IsAbs() {
+		return true
+	}
+	return strings.EqualFold(parsedLink.Hostname(), baseHostname)
 }
 
 // applyFilters returns true when the result should be kept (not filtered).
@@ -2057,6 +2208,7 @@ func (e *Engine) worker(id int) {
 			}
 
 			reqHost := parsedURL.Host
+			reqHostname := parsedURL.Hostname()
 
 			// Per-host rate limiter.
 			if err := e.getLimiter(reqHost).Wait(localCtx); err != nil {
@@ -2085,12 +2237,14 @@ func (e *Engine) worker(id int) {
 			// at substitution time to prevent header injection — applying this
 			// to the assembled string is too late, since a single \r\n inside a
 			// header value produces a syntactically valid injected header.
-			headerSafePayload := strings.NewReplacer("\r", "", "\n", "").Replace(payload)
+			headerSafePayload := sanitizeHeaderToken(payload)
 			headersStr := strings.ReplaceAll(snap.HeadersTemplate, "{PAYLOAD}", headerSafePayload)
 			if len(job.ExtraHeaders) > 0 {
 				var extraHdrBuf strings.Builder
 				for k, v := range job.ExtraHeaders {
-					extraHdrBuf.WriteString(fmt.Sprintf("%s: %s\r\n", k, v))
+					safeK := sanitizeHeaderToken(k)
+					safeV := sanitizeHeaderToken(v)
+					extraHdrBuf.WriteString(fmt.Sprintf("%s: %s\r\n", safeK, safeV))
 				}
 				headersStr += extraHdrBuf.String()
 			}
@@ -2422,10 +2576,8 @@ func (e *Engine) worker(id int) {
 						continue
 					}
 
-					if parsedLink.IsAbs() {
-						if !strings.EqualFold(parsedLink.Hostname(), reqHost) {
-							continue
-						}
+					if !isSameSpiderScopeHost(reqHostname, parsedLink) {
+						continue
 					}
 
 					newPath := parsedLink.Path

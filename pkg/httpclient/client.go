@@ -117,7 +117,11 @@ func SendRawRequestWithContext(
 		}
 	}
 	address := net.JoinHostPort(host, port)
-	poolKey := u.Scheme + "://" + address
+	insecureSuffix := ""
+	if insecure {
+		insecureSuffix = "+insecure"
+	}
+	poolKey := u.Scheme + insecureSuffix + "://" + address
 
 	// Detect HTTP vs SOCKS5 proxy.
 	proxyIsHTTP := false
@@ -625,6 +629,43 @@ func decompressBrotli(body []byte) ([]byte, error) {
 	return io.ReadAll(r)
 }
 
+func hasCompleteChunkedBody(body []byte) bool {
+	return hasCompleteChunkedBodyWithEOL(body, []byte("\r\n")) || hasCompleteChunkedBodyWithEOL(body, []byte("\n"))
+}
+
+func hasCompleteChunkedBodyWithEOL(body, eol []byte) bool {
+	zeroPrefix := append([]byte("0"), eol...)
+	zeroAfterLine := append(append([]byte{}, eol...), zeroPrefix...)
+	endOfTrailers := append(append([]byte{}, eol...), eol...)
+
+	zeroChunkStarts := make([]int, 0, 2)
+	if bytes.HasPrefix(body, zeroPrefix) {
+		zeroChunkStarts = append(zeroChunkStarts, 0)
+	}
+	searchFrom := 0
+	for {
+		idx := bytes.Index(body[searchFrom:], zeroAfterLine)
+		if idx == -1 {
+			break
+		}
+		zeroChunkStarts = append(zeroChunkStarts, searchFrom+idx+len(eol))
+		searchFrom += idx + 1
+	}
+
+	for _, start := range zeroChunkStarts {
+		rest := body[start+len(zeroPrefix):]
+		// No trailers: `0<eol><eol>`
+		if bytes.HasPrefix(rest, eol) {
+			return true
+		}
+		// With trailers: `0<eol>...<eol><eol>`
+		if bytes.Contains(rest, endOfTrailers) {
+			return true
+		}
+	}
+	return false
+}
+
 func parseRawResponse(conn net.Conn) (*RawResponse, error) {
 	var buf bytes.Buffer
 	chunk := make([]byte, 4096)
@@ -739,7 +780,7 @@ func parseRawResponse(conn net.Conn) (*RawResponse, error) {
 			bodyLen := buf.Len() - (headerEndIdx + sepLen)
 			if isChunked {
 				bodySoFar := rawBytes[headerEndIdx+sepLen:]
-				if bytes.Contains(bodySoFar, []byte("\r\n0\r\n")) || bytes.Contains(bodySoFar, []byte("\n0\n")) {
+				if hasCompleteChunkedBody(bodySoFar) {
 					break
 				}
 			} else if contentLength != -1 {
@@ -769,7 +810,7 @@ func parseRawResponse(conn net.Conn) (*RawResponse, error) {
 	if headerEndIdx != -1 {
 		if isChunked {
 			bodySoFar := rawBytes[headerEndIdx+sepLen:]
-			if bytes.Contains(bodySoFar, []byte("\r\n0\r\n\r\n")) || bytes.Contains(bodySoFar, []byte("\n0\n\n")) {
+			if hasCompleteChunkedBody(bodySoFar) {
 				bodyComplete = true
 			}
 		} else if contentLength != -1 {

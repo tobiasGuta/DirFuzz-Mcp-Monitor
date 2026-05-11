@@ -92,6 +92,7 @@ export SCAN_INTERVAL=1h
 ```bash
 export DIRFUZZ_WORDLIST_DIR=/srv/dirfuzz/wordlists
 export DIRFUZZ_SCOPE_DIR=/srv/dirfuzz/scopes
+export DIRFUZZ_OUTPUT_DIR=/srv/dirfuzz/results
 ./dirfuzz-mcp
 ```
 

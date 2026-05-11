@@ -1,8 +1,14 @@
 package engine
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
+	"time"
+
+	lua "github.com/yuin/gopher-lua"
 )
 
 // TestPluginMatcher verifies Lua matcher plugin functionality
@@ -157,5 +163,105 @@ end
 	_, err = NewPluginMutator(tmpfile.Name())
 	if err == nil {
 		t.Error("Expected error for missing mutate function")
+	}
+}
+
+func TestHTTPLibBlocksPrivateTargetWhenNotAllowed(t *testing.T) {
+	L := lua.NewState()
+	defer L.Close()
+	registerHTTPLib(L, 2*time.Second, "", false, false)
+
+	req := L.NewTable()
+	L.SetField(req, "url", lua.LString("http://127.0.0.1:65535/"))
+	if err := L.CallByParam(lua.P{Fn: L.GetGlobal("http_send"), NRet: 1, Protect: true}, req); err != nil {
+		t.Fatalf("http_send call failed: %v", err)
+	}
+	defer L.Pop(1)
+
+	result, ok := L.Get(-1).(*lua.LTable)
+	if !ok {
+		t.Fatalf("expected result table, got %s", L.Get(-1).Type())
+	}
+	errMsg := L.GetField(result, "error").String()
+	if !strings.Contains(errMsg, "SSRF protection:") {
+		t.Fatalf("expected SSRF protection error, got %q", errMsg)
+	}
+}
+
+func TestHTTPLibAllowsPrivateTargetWhenEnabled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	L := lua.NewState()
+	defer L.Close()
+	registerHTTPLib(L, 2*time.Second, "", false, true)
+
+	req := L.NewTable()
+	L.SetField(req, "url", lua.LString(srv.URL))
+	if err := L.CallByParam(lua.P{Fn: L.GetGlobal("http_send"), NRet: 1, Protect: true}, req); err != nil {
+		t.Fatalf("http_send call failed: %v", err)
+	}
+	defer L.Pop(1)
+
+	result, ok := L.Get(-1).(*lua.LTable)
+	if !ok {
+		t.Fatalf("expected result table, got %s", L.Get(-1).Type())
+	}
+	if errField := L.GetField(result, "error"); errField != lua.LNil {
+		t.Fatalf("expected no error, got %q", errField.String())
+	}
+	if code := L.GetField(result, "status_code").String(); code != "200" {
+		t.Fatalf("expected status_code=200, got %s", code)
+	}
+}
+
+func TestPluginMatcherFallsBackWhenPoolIsBusy(t *testing.T) {
+	script := `
+function match(response)
+    return response.status_code == 200
+end
+`
+	tmpfile, err := os.CreateTemp("", "test_matcher_busy_pool_*.lua")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpfile.Name())
+	if _, err := tmpfile.Write([]byte(script)); err != nil {
+		t.Fatal(err)
+	}
+	tmpfile.Close()
+
+	matcher, err := NewPluginMatcher(tmpfile.Name())
+	if err != nil {
+		t.Fatalf("Failed to create plugin: %v", err)
+	}
+	defer matcher.Close()
+
+	// Drain all pooled VMs to simulate saturation.
+	borrowed := make([]*lua.LState, 0, cap(matcher.pool))
+	for i := 0; i < cap(matcher.pool); i++ {
+		borrowed = append(borrowed, <-matcher.pool)
+	}
+	defer func() {
+		for _, L := range borrowed {
+			matcher.pool <- L
+		}
+	}()
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- matcher.Match(200, 10, 1, 1, "ok", "text/plain")
+	}()
+
+	select {
+	case matched := <-done:
+		if !matched {
+			t.Fatal("expected fallback matcher execution to return true")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("matcher blocked while VM pool was saturated")
 	}
 }

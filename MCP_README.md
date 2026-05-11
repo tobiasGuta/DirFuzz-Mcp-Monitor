@@ -31,6 +31,9 @@ Required environment variables (the server refuses to start without them):
   server only serves filenames from this directory (no path traversal allowed).
 - `DIRFUZZ_SCOPE_DIR` — directory that contains H1-Scope-Watcher JSON files. A
   target is validated against the live scope files before any scan is allowed.
+- `DIRFUZZ_OUTPUT_DIR` — directory that contains scan output files (for example
+  JSONL files consumed by analysis tools). File reads are constrained to this
+  directory.
 
 Optional environment variables:
 
@@ -44,6 +47,7 @@ Example:
 ```bash
 export DIRFUZZ_WORDLIST_DIR=/absolute/path/to/wordlists
 export DIRFUZZ_SCOPE_DIR=/absolute/path/to/scope-jsons
+export DIRFUZZ_OUTPUT_DIR=/absolute/path/to/scan-results
 export DIRFUZZ_MAX_THREADS=15
 export DIRFUZZ_MAX_RESULTS=200
 ./dirfuzz-mcp
@@ -58,6 +62,7 @@ export DIRFUZZ_MAX_RESULTS=200
   "env": {
     "DIRFUZZ_WORDLIST_DIR": "D:\\projects\\DirFuzzMcp\\wordlists",
     "DIRFUZZ_SCOPE_DIR": "D:\\projects\\H1-Scope-Watcher\\snapshots",
+    "DIRFUZZ_OUTPUT_DIR": "D:\\projects\\DirFuzzMcp\\results",
     "DIRFUZZ_MAX_THREADS": "15",
     "DIRFUZZ_MAX_RESULTS": "200"
   }
@@ -118,6 +123,9 @@ helper that lists `.txt` files in the server's wordlist directory.
   only populates `request` and `response` JSON fields when locally run with
   `--save-raw`, which is deliberately excluded from the MCP tool to avoid
   leaking credentials or session tokens.
+- Analysis file reads (`results_file`) are restricted to `DIRFUZZ_OUTPUT_DIR`
+  after resolving symlinks, preventing arbitrary file access outside the
+  configured output directory.
 
 ---
 

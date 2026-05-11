@@ -57,10 +57,7 @@ func NewPluginMatcher(scriptPath string) (*PluginMatcher, error) {
 	return &PluginMatcher{pool: pool, file: scriptPath}, nil
 }
 
-func (pm *PluginMatcher) Match(statusCode, size, words, lines int, body, contentType string) bool {
-	L := <-pm.pool
-	defer func() { pm.pool <- L }()
-
+func (pm *PluginMatcher) evalMatch(L *lua.LState, statusCode, size, words, lines int, body, contentType string) bool {
 	matchFunc := L.GetGlobal("match")
 	if matchFunc == lua.LNil {
 		return false
@@ -79,6 +76,23 @@ func (pm *PluginMatcher) Match(statusCode, size, words, lines int, body, content
 	res := L.Get(-1)
 	L.Pop(1)
 	return lua.LVAsBool(res)
+}
+
+func (pm *PluginMatcher) Match(statusCode, size, words, lines int, body, contentType string) bool {
+	select {
+	case L := <-pm.pool:
+		defer func() { pm.pool <- L }()
+		return pm.evalMatch(L, statusCode, size, words, lines, body, contentType)
+	default:
+		// Pool saturated: run the matcher in a short-lived VM so workers
+		// don't block behind the fixed-size pool.
+		L := lua.NewState()
+		defer L.Close()
+		if err := L.DoFile(pm.file); err != nil {
+			return false
+		}
+		return pm.evalMatch(L, statusCode, size, words, lines, body, contentType)
+	}
 }
 
 func (pm *PluginMatcher) Close() {
@@ -157,7 +171,10 @@ func (pm *PluginMutator) Close() {
 }
 
 // registerHTTPLib registers http.send global function in Lua VM
-func registerHTTPLib(L *lua.LState, timeout time.Duration, proxyAddr string, insecure bool) {
+func registerHTTPLib(L *lua.LState, reqCtx context.Context, timeout time.Duration, proxyAddr string, insecure bool, allowPrivate bool) {
+	if reqCtx == nil {
+		reqCtx = context.Background()
+	}
 	L.SetGlobal("http_send", L.NewFunction(func(L *lua.LState) int {
 		req := L.CheckTable(1)
 		method := "GET"
@@ -172,6 +189,18 @@ func registerHTTPLib(L *lua.LState, timeout time.Duration, proxyAddr string, ins
 		if err != nil {
 			result := L.NewTable()
 			L.SetField(result, "error", lua.LString("invalid url: " + err.Error()))
+			L.Push(result)
+			return 1
+		}
+		if u.Scheme == "" || u.Host == "" {
+			result := L.NewTable()
+			L.SetField(result, "error", lua.LString("invalid url: missing scheme or host"))
+			L.Push(result)
+			return 1
+		}
+		if err := validateOutboundHostname(u.Hostname(), allowPrivate); err != nil {
+			result := L.NewTable()
+			L.SetField(result, "error", lua.LString(err.Error()))
 			L.Push(result)
 			return 1
 		}
@@ -199,7 +228,7 @@ func registerHTTPLib(L *lua.LState, timeout time.Duration, proxyAddr string, ins
 		rawReq.WriteString(body)
 
 		start := time.Now()
-		resp, err := httpclient.SendRawRequestWithContext(context.Background(), targetURL, rawReq.Bytes(), timeout, proxyAddr, insecure)
+		resp, err := httpclient.SendRawRequestWithContext(reqCtx, targetURL, rawReq.Bytes(), timeout, proxyAddr, insecure)
 		if err != nil {
 			result := L.NewTable()
 			L.SetField(result, "error", lua.LString(err.Error()))
@@ -218,11 +247,11 @@ func registerHTTPLib(L *lua.LState, timeout time.Duration, proxyAddr string, ins
 }
 
 // RunActiveTemplate loads and executes a Lua PoC script with http.send available
-func RunActiveTemplate(luaPath string, timeout time.Duration, proxyAddr string, insecure bool, targetURL string) error {
+func RunActiveTemplate(ctx context.Context, luaPath string, timeout time.Duration, proxyAddr string, insecure bool, targetURL string, allowPrivate bool) error {
 	L := lua.NewState()
 	defer L.Close()
 
-	registerHTTPLib(L, timeout, proxyAddr, insecure)
+	registerHTTPLib(L, ctx, timeout, proxyAddr, insecure, allowPrivate)
 
 	if err := L.DoFile(luaPath); err != nil {
 		return fmt.Errorf("failed to load script: %w", err)

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 
 	"dirfuzz/pkg/engine"
 )
@@ -18,7 +20,10 @@ func main() {
 			fmt.Fprintf(os.Stderr, "[!] Warning: --proxy (file) is ignored by Active PoC. Use --proxy-out for a single proxy.\n")
 		}
 
-		err := engine.RunActiveTemplate(cfg.ActivePoC, cfg.Timeout, proxy, cfg.Insecure, cfg.Target)
+		reqCtx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer cancel()
+
+		err := engine.RunActiveTemplate(reqCtx, cfg.ActivePoC, cfg.Timeout, proxy, cfg.Insecure, cfg.Target, cfg.AllowPrivate)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: active poc failed: %v\n", err)
 			os.Exit(1)
@@ -43,4 +48,3 @@ func main() {
 		os.Exit(1)
 	}
 }
-

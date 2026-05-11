@@ -50,7 +50,8 @@ func NewConnPool(maxIdlePerHost int) *ConnPool {
 // DefaultPool is the shared pool used by SendRawRequestWithContext.
 var DefaultPool = NewConnPool(MaxIdleConnsPerHost)
 
-// Get retrieves an idle connection for the given key (scheme://host:port).
+// Get retrieves an idle connection for the given key
+// (scheme[+insecure]://host:port).
 // Returns nil when no idle connection is available.
 func (p *ConnPool) Get(key string) net.Conn {
 	p.mu.Lock()
