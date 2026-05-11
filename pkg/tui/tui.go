@@ -1282,12 +1282,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if vpHeight < 5 {
 			vpHeight = 5
 		}
-		vpWidth := m.width - 2
+		vpWidth := m.width
 		if vpWidth < 20 {
 			vpWidth = 20
 		}
 
-		paneWidth := (vpWidth / 2) - 4
+		paneOuterWidth := (vpWidth - 2) / 2
+		paneInnerWidth := paneOuterWidth - 4 // Account for 2 border cells + 2 padding cells
 
 		if !m.ready {
 			m.viewport = viewport.New(vpWidth, vpHeight)
@@ -1296,8 +1297,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cmdViewport.SetContent(strings.Join(m.cmdOutput, "\n"))
 
 			// Detail viewports
-			m.reqViewport = viewport.New(paneWidth, vpHeight-2)
-			m.resViewport = viewport.New(paneWidth, vpHeight-2)
+			m.reqViewport = viewport.New(paneInnerWidth, vpHeight-2)
+			m.resViewport = viewport.New(paneInnerWidth, vpHeight-2)
 
 			m.ready = true
 		} else {
@@ -1306,21 +1307,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cmdViewport.Width = vpWidth
 			m.cmdViewport.Height = 12
 
-			m.reqViewport.Width = paneWidth
+			m.reqViewport.Width = paneInnerWidth
 			m.reqViewport.Height = vpHeight - 2
-			m.resViewport.Width = paneWidth
+			m.resViewport.Width = paneInnerWidth
 			m.resViewport.Height = vpHeight - 2
 		}
-		m.repeaterInput.SetWidth(paneWidth)
-		m.repeaterInput.SetHeight(vpHeight - 6)
-		m.repeaterRespVp.Width = paneWidth
-		m.repeaterRespVp.Height = vpHeight - 6
+		m.repeaterInput.SetWidth(paneInnerWidth)
+		m.repeaterInput.SetHeight(vpHeight - 4)
+		m.repeaterRespVp.Width = paneInnerWidth
+		m.repeaterRespVp.Height = vpHeight - 4
 		m.cmdViewport.Width = vpWidth
 		m.cmdViewport.Height = 12
 		m.textInput.Width = vpWidth - 7
-		if m.textInput.Width < 10 {
-			m.textInput.Width = 10
-		}
 		m.footerBarStyle = lipgloss.NewStyle().Foreground(DraculaCyan).Bold(true).Width(m.width).PaddingLeft(2)
 
 	case TickMsg:
@@ -2152,22 +2150,28 @@ func (m *Model) View() string {
 	if m.state == StateList {
 		mainContent = m.viewport.View()
 	} else if m.state == StateDetail {
+		headerHeight := 6
+		footerHeight := 2
+		vpHeight := m.height - headerHeight - footerHeight
+		paneOuterWidth := (m.width - 2) / 2
+
 		reqHeader := renderPaneHeader(requestPaneHeaderStyle, m.reqViewport.Width, "Request")
 		resHeader := renderPaneHeader(responsePaneHeaderStyle, m.resViewport.Width, "Response")
 
-		reqPane := paneStyle.Width(m.reqViewport.Width + 2).Height(m.reqViewport.Height + 2).Render(
+		reqPane := paneStyle.Width(paneOuterWidth - 2).Height(vpHeight).Render(
 			lipgloss.JoinVertical(lipgloss.Top,
 				reqHeader,
 				m.reqViewport.View(),
 			),
 		)
-		resPane := paneStyle.Width(m.resViewport.Width + 2).Height(m.resViewport.Height + 2).Render(
+		resPane := paneStyle.Width(paneOuterWidth - 2).Height(vpHeight).Render(
 			lipgloss.JoinVertical(lipgloss.Top,
 				resHeader,
 				m.resViewport.View(),
 			),
 		)
-		mainContent = lipgloss.JoinHorizontal(lipgloss.Top, reqPane, resPane)
+		spacer := strings.Repeat(" ", m.width-(paneOuterWidth*2))
+		mainContent = lipgloss.JoinHorizontal(lipgloss.Top, reqPane, spacer, resPane)
 	} else if m.state == StateCommand {
 		resultsHeight := m.height - lipgloss.Height(header) - 16
 		if resultsHeight < 3 {
@@ -2217,6 +2221,11 @@ func (m *Model) View() string {
 
 		mainContent = lipgloss.JoinVertical(lipgloss.Top, frozenVp, cmdPanel)
 	} else if m.state == StateRepeater {
+		headerHeight := 6
+		footerHeight := 2
+		vpHeight := m.height - headerHeight - footerHeight
+		paneOuterWidth := (m.width - 2) / 2
+
 		reqHeader := renderPaneHeader(requestPaneHeaderStyle, m.repeaterInput.Width(), "✏  Repeater")
 		var resHeader string
 		if m.repeaterSending {
@@ -2261,21 +2270,22 @@ func (m *Model) View() string {
 		separatorReq := separatorStyle.Render(strings.Repeat("─", m.repeaterInput.Width()))
 		separatorRes := separatorStyle.Render(strings.Repeat("─", m.repeaterRespVp.Width))
 
-		reqPane := leftStyle.Width(m.repeaterInput.Width() + 2).Height(m.repeaterInput.Height() + 2 + 2).Render(
+		reqPane := leftStyle.Width(paneOuterWidth - 2).Height(vpHeight).Render(
 			lipgloss.JoinVertical(lipgloss.Top,
 				reqHeader,
 				separatorReq,
 				m.repeaterInput.View(),
 			),
 		)
-		resPane := rightStyle.Width(m.repeaterRespVp.Width + 2).Height(m.repeaterRespVp.Height + 2 + 2).Render(
+		resPane := rightStyle.Width(paneOuterWidth - 2).Height(vpHeight).Render(
 			lipgloss.JoinVertical(lipgloss.Top,
 				resHeader,
 				separatorRes,
 				m.repeaterRespVp.View(),
 			),
 		)
-		mainContent = lipgloss.JoinHorizontal(lipgloss.Top, reqPane, resPane)
+		spacer := strings.Repeat(" ", m.width-(paneOuterWidth*2))
+		mainContent = lipgloss.JoinHorizontal(lipgloss.Top, reqPane, spacer, resPane)
 	}
 
 	// Footer
