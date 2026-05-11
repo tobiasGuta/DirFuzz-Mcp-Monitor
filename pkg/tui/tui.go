@@ -2111,33 +2111,34 @@ func (m *Model) View() string {
 	}, " ") + droppedStr
 	rpsSparkline := highlightStyle.Render(renderSparkline(m.rpsHistory, 10))
 
-	headerLines := []string{
+	leftWidth := m.width / 2
+	rightWidth := m.width - leftWidth
+	leftStyle := lipgloss.NewStyle().Width(leftWidth).Align(lipgloss.Left)
+	rightStyle := lipgloss.NewStyle().Width(rightWidth).Align(lipgloss.Right).PaddingRight(1)
+
+	leftContent := lipgloss.JoinVertical(lipgloss.Top,
 		fmt.Sprintf("%s %s", titleStyle.Render(" 🦇 DirFuzz "), highlightStyle.Render(m.Engine.BaseURL())),
-	}
-	progressPrefix := separatorStyle.Render("· ")
-	headerLines = append(headerLines,
 		fmt.Sprintf("  %s", statsLine),
-		fmt.Sprintf("  %sProgress: %s %s  |  RPS: %s %s  |  Queue: %s",
-			progressPrefix,
-			bar,
-			highlightStyle.Render(fmt.Sprintf("%.1f%%", progressPct)),
-			pinkStyle.Render(fmt.Sprintf("%d", rps)),
-			rpsSparkline,
-			mutedStyle.Render(fmt.Sprintf("%d", queueSize)),
-		),
-		fmt.Sprintf("  Workers: %s  Delay: %s  Elapsed: %s",
-			highlightStyle.Render(fmt.Sprintf("%d", workers)),
-			mutedStyle.Render(delay.String()),
-			mutedStyle.Render(elapsed.String()),
-		),
-		fmt.Sprintf("  %s", mutedStyle.Render(fmt.Sprintf("(%d/%d)", processed, total))),
+		fmt.Sprintf("  %sProgress: %s %s", separatorStyle.Render("· "), bar, highlightStyle.Render(fmt.Sprintf("%.1f%%", progressPct))),
 	)
+
+	rightContent := lipgloss.JoinVertical(lipgloss.Top,
+		fmt.Sprintf("Workers: %s  Delay: %s  Elapsed: %s", highlightStyle.Render(fmt.Sprintf("%d", workers)), mutedStyle.Render(delay.String()), mutedStyle.Render(elapsed.String())),
+		fmt.Sprintf("RPS: %s %s  |  Queue: %s", pinkStyle.Render(fmt.Sprintf("%d", rps)), rpsSparkline, mutedStyle.Render(fmt.Sprintf("%d", queueSize))),
+		mutedStyle.Render(fmt.Sprintf("(%d/%d)", processed, total)),
+	)
+
+	splitHeader := lipgloss.JoinHorizontal(lipgloss.Top,
+		leftStyle.Render(leftContent),
+		rightStyle.Render(rightContent),
+	)
+
+	headerBlock := splitHeader + "\n"
 	if pauseBanner != "" {
-		headerLines = append(headerLines, pauseBanner)
+		headerBlock += pauseBanner + "\n"
 	}
-	header := strings.Join(headerLines, "\n") + "\n"
 	sep := separatorStyle.Render(strings.Repeat("─", m.width))
-	header = header + sep
+	header := headerBlock + sep
 
 	var mainContent string
 
