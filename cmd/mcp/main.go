@@ -291,7 +291,7 @@ func handleScan(ctx context.Context, req mcp.CallToolRequest, cfg mcpConfig) (*m
 		Timeout:     secondsDuration(req.GetFloat("timeout_seconds", 0), engine.DefaultHTTPTimeout),
 		MaxDuration: secondsDuration(req.GetFloat("max_duration_seconds", 0), 60*time.Second),
 	}
-	results, err := runScan(ctx, target, wordlistPath, cfg.maxThreads, cfg.maxResults, matchCodes, extensions, opts)
+	results, err := runScan(ctx, target, resolvedWordlist, cfg.maxThreads, cfg.maxResults, matchCodes, extensions, opts)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("scan failed: %v", err)), nil
 	}
@@ -854,7 +854,14 @@ func handleExpand(ctx context.Context, req mcp.CallToolRequest, cfg mcpConfig) (
 		Size       int    `json:"length"`
 	}
 
-	f, err := os.Open(hitsJSONL)
+	resolvedHits, err := resolvePathInAllowedDir(cfg.outputDir, hitsJSONL)
+	if err != nil {
+		if errors.Is(err, errPathEscapesAllowedDir) {
+			return mcp.NewToolResultText("error: hits_jsonl path escapes DIRFUZZ_OUTPUT_DIR"), nil
+		}
+		return mcp.NewToolResultText("error: hits_jsonl not found in DIRFUZZ_OUTPUT_DIR"), nil
+	}
+	f, err := os.Open(resolvedHits)
 	if err != nil {
 		return mcp.NewToolResultText(fmt.Sprintf("error: %v", err)), nil
 	}
