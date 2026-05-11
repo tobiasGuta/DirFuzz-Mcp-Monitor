@@ -146,42 +146,6 @@ var (
 			Bold(true).
 			Padding(0, 1)
 
-	badge2xxStyle = lipgloss.NewStyle().
-			Bold(true).
-			Padding(0, 1).
-			Foreground(DraculaBg).
-			Background(DraculaGreen)
-
-	badge403Style = lipgloss.NewStyle().
-			Bold(true).
-			Padding(0, 1).
-			Foreground(DraculaBg).
-			Background(DraculaOrange)
-
-	badge404Style = lipgloss.NewStyle().
-			Bold(true).
-			Padding(0, 1).
-			Foreground(DraculaFg).
-			Background(DraculaComment)
-
-	badge429Style = lipgloss.NewStyle().
-			Bold(true).
-			Padding(0, 1).
-			Foreground(DraculaBg).
-			Background(DraculaYellow)
-
-	badge5xxStyle = lipgloss.NewStyle().
-			Bold(true).
-			Padding(0, 1).
-			Foreground(DraculaFg).
-			Background(DraculaRed)
-
-	badgeErrStyle = lipgloss.NewStyle().
-			Bold(true).
-			Padding(0, 1).
-			Foreground(DraculaBg).
-			Background(DraculaPink)
-
 	status2xxStyle        = lipgloss.NewStyle().Foreground(DraculaGreen)
 	status3xxStyle        = lipgloss.NewStyle().Foreground(DraculaCyan)
 	status403Style        = lipgloss.NewStyle().Foreground(DraculaOrange)
@@ -211,8 +175,28 @@ var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 const maxLogEntries = 10000
 const maxCmdLines = 500
 
-func renderStatusBadge(style lipgloss.Style, icon, label string, count int64) string {
-	return style.Render(fmt.Sprintf("%s %s: %d", icon, label, count))
+func renderStatusBadge(activeColor lipgloss.Color, icon, label string, count int64) string {
+	// Dim the badge if the count is zero to reduce visual noise
+	displayColor := activeColor
+	if count == 0 {
+		displayColor = DraculaComment
+	}
+
+	leftStyle := lipgloss.NewStyle().
+		Foreground(displayColor).
+		Background(lipgloss.Color("#44475a")). // Dracula selection line / dark grey
+		Padding(0, 1)
+
+	rightStyle := lipgloss.NewStyle().
+		Foreground(DraculaBg).
+		Background(displayColor).
+		Padding(0, 1).
+		Bold(true)
+
+	left := leftStyle.Render(fmt.Sprintf("%s %s", icon, label))
+	right := rightStyle.Render(fmt.Sprintf("%d", count))
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 }
 
 func renderSeverityMarker(hit *engine.Result) string {
@@ -1292,7 +1276,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		headerHeight := 6 // 5 lines of content + 1 separator
+		headerHeight := 6
 		footerHeight := 2 // 1 line of text + 1 separator
 		vpHeight := m.height - headerHeight - footerHeight
 		if vpHeight < 5 {
@@ -1729,7 +1713,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cleanReq := strings.ReplaceAll(selectedHit.Request, "\r\n", "\n")
 					m.repeaterInput.SetValue(cleanReq)
 					m.repeaterRespVp.SetContent("")
-					
+
 					// Initialize history with this baseline request
 					m.repeaterHistory = []RepeaterHistoryEntry{{
 						Request:    cleanReq,
@@ -1738,7 +1722,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						Duration:   0,
 					}}
 					m.repeaterHistoryIdx = 0
-					
+
 					m.state = StateRepeater
 					m.repeaterFocusReq = true
 					m.repeaterInput.Focus()
@@ -2065,18 +2049,10 @@ func (m *Model) View() string {
 		progressPct = float64(processed) / float64(total) * 100
 	}
 
-	// Build progress bar
-	barWidth := 30
-	if m.width > 60 {
-		barWidth = m.width / 4
-	}
-
 	if math.Abs(progressPct-m.lastProgressPct) > 1.0 {
 		m.lastProgressPct = progressPct
 		m.cachedFillStyle = lipgloss.NewStyle().Foreground(progressFillColor(progressPct))
 	}
-
-	bar := renderProgressBar(barWidth, progressPct, m.cachedFillStyle)
 
 	pauseBanner := ""
 	if paused {
@@ -2102,43 +2078,74 @@ func (m *Model) View() string {
 	}
 
 	statsLine := strings.Join([]string{
-		renderStatusBadge(badge2xxStyle, "✓", "2xx", count200),
-		renderStatusBadge(badge403Style, "⛔", "403", count403),
-		renderStatusBadge(badge404Style, "❓", "404", count404),
-		renderStatusBadge(badge429Style, "🐢", "429", count429),
-		renderStatusBadge(badge5xxStyle, "💥", "5xx", count500),
-		renderStatusBadge(badgeErrStyle, "⚠", "Err", connErr),
+		renderStatusBadge(DraculaGreen, "✓", "2xx", count200),
+		renderStatusBadge(DraculaOrange, "⛔", "403", count403),
+		renderStatusBadge(DraculaPurple, "❓", "404", count404),
+		renderStatusBadge(DraculaYellow, "🐢", "429", count429),
+		renderStatusBadge(DraculaRed, "💥", "5xx", count500),
+		renderStatusBadge(DraculaPink, "⚠", "Err", connErr),
 	}, " ") + droppedStr
 	rpsSparkline := highlightStyle.Render(renderSparkline(m.rpsHistory, 10))
 
-	leftWidth := m.width / 2
-	rightWidth := m.width - leftWidth
-	leftStyle := lipgloss.NewStyle().Width(leftWidth).Align(lipgloss.Left)
-	rightStyle := lipgloss.NewStyle().Width(rightWidth).Align(lipgloss.Right).PaddingRight(1)
+	// 1. Re-calculate stable widths
+	// We use the full width with only a tiny 1-char buffer to maximize space
+	availableWidth := m.width - 2
+	leftWidth := availableWidth / 2
+	rightWidth := availableWidth - leftWidth
 
-	leftContent := lipgloss.JoinVertical(lipgloss.Top,
+	// 2. Build Left Column
+	leftContent := lipgloss.JoinVertical(lipgloss.Left,
 		fmt.Sprintf("%s %s", titleStyle.Render(" 🦇 DirFuzz "), highlightStyle.Render(m.Engine.BaseURL())),
-		fmt.Sprintf("  %s", statsLine),
-		fmt.Sprintf("  %sProgress: %s %s", separatorStyle.Render("· "), bar, highlightStyle.Render(fmt.Sprintf("%.1f%%", progressPct))),
+		statsLine,
 	)
 
-	rightContent := lipgloss.JoinVertical(lipgloss.Top,
-		fmt.Sprintf("Workers: %s  Delay: %s  Elapsed: %s", highlightStyle.Render(fmt.Sprintf("%d", workers)), mutedStyle.Render(delay.String()), mutedStyle.Render(elapsed.String())),
-		fmt.Sprintf("RPS: %s %s  |  Queue: %s", pinkStyle.Render(fmt.Sprintf("%d", rps)), rpsSparkline, mutedStyle.Render(fmt.Sprintf("%d", queueSize))),
+	// 3. Build Right Column (Pushed to the far right)
+	// Now only 2 lines tall, to perfectly match the left side
+	rightContent := lipgloss.JoinVertical(lipgloss.Right,
+		fmt.Sprintf("Workers: %s  Delay: %s  Elapsed: %s",
+			highlightStyle.Render(fmt.Sprintf("%d", workers)),
+			mutedStyle.Render(delay.String()),
+			mutedStyle.Render(elapsed.String())),
+		fmt.Sprintf("RPS: %s %s  |  Queue: %s",
+			pinkStyle.Render(fmt.Sprintf("%d", rps)),
+			rpsSparkline,
+			mutedStyle.Render(fmt.Sprintf("%d", queueSize))),
+	)
+
+	// 4. Join them with explicit widths to force the split
+	topData := lipgloss.JoinHorizontal(lipgloss.Top,
+		lipgloss.NewStyle().Width(leftWidth).Render(leftContent),
+		lipgloss.NewStyle().Width(rightWidth).Align(lipgloss.Right).Render(rightContent),
+	)
+
+	// 5. Fix Progress Bar alignment
+	// 'Progress: ' is 10 chars, ' 100.0%' is 7 chars. '(xx/yy)' adds ~15 chars.
+	barWidth := availableWidth - 32
+	if barWidth < 10 {
+		barWidth = 10
+	}
+	bar := renderProgressBar(barWidth, progressPct, m.cachedFillStyle)
+
+	progressRow := fmt.Sprintf("Progress: %s %s %s",
+		bar,
+		highlightStyle.Render(fmt.Sprintf("%5.1f%%", progressPct)),
 		mutedStyle.Render(fmt.Sprintf("(%d/%d)", processed, total)),
 	)
 
-	splitHeader := lipgloss.JoinHorizontal(lipgloss.Top,
-		leftStyle.Render(leftContent),
-		rightStyle.Render(rightContent),
-	)
-
-	headerBlock := splitHeader + "\n"
+	// 6. Final Header Assembly with clean padding
+	// This stacks the split top data and the full-width progress bar
+	headerContent := lipgloss.NewStyle().
+		Padding(0, 1, 0, 1). // Top, Right, Bottom, Left padding - heavily reduced
+		Render(lipgloss.JoinVertical(lipgloss.Left,
+			topData,
+			progressRow,
+		))
 	if pauseBanner != "" {
-		headerBlock += pauseBanner + "\n"
+		headerContent = lipgloss.JoinVertical(lipgloss.Top, headerContent, pauseBanner)
 	}
+
 	sep := separatorStyle.Render(strings.Repeat("─", m.width))
-	header := headerBlock + sep
+	header := lipgloss.JoinVertical(lipgloss.Top, headerContent, sep)
 
 	var mainContent string
 
