@@ -32,6 +32,8 @@ import (
 	"golang.org/x/time/rate"
 )
 
+var linkRegex = regexp.MustCompile(`(?i)(?:href|src|action)=['"]([^'"]+)['"]`)
+
 // ─── Config types ─────────────────────────────────────────────────────────────
 
 // SizeRange represents an inclusive min–max byte-size range used for filtering.
@@ -81,6 +83,7 @@ type Config struct {
 	MaxRetries          int
 	SaveRaw             bool // NEW: include raw request/response bytes in Result
 	WAFEvasion          bool
+	Spidering           bool // NEW: dynamic HTML/JS scraping
 	WebhookURL          string
 	WebhookOnNew        bool
 	WebhookOnDrift      bool
@@ -120,6 +123,7 @@ type configSnapshot struct {
 	MaxDepth            int
 	WordlistPath        string
 	WAFEvasion          bool
+	Spidering           bool
 	// HeadersTemplate is the pre-built header block (with any {PAYLOAD}
 	// placeholders intact) that workers can quickly clone and substitute
 	// the payload into without reconstructing the header map each job.
@@ -668,6 +672,7 @@ func (e *Engine) buildAndStoreConfigSnapshot() {
 		MaxDepth:            e.Config.MaxDepth,
 		WordlistPath:        e.Config.WordlistPath,
 		WAFEvasion:          e.Config.WAFEvasion,
+		Spidering:           e.Config.Spidering,
 	}
 	// Honor User-Agent header override: worker formerly extracted UA from
 	// headers if present and removed it from the header map.
@@ -1938,6 +1943,7 @@ func (e *Engine) worker(id int) {
 						MaxDepth:            e.Config.MaxDepth,
 						WordlistPath:        e.Config.WordlistPath,
 						WAFEvasion:          e.Config.WAFEvasion,
+						Spidering:           e.Config.Spidering,
 					}
 					ua := local.UserAgent
 					for k, v := range e.Config.Headers {
@@ -1991,6 +1997,7 @@ func (e *Engine) worker(id int) {
 			maxDepth := snap.MaxDepth
 			wordlistPath := snap.WordlistPath
 			wafEvasion := snap.WAFEvasion
+			spidering := snap.Spidering
 
 			shouldExit := id >= snap.MaxWorkers
 
@@ -2397,6 +2404,43 @@ func (e *Engine) worker(id int) {
 				continue
 			}
 
+			// Spidering / dynamic link extraction
+			if spidering && len(resp.Body) > 0 && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				matches := linkRegex.FindAllStringSubmatch(string(resp.Body), -1)
+				for _, match := range matches {
+					if len(match) < 2 {
+						continue
+					}
+					link := strings.TrimSpace(match[1])
+					lowerLink := strings.ToLower(link)
+					if strings.HasPrefix(lowerLink, "javascript:") || strings.HasPrefix(lowerLink, "mailto:") || strings.HasPrefix(lowerLink, "data:") || strings.HasPrefix(lowerLink, "#") {
+						continue
+					}
+
+					parsedLink, errL := url.Parse(link)
+					if errL != nil {
+						continue
+					}
+
+					if parsedLink.IsAbs() {
+						if !strings.EqualFold(parsedLink.Hostname(), reqHost) {
+							continue
+						}
+					}
+
+					newPath := parsedLink.Path
+					if parsedLink.RawQuery != "" {
+						newPath += "?" + parsedLink.RawQuery
+					}
+					if newPath == "" {
+						newPath = "/"
+					}
+
+					// Submit will run Bloom filter check
+					e.Submit(Job{Path: newPath, Depth: depth, Method: "GET", RunID: job.RunID})
+				}
+			}
+
 			select {
 			case e.Results <- result:
 			case <-localCtx.Done():
@@ -2462,7 +2506,7 @@ func (e *Engine) worker(id int) {
 							go func(runID int64, basePath string, nextDepth int, wlPath string) {
 								defer e.scannerWg.Done()
 								defer func() { <-e.recursiveSem }()
-								
+
 								snap := e.configSnap.Load()
 								if snap == nil {
 									return

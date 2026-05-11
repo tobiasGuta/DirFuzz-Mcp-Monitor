@@ -616,6 +616,19 @@ func (m *Model) initCommands() {
 			}
 			return sb.String()
 		}},
+		{Name: "spider", Description: "Toggle dynamic HTML/JS scraping", Args: "", Handler: func(m *Model, args string) string {
+			m.Engine.Config.RLock()
+			current := m.Engine.Config.Spidering
+			m.Engine.Config.RUnlock()
+			m.Engine.Config.Lock()
+			m.Engine.Config.Spidering = !current
+			m.Engine.Config.Unlock()
+			m.Engine.RefreshConfigSnapshot()
+			if !current {
+				return statusStyle.Render("[*] Spidering enabled (dynamic link extraction)")
+			}
+			return orangeStyle.Render("[*] Spidering disabled")
+		}},
 		{Name: "pause", Description: "Pause/resume scanning", Args: "", Handler: func(m *Model, args string) string {
 			m.Engine.Config.RLock()
 			p := m.Engine.Config.IsPaused
@@ -853,6 +866,7 @@ func (m *Model) initCommands() {
 			autoFilterThreshold := m.Engine.Config.AutoFilterThreshold
 			maxRetries := m.Engine.Config.MaxRetries
 			saveRaw := m.Engine.Config.SaveRaw
+			spidering := m.Engine.Config.Spidering
 			m.Engine.Config.RUnlock()
 
 			sort.Ints(filters)
@@ -927,6 +941,7 @@ func (m *Model) initCommands() {
 			writeLine(fmt.Sprintf("SmartAPI: %v", smartAPI))
 			writeLine(fmt.Sprintf("AutoFilterThreshold: %d", autoFilterThreshold))
 			writeLine(fmt.Sprintf("Retries: %d", maxRetries))
+			writeLine(fmt.Sprintf("Spidering: %v", spidering))
 			if matchRegex != "" {
 				writeLine(fmt.Sprintf("MatchRegex: %s", matchRegex))
 			}
@@ -1057,6 +1072,9 @@ func (m *Model) initCommands() {
 			}
 			if autoFilterThreshold != engine.DefaultAutoFilterThreshold {
 				writeLine(fmt.Sprintf("  -af %d", autoFilterThreshold))
+			}
+			if spidering {
+				writeLine("  --spider")
 			}
 			if maxRetries > 0 {
 				writeLine(fmt.Sprintf("  -retry %d", maxRetries))
