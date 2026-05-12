@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -1757,6 +1759,33 @@ func wrapText(text string, width int) string {
 	return wrap.String(text, width)
 }
 
+// isBinaryString returns true when the string contains non-UTF8 bytes or a
+// high proportion of non-printable characters—likely a binary response.
+func isBinaryString(s string) bool {
+	if s == "" {
+		return false
+	}
+	if !utf8.ValidString(s) {
+		return true
+	}
+	total := 0
+	printable := 0
+	for _, r := range s {
+		total++
+		if r == '\n' || r == '\r' || r == '\t' {
+			printable++
+			continue
+		}
+		if unicode.IsPrint(r) {
+			printable++
+		}
+	}
+	if total == 0 {
+		return false
+	}
+	return float64(printable)/float64(total) < 0.90
+}
+
 func (m *Model) updateDetailView() {
 	var selectedHit *engine.Result
 	if m.selectedIndex >= 0 && m.selectedIndex < len(m.logLineHits) {
@@ -1769,11 +1798,21 @@ func (m *Model) updateDetailView() {
 		reqContent = "No raw request available. Use --save-raw to include raw request/response; set follow redirects or disable body filters if using HEAD."
 		if selectedHit.Request != "" {
 			reqContent = selectedHit.Request
+			if isBinaryString(reqContent) {
+				reqContent = fmt.Sprintf("[Binary request: %s bytes]\nUse --save-raw to persist to disk.", len(selectedHit.Request))
+			}
 		}
 
 		resContent = "No raw response available. Use --save-raw to include raw request/response."
 		if selectedHit.Response != "" {
 			resContent = selectedHit.Response
+			if isBinaryString(resContent) {
+				ctype := selectedHit.ContentType
+				if ctype == "" {
+					ctype = "binary"
+				}
+				resContent = fmt.Sprintf("[Binary response: %s, %d bytes]\nUse --save-raw to persist to disk.", ctype, len(selectedHit.Response))
+			}
 		}
 	} else {
 		placeholder := mutedStyle.Render("\n\n  (Select a valid hit to view request/response details)")

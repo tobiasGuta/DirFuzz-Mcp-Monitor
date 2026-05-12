@@ -80,6 +80,13 @@ The included `docker-compose.yml` can build and run the monitor image and mount 
 ./dirfuzz -u https://api.example.com -w wordlists/common.txt --eagle previous_scan.jsonl
 ```
 
+### Flag notes that trip people up
+
+- `-e` takes one comma-separated list of extensions. Use `-e php,html,js`, not multiple `-e` flags.
+- `-o` writes surfaced results to a file. It does not save every request the scanner sends.
+- `--save-raw` stores the raw request/response inside each saved hit when `-o` is enabled.
+- `--no-tui` is the cleanest mode when you want a plain JSONL file for piping or later analysis.
+
 Here is a strategic workflow for how to use DirFuzz effectively in a real-world engagement:
 
 * * * * *
@@ -224,7 +231,11 @@ Upon launching the binary (without `--no-tui`), users navigate fuzzing results c
 
 ## Output Exports
 
-By default, DirFuzz employs `jsonl` representing resilient, parseable representations of scanning artifacts. You can toggle across tabular `csv` outputs globally, clean `url` extractions (ideal for stdout piping), or generate complex vulnerability summaries over standalone `--report-format html|markdown`.
+When `-o` is set, DirFuzz writes the results it surfaces as hits. The default format is `jsonl`, which is the most useful option for baselining, diffing, and later analysis. You can switch to `csv` for spreadsheet workflows or `url` for a clean list of paths suitable for piping. If you want a file that is easy to inspect line-by-line, pair `-o` with `--no-tui`.
+
+`--save-raw` adds the raw HTTP request/response bytes to each saved hit. It does not create a full request log by itself, and it only affects results that are actually written.
+
+For standalone summaries, use `--report` with `--report-format html|markdown`.
 
 * * * * *
 
