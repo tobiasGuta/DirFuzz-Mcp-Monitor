@@ -90,6 +90,112 @@ export SCAN_INTERVAL=1h
 
 (Replace the binary path with your preferred run method, e.g. `go run ./cmd/monitor` or a packaged container.)
 
+## Running in Docker
+
+The monitor is designed to run in containerized environments. You can use the provided `Dockerfile` to build the monitor image or run it as part of the broader DirFuzz container.
+
+### Build the Docker image
+
+From the repository root:
+
+```bash
+docker build -t dirfuzz-monitor:latest -f Dockerfile --target monitor .
+```
+
+### Run the monitor container
+
+```bash
+docker run \
+  -e TARGET="https://example.com" \
+  -e WORDLIST="/data/wordlists/common.txt" \
+  -e STATE_FILE="/data/state.jsonl" \
+  -e SCAN_INTERVAL="1h" \
+  -v /path/to/wordlist:/data/wordlists:ro \
+  -v /path/to/state:/data:rw \
+  dirfuzz-monitor:latest
+```
+
+### Docker Compose example
+
+For easy orchestration with other services:
+
+```yaml
+version: '3.8'
+services:
+  monitor:
+    image: dirfuzz-monitor:latest
+    container_name: dirfuzz-monitor
+    environment:
+      TARGET: "https://example.com"
+      WORDLIST: "/data/wordlists/common.txt"
+      STATE_FILE: "/data/state.jsonl"
+      SCAN_INTERVAL: "1h"
+      SCAN_JITTER: "10m"
+      LOG_LEVEL: "info"
+      # optional: DISCORD_WEBHOOK: "https://discordapp.com/api/webhooks/..."
+    volumes:
+      - ./wordlists:/data/wordlists:ro
+      - monitor-state:/data
+    restart: unless-stopped
+
+volumes:
+  monitor-state:
+```
+
+Run with:
+
+```bash
+docker-compose up -d
+```
+
+### Kubernetes CronJob example
+
+For scheduled monitoring in Kubernetes:
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dirfuzz-monitor
+spec:
+  schedule: "0 * * * *"  # Every hour
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: monitor
+            image: dirfuzz-monitor:latest
+            env:
+            - name: TARGET
+              value: "https://example.com"
+            - name: WORDLIST
+              value: "/data/wordlists/common.txt"
+            - name: STATE_FILE
+              value: "/data/state.jsonl"
+            - name: SCAN_INTERVAL
+              value: "30m"
+            - name: DISCORD_WEBHOOK
+              valueFrom:
+                secretKeyRef:
+                  name: dirfuzz-secrets
+                  key: discord-webhook
+            volumeMounts:
+            - name: wordlists
+              mountPath: /data/wordlists
+              readOnly: true
+            - name: state
+              mountPath: /data
+          volumes:
+          - name: wordlists
+            configMap:
+              name: dirfuzz-wordlists
+          - name: state
+            persistentVolumeClaim:
+              claimName: monitor-state-pvc
+          restartPolicy: OnFailure
+```
+
 ## Troubleshooting & notes
 
 - If you rely on raw request/response storage for reliable content hashing, make sure the engine is configured to retain raw data; otherwise `body_hash` may be empty.
