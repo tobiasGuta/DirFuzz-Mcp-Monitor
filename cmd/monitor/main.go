@@ -12,9 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -41,30 +39,30 @@ const (
 	webhookInitialBackoff = 5 * time.Second
 	webhookMaxBackoff     = time.Minute
 
-	minScanInterval       = 5 * time.Minute
+	minScanInterval = 5 * time.Minute
 	// sizeChangeTolerance is the minimum byte delta to consider a body size
 	// change interesting. Tuneable via code for operator preference.
-	sizeChangeTolerance   = 100
+	sizeChangeTolerance = 100
 )
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 type monitorConfig struct {
-	Target             string
-	Wordlist           string
-	DiscordWebhook     string
-	StateFile          string
-	ScanInterval       time.Duration
-	Jitter             time.Duration
-	Workers            int
-	MatchCodes         []int
-	Methods            []string
-	Headers            map[string]string
+	Target              string
+	Wordlist            string
+	DiscordWebhook      string
+	StateFile           string
+	ScanInterval        time.Duration
+	Jitter              time.Duration
+	Workers             int
+	MatchCodes          []int
+	Methods             []string
+	Headers             map[string]string
 	Extensions          []string
 	AllowPrivateTargets bool
-	SaveRaw            bool
-	NormalizeRegex     string
-	LogLevel           slog.Level
+	SaveRaw             bool
+	NormalizeRegex      string
+	LogLevel            slog.Level
 }
 
 func main() {
@@ -79,6 +77,9 @@ func main() {
 	if err := ensureStateDir(cfg.StateFile); err != nil {
 		logger.Error("failed to prepare state directory", "state_file", cfg.StateFile, "error", err)
 		os.Exit(1)
+	}
+	if cfg.DiscordWebhook == "" {
+		logger.Info("DISCORD_WEBHOOK not set; findings will be logged but not sent to Discord")
 	}
 
 	logger.Info("monitor started",
@@ -329,11 +330,11 @@ func runScanCycle(
 	}
 
 	if shutdownRequested() {
-		if err := writeStateWithRetry(cfg.StateFile, results, logger, normalizeRe); err != nil {
+		if err := writeStateWithRetry(cfg.StateFile, results, logger, normalizeRe, curHashes); err != nil {
 			return 0, err
 		}
 	} else {
-		if err := writeStateAtomic(cfg.StateFile, results, normalizeRe); err != nil {
+		if err := writeStateAtomic(cfg.StateFile, results, normalizeRe, curHashes); err != nil {
 			return 0, fmt.Errorf("failed to persist state: %w", err)
 		}
 	}
@@ -351,7 +352,7 @@ func runScanCycle(
 	interesting := findInteresting(results, previous, curHashes)
 	logFindings(logger, interesting)
 
-	if len(interesting) > 0 {
+	if len(interesting) > 0 && cfg.DiscordWebhook != "" {
 		if err := postDiscordWebhook(context.Background(), logger, cfg.DiscordWebhook, cfg.Target, cfg.ScanInterval, interesting); err != nil {
 			logger.Error("failed to send discord webhook", "error", err)
 		}
@@ -365,10 +366,10 @@ func runScanCycle(
 type findingType string
 
 const (
-	findingStatusChange    findingType = "status_change"
-	findingNewEndpoint     findingType = "new_endpoint"
-	findingBodySizeChange  findingType = "body_size_change"
-	findingContentChange   findingType = "content_change"
+	findingStatusChange   findingType = "status_change"
+	findingNewEndpoint    findingType = "new_endpoint"
+	findingBodySizeChange findingType = "body_size_change"
+	findingContentChange  findingType = "content_change"
 )
 
 type finding struct {
@@ -677,9 +678,9 @@ func postDiscordWebhook(ctx context.Context, logger *slog.Logger, webhook, targe
 
 // ─── State persistence ───────────────────────────────────────────────────────
 
-func writeStateWithRetry(path string, results []engine.Result, logger *slog.Logger, normalizeRe *regexp.Regexp) error {
+func writeStateWithRetry(path string, results []engine.Result, logger *slog.Logger, normalizeRe *regexp.Regexp, precomputedHashes map[string]string) error {
 	for attempt := 1; attempt <= maxWriteRetries; attempt++ {
-		err := writeStateAtomic(path, results, normalizeRe)
+		err := writeStateAtomic(path, results, normalizeRe, precomputedHashes)
 		if err == nil {
 			return nil
 		}
@@ -689,7 +690,7 @@ func writeStateWithRetry(path string, results []engine.Result, logger *slog.Logg
 	return fmt.Errorf("state write failed after %d attempts", maxWriteRetries)
 }
 
-func writeStateAtomic(path string, results []engine.Result, normalizeRe *regexp.Regexp) error {
+func writeStateAtomic(path string, results []engine.Result, normalizeRe *regexp.Regexp, precomputedHashes map[string]string) error {
 	tmpPath := path + ".tmp"
 
 	file, err := os.Create(tmpPath)
@@ -701,22 +702,7 @@ func writeStateAtomic(path string, results []engine.Result, normalizeRe *regexp.
 	encoder := json.NewEncoder(bufw)
 
 	for _, res := range results {
-		var bodyHash string
-		if res.Response != "" {
-			raw := []byte(res.Response)
-			idx := bytes.Index(raw, []byte("\r\n\r\n"))
-			var body []byte
-			if idx >= 0 {
-				body = raw[idx+4:]
-			} else {
-				body = raw
-			}
-			if normalizeRe != nil {
-				body = normalizeRe.ReplaceAll(body, []byte(""))
-			}
-			sum := sha256.Sum256(body)
-			bodyHash = hex.EncodeToString(sum[:])
-		}
+		bodyHash := precomputedHashes[res.Path]
 		row := struct {
 			engine.Result
 			BodyHash string `json:"body_hash,omitempty"`
@@ -778,9 +764,6 @@ func loadConfigFromEnv() (monitorConfig, error) {
 	}
 	if cfg.Wordlist == "" {
 		return monitorConfig{}, errors.New("WORDLIST is required")
-	}
-	if cfg.DiscordWebhook == "" {
-		return monitorConfig{}, errors.New("DISCORD_WEBHOOK is required")
 	}
 
 	intervalRaw := strings.TrimSpace(os.Getenv("SCAN_INTERVAL"))
@@ -1007,56 +990,6 @@ func fileExists(path string) (bool, error) {
 }
 
 // ─── Target checks ───────────────────────────────────────────────────────────
-
-func isPrivateTarget(rawTarget string) bool {
-	u, err := url.Parse(rawTarget)
-	if err != nil {
-		return false
-	}
-
-	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
-	if host == "" {
-		return false
-	}
-	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
-		return true
-	}
-
-	ip := net.ParseIP(host)
-	if ip != nil {
-		return isPrivateIP(ip)
-	}
-
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return false
-	}
-	for _, addr := range ips {
-		if isPrivateIP(addr) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func isPrivateIP(ip net.IP) bool {
-	privateCIDRs := []string{
-		"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
-		"169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10",
-	}
-
-	for _, cidr := range privateCIDRs {
-		_, network, err := net.ParseCIDR(cidr)
-		if err != nil {
-			continue
-		}
-		if network.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
 
 // ─── Logging ─────────────────────────────────────────────────────────────────
 

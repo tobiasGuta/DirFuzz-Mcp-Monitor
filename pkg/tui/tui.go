@@ -2300,7 +2300,7 @@ func (m *Model) View() string {
 		} else if m.state == StateRepeater {
 			footer = m.footerBarStyle.Render("Tab: focus | Ctrl+R: send | Ctrl+P/N: history | Esc/q: back")
 		} else {
-			footer = m.footerBarStyle.Render("Press ':' for commands | 'p' to pause | '?' for help | 'q' to quit | 'r' for repeater")
+			footer = m.footerBarStyle.Render("Press ':' for commands | 'p' to pause | 'q' to quit | 'r' for repeater")
 		}
 	}
 	footerSep := separatorStyle.Render(strings.Repeat("─", m.width))

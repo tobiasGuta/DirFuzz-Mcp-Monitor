@@ -4,50 +4,40 @@ DirFuzz is a memory-efficient, high-performance web security testing and directo
 
 This repository contains:
 - The core high-performance fuzzing **engine** (`pkg/engine`), which can be embedded in other Go applications.
-- A powerful **CLI runner** (`cmd/dirfuzz`) with an optional TUI for interactive fuzzing.
+- A powerful **CLI runner** (`cmd/dirfuzz`) with a rich TUI for interactive fuzzing.
 - A **continuous monitoring** runner (`cmd/monitor`) for scheduled, automated security checks.
-- An **MCP (Model Context Protocol) server** (`cmd/mcp`) for secure integration with AI assistants.
+- An **MCP (Model Context Protocol) Server** (`cmd/mcp`) for secure integration with AI assistants.
 
 * * * * *
 
-## Recent Updates
+## Key Capabilities & Features
 
--   **Security Hardening:**
-    -   **SSRF & DNS Rebinding:** Patched critical Time-of-Check to Time-of-Use (TOCTOU) vulnerabilities in target validation.
-    -   **Path Traversal:** Secured the MCP server against wordlist path traversal attacks.
-    -   **Origin Validation:** Locked down WebSocket and CORS origins to prevent cross-origin hijacking.
--   **State & Concurrency:**
-    -   Rewrote the JSONL persistence layer (`pkg/store`) to prevent data loss and panics during high-speed I/O.
-    -   Reduced Bloom filter lock contention for faster concurrent scanning.
--   **Protocol & Performance Fixes:**
-    -   Solved data races in regex filtering.
-    -   Improved HTTP/1.0 keep-alive discarding.
-    -   Added robust support for Brotli compression.
-    -   Mitigated CRLF injection risks in raw request building.
--   **Active PoC Bridge:** Lua scripts can now perform active HTTP requests using the `http_send()` function, enabling more dynamic and powerful proof-of-concept testing.
+DirFuzz transcends a simple directory enumerator, acting as a complete protocol fuzzing suite tightly integrated with both AI environments and manual bug bounty workflows.
 
-* * * * *
-
-## Highlights
-
--   **Advanced Engine:** High-performance raw HTTP/1.1 client with connection pooling, TLS cipher randomization, and SOCKS5/HTTP proxy support.
--   **Memory Efficiency:** Deduplication using a Bloom filter, per-host rate limiting, and safe concurrent state persistence.
--   **Rich Filtering:** Status codes, content-type, response sizes, regex body matching, word/line counts, and response time ranges.
--   **Eagle Mode & Resume:** Differential scans against previous JSONL baselines to easily spot new or modified endpoints.
--   **Lua Plugin System:** Parallel VM pool for writing custom matchers and mutators.
--   **Safe AI Tooling:** MCP server that exposes a `dirfuzz_scan` tool to AI assistants, with targets strictly validated against live H1-style JSON scope files.
+-   **High-Performance HTTP Engine:** Built on a custom raw HTTP/1.1 and **HTTP/2** client with state-of-the-art connection pooling. It features **chunked transfer encoding** support, TLS cipher randomization, persistent connection recycling, and **SOCKS5/HTTP Proxy Rotation**.
+-   **WAF Fingerprinting & Evasion:** Automatically fingerprints responses against major Web Application Firewalls (AWS WAF, Cloudflare, Akamai, Barracuda, F5). 
+-   **Suite Bridge & Interactive TUI:** An interactive Terminal UI featuring real-time logging, response insights, and a **Suite Bridge**. With a single keystroke, you can send any discovered endpoint straight to **Burp Suite Repeater (`r`)** or **Intruder (`i`)**.
+-   **Lua Plugin Ecosystem:** Write custom fuzzing logic using the built-in parallel Lua VM pool:
+    -   **Transformers:** Manipulate requests raw on-the-fly (`transform_plugin.go`).
+    -   **Matchers & Mutators:** Define custom payload generation and match signatures.
+    -   **Active PoC:** Enables dynamic, multi-stage exploitation (e.g. `Spring4Shell`) directly from Lua using the exposed `http_send()` function. 
+-   **Smart Target & Recursion Tracking:** Configurable `MaxDepth` recursion, intelligent wildcard calibration (`--calibrate`) to baseline soft-404s, and `SmartAPI` mode to heavily restrict method-fuzzing permutations uniquely to fuzzy path patterns (`/api/`, `/v1/`).
+-   **Advanced Filtering & Deduplication:** Filter by HTTP codes, response sizes, payload content boundaries, regex body matches, word/line counts, or strict response time thresholds. Employs a low-contention Bloom filter for instant memory-efficient deduplication, alongside an **AutoFilter threshold** (`-af`) to silently suppress recurring spam sizes.
+-   **WebSocket Frame Tracking:** Configurable WebSocket frame extraction and logging constraint (`--max-ws-frames`) extending scope across WS endpoints.
+-   **Eagle Mode & State Monitoring:** Conduct differential scans (`--eagle`) against previous baseline JSONL persistence files. A `cmd/monitor` binary orchestrates continuous execution hooks and **Discord webhook alerting** upon discovering new endpoints.
+-   **Safe AI Tooling (MCP):** A completely isolated Model Context Protocol (MCP) server that exposes fuzzing APIs `dirfuzz_scan` & `dirfuzz_list_wordlists` to Claude or Copilot—fortified by strict SSRF prevention, H1-Scope JSON validator, and path-traversal resistant wordlist selection.
 
 * * * * *
 
-## Provided Binaries / Runners
+## Provided Binaries & Runners
 
--   `cmd/dirfuzz`: The CLI runner with an optional TUI. Exposes the full engine surface (methods, filters, proxies, plugins, resume, eagle mode).
--   `cmd/monitor`: The continuous monitor runner. Executes scheduled scans, persists state as JSONL, compares against previous states, and sends Discord webhooks for new endpoints.
--   `cmd/mcp`: The MCP server for AI assistants. Validates targets against scope JSON files and constrains wordlist selection securely.
+-   `cmd/dirfuzz`: The CLI runner encompassing the complete platform including the TUI, proxy forwarding (`--proxy-out`), reports, plugins, resume capabilities, and eagle mode.
+-   `cmd/monitor`: A continuous monitor executing background loops over environment-driven configs to deliver JSONL differential alerting securely over Webhooks.
+-   `cmd/mcp`: The Model Context Protocol abstraction layer exposing secure capabilities to underlying LLMs.
 
 * * * * *
 
-## Build
+## Build & Deploy
 
 Requirements: Go 1.22+
 
@@ -60,22 +50,34 @@ go build -o dirfuzz-mcp ./cmd/mcp
 
 **Docker / Compose:**
 The included `docker-compose.yml` can build and run the monitor image and mount your wordlists and state files.
-1.  Copy `.env.example` to `.env` and fill in your variables.
+1.  Copy `.env.example` to `.env` and configure your deployment targets.
 2.  Ensure your wordlists are located in the `./wordlists` directory.
-3.  Run `docker compose up --build -d` to start the monitor in the background.
+3.  Run `docker compose up --build -d` to start the monitor.
 
 * * * * *
 
 ## Example Usage
 
-**CLI (TUI Fuzzing):**
+**CLI Fuzzing (With TUI and Proxying):**
 ```bash
-./dirfuzz -u https://api.example.com -w wordlists/common.txt -t 50 -r -depth 3
+# Fuzz deeply, send through local Burp proxy out-of-the-box
+./dirfuzz -u https://api.example.com -w wordlists/common.txt -t 50 -r -depth 3 --proxy-out http://127.0.0.1:8080
 ```
 
-**CLI (Headless, save to JSONL):**
+**CLI Headless Fuzzing (Save to JSONL):**
 ```bash
-./dirfuzz --no-tui -u https://example.com -w wordlists/common.txt -o results.jsonl
+# Great for continuous baselining or piping into analysis workflows
+./dirfuzz --no-tui -u https://example.com -w wordlists/common.txt -o results.jsonl -v
+```
+
+**Lua Active PoC Bridge:**
+```bash
+./dirfuzz -u https://target.com -active-poc plugins/spring4shell.lua
+```
+
+**Eagle Mode (Differential Scan against Baseline):**
+```bash
+./dirfuzz -u https://api.example.com -w wordlists/common.txt --eagle previous_scan.jsonl
 ```
 
 **Continuous Monitor (Env-driven):**
@@ -88,62 +90,43 @@ export SCAN_INTERVAL=1h
 ./dirfuzz-monitor
 ```
 
-**MCP Server (AI Integration):**
-```bash
-export DIRFUZZ_WORDLIST_DIR=/srv/dirfuzz/wordlists
-export DIRFUZZ_SCOPE_DIR=/srv/dirfuzz/scopes
-export DIRFUZZ_OUTPUT_DIR=/srv/dirfuzz/results
-./dirfuzz-mcp
-```
-
 * * * * *
 
 ## Engine & Embedding
 
-The scanning engine is implemented in `pkg/engine`. It is designed to be embedded by other programs and exposes a `Config` struct that controls runtime behavior. Notable capabilities:
--   Multi-method fuzzing and `SmartAPI` mode for intelligent API path handling.
--   Recursive scanning with `MaxDepth`, bounded concurrency, and wildcard detection.
--   Proxy rotation (HTTP & SOCKS5) and an outbound `proxy-out` mode for forwarding hits.
--   Resume support and `LoadPreviousScan` for differential comparisons.
--   Extensible `PluginMatcher` and `PluginMutator` pools via Lua.
+The scanning engine is implemented in `pkg/engine` and fully accommodates dependency embedding into other Go solutions.
+
+It offers a robust `Config` struct that natively drives logic across:
+- Connection pooling & HTTP/2 transports.
+- Outbound forwarding via `proxy-out`.
+- Recursive depth scanning and bounding concurrency.
+- Built-in persistence for checkpoint resumption (`LoadPreviousScan`).
 
 * * * * *
 
-## Lua Plugins
+## Advanced Integrations
 
-Place Lua scripts in the `plugins/` directory or point the CLI at a plugin file using `--plugin-match` / `--plugin-mutate`.
--   Matchers expose a `match(tbl)` function receiving `status_code`, `size`, `words`, `lines`, `body`, and `content_type` returning a boolean.
--   Mutators expose a `mutate(original)` function returning an array of payload variants.
-    Plugins are executed inside a pool of Lua VMs, allowing parallel execution without serializing workers.
+### Lua Plugin Handlers
+Place Lua scripts inside the `plugins/` directory or inject statically via CLI arguments (`--plugin-match` / `--plugin-mutate` / `--active-poc`).
+A pool of Lua VMs will execute handlers in parallel with high-performance CGO boundaries isolating custom behaviors securely from core concurrency blocks.
 
-* * * * *
-
-## Safety & Scope Validation
-
-When running as an MCP tool, the server strictly validates targets against loopback/private IP restrictions (SSRF prevention) and a live directory of H1-style scope JSON files (`pkg/scope`). Out-of-scope scans are automatically denied.
+### TUI Suite Bridge Integrations
+Upon launching the binary (without `--no-tui`), users navigate fuzzing results concurrently. The selection pane intercepts native commands:
+- **`r`** pipes current endpoint and session attributes directly to the Repeater.
+- **`i`** intercepts and injects parameters straight into Intruder deployments.
 
 * * * * *
 
-## Output Formats & Eagle Mode
+## Output Exports
 
--   `jsonl`: One JSON result per line. Excellent for resumes and diffs.
--   `csv`: Standard tabular export.
--   `url`: Prints only matching URLs for easy piping into other terminal tools.
-
-Eagle Mode loads a previous JSONL state file and highlights changed or newly discovered endpoints when comparing scan results.
+By default, DirFuzz employs `jsonl` representing resilient, parseable representations of scanning artifacts. You can toggle across tabular `csv` outputs globally, clean `url` extractions (ideal for stdout piping), or generate complex vulnerability summaries over standalone `--report-format html|markdown`.
 
 * * * * *
-
-## Example:
-
-https://github.com/user-attachments/assets/e1c5b488-870a-40f4-ac21-d8cbe4349752
 
 ## Contributing
-
-Contributions are welcome. Please open issues for bugs or feature requests before sending PRs. The project follows small, focused changes—avoid big refactors without prior discussion.
+Contributions and community bug reports are openly accepted. The project is managed with clear separation across plugins, engines, UI, and external integrations. Please log issues and open discussion threads before large refactors.
 
 * * * * *
 
 ## License
-
 MIT
