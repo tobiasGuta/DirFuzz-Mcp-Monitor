@@ -123,6 +123,10 @@ By default, DirFuzz employs `jsonl` representing resilient, parseable representa
 
 * * * * *
 
+## DirFuzz
+
+https://github.com/user-attachments/assets/ec012ec6-6230-423c-8564-9df753e4c5a7
+
 ## Contributing
 Contributions and community bug reports are openly accepted. The project is managed with clear separation across plugins, engines, UI, and external integrations. Please log issues and open discussion threads before large refactors.
 
