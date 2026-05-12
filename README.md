@@ -80,6 +80,111 @@ The included `docker-compose.yml` can build and run the monitor image and mount 
 ./dirfuzz -u https://api.example.com -w wordlists/common.txt --eagle previous_scan.jsonl
 ```
 
+Here is a strategic workflow for how to use DirFuzz effectively in a real-world engagement:
+
+* * * * *
+
+1\. The Recon Phase: "Deep & Quiet"
+-----------------------------------
+
+Before going loud, you want to map the hidden structure without being blocked. Use `--calibrate` to handle those annoying custom "soft-404" pages and `-af` (Auto-filter) to ignore junk.
+
+Bash
+
+```
+# Calibrate against wildcards, use recursion, and output to JSONL for your logs
+dirfuzz -u https://api.target.com -w common.txt --calibrate -r -depth 2 -o initial_recon.jsonl
+
+```
+
+-   **Why:** `--calibrate` baselines the server's behavior. If everything returns a 200 with 1243 bytes, DirFuzz will stop bothering you with those results.
+
+2\. The Manual Bridge: "The Burp Workflow"
+------------------------------------------
+
+This is the "Killer Feature." Instead of copy-pasting URLs into Burp Suite, let DirFuzz act as your scout while you sit in the Repeater.
+
+Bash
+
+```
+dirfuzz -u https://target.com -w big.txt -t 60 --proxy-out http://127.0.0.1:8080
+
+```
+
+-   **Tactical Tip:** Launch with the **TUI enabled**. When you see a suspicious `403 Forbidden` or a `500 Internal Server Error`, hit **`r`**. It instantly fires that exact request into **Burp Repeater**, allowing you to test for bypasses (like `X-Forwarded-For` or path normalization) immediately.
+
+3\. Targeting APIs: "Method Swapping"
+-------------------------------------
+
+Many hunters miss vulnerabilities because they only use `GET`. The `--smart-api` flag is high-signal for API bug hunting.
+
+Bash
+
+```
+dirfuzz -u https://target.com/api/v2/ -w api_endpoints.txt --smart-api -m GET,POST,PUT,DELETE,PATCH
+
+```
+
+-   **Why:** `--smart-api` is intelligent. It won't try `DELETE` on a standard image directory, but it *will* cycle methods on paths that look like REST endpoints, potentially uncovering unauthorized data modification.
+
+4\. The "Eagle Mode" for Continuous Income
+------------------------------------------
+
+If you are on a long-term private program, "New" is your best friend. New endpoints often lack the hardened security of the old ones.
+
+Bash
+
+```
+# Day 1: Establish baseline
+dirfuzz -u https://target.com -w discovery.txt -o baseline.jsonl
+
+# Day 7: Run Eagle Mode
+dirfuzz -u https://target.com -w discovery.txt --eagle baseline.jsonl
+
+```
+
+-   **Why:** `--eagle` filters out everything you've already seen. It highlights **only what changed**. If a developer pushes a `/dev/` or `/backup/` folder on a Friday night, Eagle mode surfaces it instantly.
+
+5\. Hunting for Hidden Treasures: "The Mutator"
+-----------------------------------------------
+
+Backups and swap files are gold mines for source code disclosure.
+
+Bash
+
+```
+dirfuzz -u https://target.com -w files.txt -e php,asp,aspx --mutate
+
+```
+
+-   **Why:** The `--mutate` flag will automatically check for `config.php.bak`, `index.php~`, or `.DS_Store`. These often contain hardcoded credentials or logic that the main app hides.
+
+6\. Advanced: The "Active PoC" (Lua)
+------------------------------------
+
+When a new CVE drops (like a Log4Shell or Spring4Shell), you can use the Lua engine to test for it at scale without needing a separate tool.
+
+Bash
+
+```
+dirfuzz -u https://target.com -w subdomains.txt -active-poc plugins/cve-2024-xxxx.lua
+
+```
+
+-   **Why:** This allows for multi-stage fuzzing. Your Lua script can see a `403`, try a specific bypass header, and if it gets a `200`, log it as a critical hit.
+
+* * * * *
+
+### Pro-Tip: The "Bug Hunter's Stealth" Combo
+
+If you suspect a WAF (Cloudflare/Akamai) is tracking you:
+
+1.  **`-delay 200ms`**: Slow down to stay under the radar.
+
+2.  **`--proxy proxy_list.txt`**: Rotate your IP address through a list of SOCKS5 proxies to avoid IP-based rate limiting.
+
+3.  **`-ua "Custom User Agent"`**: Mimic a common browser or a known crawler.
+
 **Continuous Monitor (Env-driven):**
 ```bash
 export TARGET=https://target.example.com
