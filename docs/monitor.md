@@ -115,6 +115,27 @@ docker run \
   dirfuzz-monitor:latest
 ```
 
+### Using `.env` file with Docker Compose
+
+Create a `.env` file in the same directory as `docker-compose.yml`:
+
+```bash
+# .env
+TARGET_1=https://example.com
+TARGET_2=https://api.example.com
+TARGET_3=https://admin.example.com
+WORDLIST=/wordlists/Discovery/Web-Content/common.txt
+STATE_FILE=/data/state.jsonl
+SCAN_INTERVAL=1h
+SCAN_JITTER=10m
+WORKERS=50
+MATCH_CODES=200,301,302,403
+DISCORD_WEBHOOK=https://discordapp.com/api/webhooks/YOUR_WEBHOOK_ID
+LOG_LEVEL=info
+```
+
+Docker Compose will automatically load these variables; no need to pass them on the command line.
+
 ### Docker Compose example
 
 For easy orchestration with other services:
