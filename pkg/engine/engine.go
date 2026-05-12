@@ -152,6 +152,8 @@ type Result struct {
 	Words            int               `json:"words,omitempty"`
 	Lines            int               `json:"lines,omitempty"`
 	ContentType      string            `json:"content_type,omitempty"`
+	Labels           []string          `json:"labels,omitempty"`
+	Confidence       string            `json:"confidence,omitempty"`
 	Duration         time.Duration     `json:"duration,omitempty"`
 	Redirect         string            `json:"redirect,omitempty"`
 	Headers          map[string]string `json:"headers,omitempty"`
@@ -1213,10 +1215,7 @@ func (e *Engine) StartWordlistScanner(ctx context.Context, runID int64, path str
 			IsAutoFilter: true,
 			Headers:      map[string]string{"Msg": "Error opening wordlist: " + err.Error()},
 		}
-		select {
-		case e.Results <- res:
-		case <-ctx.Done():
-		}
+		e.handleResultWithContext(ctx, res)
 		return
 	}
 	defer file.Close()
@@ -1335,10 +1334,7 @@ func (e *Engine) StartWordlistScanner(ctx context.Context, runID int64, path str
 			IsAutoFilter: true,
 			Headers:      map[string]string{"Msg": "Wordlist scan error: " + err.Error()},
 		}
-		select {
-		case e.Results <- res:
-		case <-ctx.Done():
-		}
+		e.handleResultWithContext(ctx, res)
 	}
 }
 
@@ -1773,10 +1769,7 @@ func (e *Engine) autoThrottleCheck() {
 			IsAutoFilter: true,
 			Headers:      map[string]string{"Msg": fmt.Sprintf("429 spike! Workers: %d→%d, Delay: %s", currentWorkers, newWorkers, newDelay)},
 		}
-		select {
-		case e.Results <- res:
-		default:
-		}
+		e.handleResultNonBlocking(res)
 	}
 }
 
@@ -2040,6 +2033,77 @@ func (e *Engine) applyFilters(
 func (e *Engine) cleanupJob(shouldExit bool) bool {
 	e.activeJobs.Done()
 	return shouldExit
+}
+
+// invokeOnFindingHook calls the match plugin's optional on_finding(result) hook.
+// Returns (dropped, labels, confidence). Dropped indicates the plugin requested
+// the result not be emitted to the results channel.
+func (e *Engine) invokeOnFindingHook(ctx context.Context, res *Result) (bool, []string, string) {
+	if e.matchPlugin == nil {
+		return false, nil, ""
+	}
+	// Build values to pass into the plugin.
+	var timeout time.Duration
+	var proxyOut string
+	var insecure bool
+	var allowPrivate bool
+
+	if snap := e.configSnap.Load(); snap != nil {
+		timeout = snap.Timeout
+		proxyOut = snap.ProxyOut
+	}
+	e.Config.RLock()
+	insecure = e.Config.Insecure
+	allowPrivate = e.Config.AllowPrivateTargets
+	e.Config.RUnlock()
+
+	dropped, labels, confidence := e.matchPlugin.OnFinding(ctx, timeout, proxyOut, insecure, allowPrivate, res)
+	return dropped, labels, confidence
+}
+
+// handleResultWithContext attempts to call any on_finding hook and send the
+// result to the results channel. Returns true if the context was cancelled
+// before the result could be emitted (caller should exit).
+func (e *Engine) handleResultWithContext(ctx context.Context, res Result) bool {
+	if dropped, labels, conf := e.invokeOnFindingHook(ctx, &res); dropped {
+		// Plugin suppressed emission; treat as normal (not interrupted).
+		return false
+	} else {
+		if len(labels) > 0 {
+			res.Labels = append(res.Labels, labels...)
+		}
+		if conf != "" {
+			res.Confidence = conf
+		}
+	}
+
+	select {
+	case e.Results <- res:
+		return false
+	case <-ctx.Done():
+		return true
+	}
+}
+
+// handleResultNonBlocking calls on_finding and attempts a non-blocking send.
+// If the results channel is full the result is dropped and TUIDropped is incremented.
+func (e *Engine) handleResultNonBlocking(res Result) {
+	if dropped, labels, conf := e.invokeOnFindingHook(context.Background(), &res); dropped {
+		return
+	} else {
+		if len(labels) > 0 {
+			res.Labels = append(res.Labels, labels...)
+		}
+		if conf != "" {
+			res.Confidence = conf
+		}
+	}
+
+	select {
+	case e.Results <- res:
+	default:
+		atomic.AddInt64(&e.TUIDropped, 1)
+	}
 }
 
 func (e *Engine) worker(id int) {
@@ -2551,7 +2615,22 @@ func (e *Engine) worker(id int) {
 			if e.matchPlugin != nil {
 				bodyStr = string(resp.Body)
 			}
-			if e.matchPlugin != nil && !e.matchPlugin.Match(resp.StatusCode, bodySize, wordCount, lineCount, bodyStr, contentType) {
+			if e.matchPlugin != nil {
+				matched, labels, confidence := e.matchPlugin.Match(resp.StatusCode, bodySize, wordCount, lineCount, bodyStr, contentType)
+			if !matched {
+				if e.cleanupJob(shouldExit) {
+					return
+				}
+				continue
+			}
+			// Enrich result with any metadata provided by the matcher plugin.
+			if len(labels) > 0 {
+				result.Labels = labels
+			}
+			if confidence != "" {
+				result.Confidence = confidence
+			}
+
 				if e.cleanupJob(shouldExit) {
 					return
 				}
@@ -2593,9 +2672,7 @@ func (e *Engine) worker(id int) {
 				}
 			}
 
-			select {
-			case e.Results <- result:
-			case <-localCtx.Done():
+			if e.handleResultWithContext(localCtx, result) {
 				e.activeJobs.Done()
 				return
 			}

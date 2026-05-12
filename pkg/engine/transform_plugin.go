@@ -34,7 +34,7 @@ func NewPluginRequestTransformer(scriptPath string) (*PluginRequestTransformer, 
 	pool := make(chan *lua.LState, size)
 
 	for i := 0; i < size; i++ {
-		L := lua.NewState()
+		L := newRestrictedLuaState()
 		if err := L.DoFile(scriptPath); err != nil {
 			L.Close()
 			for len(pool) > 0 {
@@ -57,9 +57,23 @@ func NewPluginRequestTransformer(scriptPath string) (*PluginRequestTransformer, 
 // Transform runs the Lua transform_request hook and returns the modified request.
 // On any error, it returns the input unchanged (fail-open).
 func (pt *PluginRequestTransformer) Transform(input RequestTransformInput) RequestTransformOutput {
-	L := <-pt.pool
-	defer func() { pt.pool <- L }()
+	select {
+	case L := <-pt.pool:
+		defer func() { pt.pool <- L }()
+		return pt.doTransform(L, input)
+	default:
+		// Pool saturated: run the transformer in a short-lived VM so workers
+		// don't block behind the fixed-size pool.
+		L := lua.NewState()
+		defer L.Close()
+		if err := L.DoFile(pt.file); err != nil {
+			return outputFrom(input)
+		}
+		return pt.doTransform(L, input)
+	}
+}
 
+func (pt *PluginRequestTransformer) doTransform(L *lua.LState, input RequestTransformInput) RequestTransformOutput {
 	fn := L.GetGlobal("transform_request")
 	if fn == lua.LNil {
 		return outputFrom(input)

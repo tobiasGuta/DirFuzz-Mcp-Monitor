@@ -82,7 +82,7 @@ type cliConfig struct {
 
 	// ── Lua plugins ──────────────────────────────────────────────────────────
 	PluginMatch  string // Lua script: match(r) → bool
-	PluginMutate string // Lua script: mutate(word) → []string
+	PluginMutate string // Lua script: mutate(word, ctx) → []string
 	ActivePoC    string // Lua PoC script using http_send()
 
 	// ── Display ──────────────────────────────────────────────────────────────

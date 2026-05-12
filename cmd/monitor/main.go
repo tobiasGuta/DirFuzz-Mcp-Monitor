@@ -4,17 +4,21 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,22 +40,31 @@ const (
 	maxWebhookAttempts    = 3
 	webhookInitialBackoff = 5 * time.Second
 	webhookMaxBackoff     = time.Minute
+
+	minScanInterval       = 5 * time.Minute
+	// sizeChangeTolerance is the minimum byte delta to consider a body size
+	// change interesting. Tuneable via code for operator preference.
+	sizeChangeTolerance   = 100
 )
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 type monitorConfig struct {
-	Target         string
-	Wordlist       string
-	DiscordWebhook string
-	StateFile      string
-	ScanInterval   time.Duration
-	Workers        int
-	MatchCodes     []int
-	Methods        []string
-	Headers        map[string]string
-	Extensions     []string
-	LogLevel       slog.Level
+	Target             string
+	Wordlist           string
+	DiscordWebhook     string
+	StateFile          string
+	ScanInterval       time.Duration
+	Jitter             time.Duration
+	Workers            int
+	MatchCodes         []int
+	Methods            []string
+	Headers            map[string]string
+	Extensions          []string
+	AllowPrivateTargets bool
+	SaveRaw            bool
+	NormalizeRegex     string
+	LogLevel           slog.Level
 }
 
 func main() {
@@ -62,6 +75,7 @@ func main() {
 	}
 
 	logger := newLogger(cfg.LogLevel)
+	rand.Seed(time.Now().UnixNano())
 	if err := ensureStateDir(cfg.StateFile); err != nil {
 		logger.Error("failed to prepare state directory", "state_file", cfg.StateFile, "error", err)
 		os.Exit(1)
@@ -72,6 +86,7 @@ func main() {
 		"wordlist", cfg.Wordlist,
 		"state_file", cfg.StateFile,
 		"scan_interval", cfg.ScanInterval.String(),
+		"jitter", cfg.Jitter.String(),
 		"workers", cfg.Workers,
 		"match_codes", cfg.MatchCodes,
 	)
@@ -126,6 +141,25 @@ func main() {
 		}
 
 		logger.Info("sleeping before next scan", "interval", cfg.ScanInterval.String())
+
+		// Apply jitter before the main scan interval to stagger runs across
+		// multiple monitor instances.
+		if cfg.Jitter > 0 {
+			jitterDuration := time.Duration(rand.Int63n(int64(cfg.Jitter)))
+			logger.Info("applying scan jitter", "jitter", cfg.Jitter.String(), "delay", jitterDuration.String())
+			jitterTimer := time.NewTimer(jitterDuration)
+			select {
+			case <-jitterTimer.C:
+			case sig := <-sigCh:
+				if !jitterTimer.Stop() {
+					<-jitterTimer.C
+				}
+				logger.Info("shutdown signal received while applying jitter; exiting", "signal", sig.String())
+				shutdownRequested.Store(true)
+				return
+			}
+		}
+
 		timer := time.NewTimer(cfg.ScanInterval)
 		select {
 		case <-timer.C:
@@ -173,7 +207,7 @@ func runScanCycle(
 		}
 	}
 
-	if isPrivateTarget(cfg.Target) {
+	if cfg.AllowPrivateTargets {
 		eng.UpdateConfig(func(c *engine.Config) {
 			c.AllowPrivateTargets = true
 		})
@@ -182,6 +216,27 @@ func runScanCycle(
 
 	if err := eng.SetTarget(cfg.Target); err != nil {
 		return 0, fmt.Errorf("engine target setup failed: %w", err)
+	}
+
+	// Compile normalization regex for body hashing.
+	normPattern := cfg.NormalizeRegex
+	if normPattern == "" {
+		normPattern = `(?i)(csrf[_-]?token|authenticity[_-]?token|nonce|timestamp|ts|session[_-]?id)["'=:\s>]+[A-Za-z0-9\-\._~%]+`
+	}
+	var normalizeRe *regexp.Regexp
+	if normPattern != "" {
+		if re, err := regexp.Compile(normPattern); err != nil {
+			logger.Warn("invalid MONITOR_NORMALIZE_RE; content hashing disabled", "error", err)
+		} else {
+			normalizeRe = re
+		}
+	}
+
+	// Ensure engine stores raw responses when requested so the monitor can compute hashes.
+	if cfg.SaveRaw {
+		eng.UpdateConfig(func(c *engine.Config) {
+			c.SaveRaw = true
+		})
 	}
 
 	stateExists, err := fileExists(cfg.StateFile)
@@ -197,9 +252,26 @@ func runScanCycle(
 		}
 	}
 
-	previousState := map[string]int{}
-	for path, status := range eng.PreviousState {
-		previousState[path] = status
+	// Build previous state map with status, size and body hash from the previous JSONL state file.
+	previous := make(map[string]prevInfo)
+	if stateExists {
+		f, err := os.Open(cfg.StateFile)
+		if err != nil {
+			logger.Error("failed to open previous state file; continuing without baseline", "state_file", cfg.StateFile, "error", err)
+		} else {
+			scanner := bufio.NewScanner(f)
+			for scanner.Scan() {
+				var row struct {
+					engine.Result
+					BodyHash string `json:"body_hash,omitempty"`
+				}
+				if err := json.Unmarshal(scanner.Bytes(), &row); err != nil {
+					continue
+				}
+				previous[row.Path] = prevInfo{Status: row.StatusCode, Size: row.Size, Hash: row.BodyHash}
+			}
+			f.Close()
+		}
 	}
 
 	engineMu.Lock()
@@ -231,17 +303,52 @@ func runScanCycle(
 		return 0, fmt.Errorf("failed to ensure state directory: %w", err)
 	}
 
+	// Compute current body hashes for this run (requires engine.SaveRaw=true).
+	curHashes := make(map[string]string, len(results))
+	for _, res := range results {
+		var h string
+		if res.Response != "" {
+			raw := []byte(res.Response)
+			if idx := bytes.Index(raw, []byte("\r\n\r\n")); idx >= 0 {
+				rawBody := raw[idx+4:]
+				if normalizeRe != nil {
+					rawBody = normalizeRe.ReplaceAll(rawBody, []byte(""))
+				}
+				sum := sha256.Sum256(rawBody)
+				h = hex.EncodeToString(sum[:])
+			} else {
+				body := raw
+				if normalizeRe != nil {
+					body = normalizeRe.ReplaceAll(body, []byte(""))
+				}
+				sum := sha256.Sum256(body)
+				h = hex.EncodeToString(sum[:])
+			}
+		}
+		curHashes[res.Path] = h
+	}
+
 	if shutdownRequested() {
-		if err := writeStateWithRetry(cfg.StateFile, results, logger); err != nil {
+		if err := writeStateWithRetry(cfg.StateFile, results, logger, normalizeRe); err != nil {
 			return 0, err
 		}
 	} else {
-		if err := writeStateAtomic(cfg.StateFile, results); err != nil {
+		if err := writeStateAtomic(cfg.StateFile, results, normalizeRe); err != nil {
 			return 0, fmt.Errorf("failed to persist state: %w", err)
 		}
 	}
 
-	interesting := findInteresting(results, previousState)
+	// Baseline behavior: if the state file did not exist prior to this cycle,
+	// or the operator explicitly requests a baseline via BASELINE_RUN, persist
+	// the current results but do not send Discord notifications.
+	baselineEnv := strings.ToLower(strings.TrimSpace(os.Getenv("BASELINE_RUN")))
+	forceBaseline := baselineEnv == "1" || baselineEnv == "true" || baselineEnv == "yes"
+	if !stateExists || forceBaseline {
+		logger.Info("first run complete. State baselined. Future runs will report changes.", "state_file", cfg.StateFile, "results", len(results))
+		return 0, nil
+	}
+
+	interesting := findInteresting(results, previous, curHashes)
 	logFindings(logger, interesting)
 
 	if len(interesting) > 0 {
@@ -258,8 +365,10 @@ func runScanCycle(
 type findingType string
 
 const (
-	findingStatusChange findingType = "status_change"
-	findingNewEndpoint  findingType = "new_endpoint"
+	findingStatusChange    findingType = "status_change"
+	findingNewEndpoint     findingType = "new_endpoint"
+	findingBodySizeChange  findingType = "body_size_change"
+	findingContentChange   findingType = "content_change"
 )
 
 type finding struct {
@@ -267,32 +376,83 @@ type finding struct {
 	Path      string
 	OldStatus int
 	NewStatus int
+	OldSize   int
+	NewSize   int
+	OldHash   string
+	NewHash   string
 }
 
-func findInteresting(results []engine.Result, previous map[string]int) []finding {
+// prevInfo stores status, size and hash from the previous run for a given path.
+type prevInfo struct {
+	Status int
+	Size   int
+	Hash   string
+}
+
+func findInteresting(results []engine.Result, previous map[string]prevInfo, curHashes map[string]string) []finding {
 	findings := make([]finding, 0)
 	statusSeen := make(map[string]struct{})
 	newSeen := make(map[string]struct{})
+	sizeSeen := make(map[string]struct{})
+	hashSeen := make(map[string]struct{})
 
 	for _, res := range results {
 		if res.IsAutoFilter {
 			continue
 		}
 
-		if res.IsEagleAlert {
-			key := fmt.Sprintf("%s|%d|%d", res.Path, res.OldStatusCode, res.StatusCode)
-			if _, exists := statusSeen[key]; !exists {
-				statusSeen[key] = struct{}{}
-				findings = append(findings, finding{
-					Type:      findingStatusChange,
-					Path:      res.Path,
-					OldStatus: res.OldStatusCode,
-					NewStatus: res.StatusCode,
-				})
-			}
-		}
+		prev, existed := previous[res.Path]
+		curHash := curHashes[res.Path]
 
-		if _, existed := previous[res.Path]; !existed {
+		if existed {
+			// Status change
+			if prev.Status != res.StatusCode {
+				key := fmt.Sprintf("%s|%d|%d", res.Path, prev.Status, res.StatusCode)
+				if _, exists := statusSeen[key]; !exists {
+					statusSeen[key] = struct{}{}
+					findings = append(findings, finding{
+						Type:      findingStatusChange,
+						Path:      res.Path,
+						OldStatus: prev.Status,
+						NewStatus: res.StatusCode,
+					})
+				}
+			}
+
+			// Content hash change
+			if prev.Hash != "" && curHash != "" && prev.Hash != curHash {
+				key := fmt.Sprintf("%s|hash|%s|%s", res.Path, prev.Hash, curHash)
+				if _, exists := hashSeen[key]; !exists {
+					hashSeen[key] = struct{}{}
+					findings = append(findings, finding{
+						Type:    findingContentChange,
+						Path:    res.Path,
+						OldHash: prev.Hash,
+						NewHash: curHash,
+					})
+				}
+			}
+
+			// Body size change
+			if prev.Size >= 0 && res.Size >= 0 {
+				delta := res.Size - prev.Size
+				if delta < 0 {
+					delta = -delta
+				}
+				if delta > sizeChangeTolerance {
+					key := fmt.Sprintf("%s|size|%d|%d", res.Path, prev.Size, res.Size)
+					if _, exists := sizeSeen[key]; !exists {
+						sizeSeen[key] = struct{}{}
+						findings = append(findings, finding{
+							Type:    findingBodySizeChange,
+							Path:    res.Path,
+							OldSize: prev.Size,
+							NewSize: res.Size,
+						})
+					}
+				}
+			}
+		} else {
 			key := fmt.Sprintf("%s|%d", res.Path, res.StatusCode)
 			if _, exists := newSeen[key]; !exists {
 				newSeen[key] = struct{}{}
@@ -318,6 +478,17 @@ func logFindings(logger *slog.Logger, findings []finding) {
 		switch f.Type {
 		case findingStatusChange:
 			logger.Info("finding", "type", "status_change", "path", f.Path, "old_status", f.OldStatus, "new_status", f.NewStatus)
+		case findingContentChange:
+			oldShort, newShort := f.OldHash, f.NewHash
+			if len(oldShort) > 8 {
+				oldShort = oldShort[:8]
+			}
+			if len(newShort) > 8 {
+				newShort = newShort[:8]
+			}
+			logger.Info("finding", "type", "content_change", "path", f.Path, "old_hash", oldShort, "new_hash", newShort)
+		case findingBodySizeChange:
+			logger.Info("finding", "type", "body_size_change", "path", f.Path, "old_size", f.OldSize, "new_size", f.NewSize)
 		case findingNewEndpoint:
 			logger.Info("finding", "type", "new_endpoint", "path", f.Path, "status", f.NewStatus)
 		}
@@ -379,6 +550,16 @@ func postDiscordWebhook(ctx context.Context, logger *slog.Logger, webhook, targe
 		}
 	}
 	for _, f := range findings {
+		if f.Type == findingContentChange {
+			ordered = append(ordered, f)
+		}
+	}
+	for _, f := range findings {
+		if f.Type == findingBodySizeChange {
+			ordered = append(ordered, f)
+		}
+	}
+	for _, f := range findings {
 		if f.Type == findingNewEndpoint {
 			ordered = append(ordered, f)
 		}
@@ -390,6 +571,26 @@ func postDiscordWebhook(ctx context.Context, logger *slog.Logger, webhook, targe
 			fields = append(fields, discordField{
 				Name:   "⚡ Status Change",
 				Value:  fmt.Sprintf("`%s` was `%d` → now `%d`", f.Path, f.OldStatus, f.NewStatus),
+				Inline: false,
+			})
+		case findingContentChange:
+			oldShort := f.OldHash
+			if len(oldShort) > 8 {
+				oldShort = oldShort[:8]
+			}
+			newShort := f.NewHash
+			if len(newShort) > 8 {
+				newShort = newShort[:8]
+			}
+			fields = append(fields, discordField{
+				Name:   "⚠️ Content Change",
+				Value:  fmt.Sprintf("`%s` changed (hash `%s` → `%s`)", f.Path, oldShort, newShort),
+				Inline: false,
+			})
+		case findingBodySizeChange:
+			fields = append(fields, discordField{
+				Name:   "🔀 Body Size Change",
+				Value:  fmt.Sprintf("`%s` size `%d` → `%d`", f.Path, f.OldSize, f.NewSize),
 				Inline: false,
 			})
 		case findingNewEndpoint:
@@ -476,9 +677,9 @@ func postDiscordWebhook(ctx context.Context, logger *slog.Logger, webhook, targe
 
 // ─── State persistence ───────────────────────────────────────────────────────
 
-func writeStateWithRetry(path string, results []engine.Result, logger *slog.Logger) error {
+func writeStateWithRetry(path string, results []engine.Result, logger *slog.Logger, normalizeRe *regexp.Regexp) error {
 	for attempt := 1; attempt <= maxWriteRetries; attempt++ {
-		err := writeStateAtomic(path, results)
+		err := writeStateAtomic(path, results, normalizeRe)
 		if err == nil {
 			return nil
 		}
@@ -488,7 +689,7 @@ func writeStateWithRetry(path string, results []engine.Result, logger *slog.Logg
 	return fmt.Errorf("state write failed after %d attempts", maxWriteRetries)
 }
 
-func writeStateAtomic(path string, results []engine.Result) error {
+func writeStateAtomic(path string, results []engine.Result, normalizeRe *regexp.Regexp) error {
 	tmpPath := path + ".tmp"
 
 	file, err := os.Create(tmpPath)
@@ -500,7 +701,30 @@ func writeStateAtomic(path string, results []engine.Result) error {
 	encoder := json.NewEncoder(bufw)
 
 	for _, res := range results {
-		if err := encoder.Encode(res); err != nil {
+		var bodyHash string
+		if res.Response != "" {
+			raw := []byte(res.Response)
+			idx := bytes.Index(raw, []byte("\r\n\r\n"))
+			var body []byte
+			if idx >= 0 {
+				body = raw[idx+4:]
+			} else {
+				body = raw
+			}
+			if normalizeRe != nil {
+				body = normalizeRe.ReplaceAll(body, []byte(""))
+			}
+			sum := sha256.Sum256(body)
+			bodyHash = hex.EncodeToString(sum[:])
+		}
+		row := struct {
+			engine.Result
+			BodyHash string `json:"body_hash,omitempty"`
+		}{
+			Result:   res,
+			BodyHash: bodyHash,
+		}
+		if err := encoder.Encode(row); err != nil {
 			_ = file.Close()
 			return fmt.Errorf("encode state row: %w", err)
 		}
@@ -568,7 +792,25 @@ func loadConfigFromEnv() (monitorConfig, error) {
 		if d <= 0 {
 			return monitorConfig{}, errors.New("SCAN_INTERVAL must be > 0")
 		}
+		if d < minScanInterval {
+			slog.Warn("SCAN_INTERVAL is very short; clamping to minimum",
+				"requested", d.String(), "minimum", minScanInterval.String())
+			d = minScanInterval
+		}
 		cfg.ScanInterval = d
+	}
+
+	// Optional jitter to randomise schedule and avoid synchronized scans.
+	jitterRaw := strings.TrimSpace(os.Getenv("SCAN_JITTER"))
+	if jitterRaw != "" {
+		j, err := time.ParseDuration(jitterRaw)
+		if err != nil {
+			return monitorConfig{}, fmt.Errorf("invalid SCAN_JITTER: %w", err)
+		}
+		if j < 0 {
+			return monitorConfig{}, errors.New("SCAN_JITTER must be >= 0")
+		}
+		cfg.Jitter = j
 	}
 
 	workersRaw := strings.TrimSpace(os.Getenv("WORKERS"))
@@ -604,6 +846,19 @@ func loadConfigFromEnv() (monitorConfig, error) {
 		cfg.LogLevel = slog.LevelDebug
 	default:
 		return monitorConfig{}, fmt.Errorf("invalid LOG_LEVEL %q, expected info or debug", logLevelRaw)
+	}
+
+	// Allow operator to explicitly enable private target scanning
+	allowPrivateRaw := strings.ToLower(strings.TrimSpace(os.Getenv("ALLOW_PRIVATE_TARGETS")))
+	if allowPrivateRaw != "" {
+		switch allowPrivateRaw {
+		case "1", "true", "yes":
+			cfg.AllowPrivateTargets = true
+		case "0", "false", "no":
+			cfg.AllowPrivateTargets = false
+		default:
+			return monitorConfig{}, fmt.Errorf("invalid ALLOW_PRIVATE_TARGETS value %q, expected true/false/1/0/yes/no", allowPrivateRaw)
+		}
 	}
 
 	return cfg, nil

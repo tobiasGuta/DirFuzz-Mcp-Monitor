@@ -50,10 +50,10 @@ end
 	}
 
 	for _, tt := range tests {
-		result := matcher.Match(tt.statusCode, tt.size, 0, 0, "test body", "text/html")
-		if result != tt.expected {
+		matched, _, _ := matcher.Match(tt.statusCode, tt.size, 0, 0, "test body", "text/html")
+		if matched != tt.expected {
 			t.Errorf("Match(status=%d, size=%d) = %v, want %v",
-				tt.statusCode, tt.size, result, tt.expected)
+				tt.statusCode, tt.size, matched, tt.expected)
 		}
 	}
 }
@@ -90,7 +90,7 @@ end
 
 	// Test mutation
 	original := "admin"
-	variants := mutator.Mutate(original)
+	variants := mutator.Mutate(original, "", 0)
 
 	expected := []string{"admin", "admin.bak", "ADMIN"}
 	if len(variants) != len(expected) {
@@ -253,7 +253,8 @@ end
 
 	done := make(chan bool, 1)
 	go func() {
-		done <- matcher.Match(200, 10, 1, 1, "ok", "text/plain")
+		matched, _, _ := matcher.Match(200, 10, 1, 1, "ok", "text/plain")
+		done <- matched
 	}()
 
 	select {
