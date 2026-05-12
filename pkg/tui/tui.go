@@ -174,6 +174,7 @@ var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 const maxLogEntries = 10000
 const maxCmdLines = 500
+const bottomBandHeight = 14
 
 func renderStatusBadge(activeColor lipgloss.Color, icon, label string, count int64) string {
 	// Dim the badge if the count is zero to reduce visual noise
@@ -1277,8 +1278,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		headerHeight := 6
-		footerHeight := 2 // 1 line of text + 1 separator
-		vpHeight := m.height - headerHeight - footerHeight
+		// Keep footer minimal for sizing; command panel will be overlaid instead
+		footerMinHeight := 1
+		vpHeight := m.height - headerHeight - footerMinHeight
 		if vpHeight < 5 {
 			vpHeight = 5
 		}
@@ -2151,7 +2153,7 @@ func (m *Model) View() string {
 		mainContent = m.viewport.View()
 	} else if m.state == StateDetail {
 		headerHeight := 6
-		footerHeight := 2
+		footerHeight := bottomBandHeight
 		vpHeight := m.height - headerHeight - footerHeight
 		paneOuterWidth := (m.width - 2) / 2
 
@@ -2173,56 +2175,10 @@ func (m *Model) View() string {
 		spacer := strings.Repeat(" ", m.width-(paneOuterWidth*2))
 		mainContent = lipgloss.JoinHorizontal(lipgloss.Top, reqPane, spacer, resPane)
 	} else if m.state == StateCommand {
-		resultsHeight := m.height - lipgloss.Height(header) - 16
-		if resultsHeight < 3 {
-			resultsHeight = 3
-		}
-		frozenVp := lipgloss.NewStyle().Height(resultsHeight).Render(m.viewport.View())
-
-		panelBorderColor := DraculaCyan
-		if m.commandPulseOn {
-			panelBorderColor = DraculaPurple
-		}
-
-		cmdInnerWidth := m.width - 6
-		if cmdInnerWidth < 20 {
-			cmdInnerWidth = 20
-		}
-
-		cmdPanelStyle := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(panelBorderColor).
-			Width(m.width-2).
-			Height(12).
-			Padding(0, 1)
-
-		cmdTitle := pinkStyle.Render(" ⚡ Command Panel ") +
-			mutedStyle.Render(" (Esc to close, ':help' for commands) ")
-		promptLine := cmdPromptStyle.Render(":") + m.textInput.View()
-
-		suggestionsBlock := ""
-		if len(m.suggestions) > 0 {
-			dropdownWidth := suggestionDropdownWidth(m.suggestions, cmdInnerWidth)
-			suggestionsBlock = renderSuggestionDropdown(m.suggestions, m.selectedSugIdx, dropdownWidth)
-		}
-
-		cmdSections := []string{
-			cmdTitle,
-			m.cmdViewport.View(),
-			separatorStyle.Render(strings.Repeat("─", cmdInnerWidth)),
-		}
-		if suggestionsBlock != "" {
-			cmdSections = append(cmdSections, suggestionsBlock)
-		}
-		cmdSections = append(cmdSections, promptLine)
-
-		cmdContent := lipgloss.JoinVertical(lipgloss.Top, cmdSections...)
-		cmdPanel := cmdPanelStyle.Render(cmdContent)
-
-		mainContent = lipgloss.JoinVertical(lipgloss.Top, frozenVp, cmdPanel)
+		mainContent = m.viewport.View()
 	} else if m.state == StateRepeater {
 		headerHeight := 6
-		footerHeight := 2
+		footerHeight := bottomBandHeight
 		vpHeight := m.height - headerHeight - footerHeight
 		paneOuterWidth := (m.width - 2) / 2
 
@@ -2289,30 +2245,105 @@ func (m *Model) View() string {
 	}
 
 	// Footer
-	var footer string
+	var footerBody string
 	if m.statusMessage != "" {
-		footer = m.statusMessage
+		footerBody = m.statusMessage
 	} else {
-		if m.state == StateCommand {
-			footer = m.footerBarStyle.Render("Esc: close panel | Enter: run command | Up/Down: scroll output")
-		} else if m.state == StateDetail {
-			footer = m.footerBarStyle.Render("Press 'Esc' or 'q' to return to list | Up/Down to scroll")
+		if m.state == StateDetail {
+			footerBody = m.footerBarStyle.Render("Press 'Esc' or 'q' to return to list | Up/Down to scroll")
 		} else if m.state == StateRepeater {
-			footer = m.footerBarStyle.Render("Tab: focus | Ctrl+R: send | Ctrl+P/N: history | Esc/q: back")
+			footerBody = m.footerBarStyle.Render("Tab: focus | Ctrl+R: send | Ctrl+P/N: history | Esc/q: back")
 		} else {
-			footer = m.footerBarStyle.Render("Press ':' for commands | 'p' to pause | 'q' to quit | 'r' for repeater")
+			footerBody = m.footerBarStyle.Render("Press ':' for commands | 'p' to pause | 'q' to quit | 'r' for repeater")
 		}
 	}
-	footerSep := separatorStyle.Render(strings.Repeat("─", m.width))
-	footer = footerSep + "\n" + footer
+	if m.state == StateCommand {
+		panelBorderColor := DraculaCyan
+		if m.commandPulseOn {
+			panelBorderColor = DraculaPurple
+		}
 
-	remainingHeight := m.height - lipgloss.Height(header) - lipgloss.Height(footer)
+		cmdInnerWidth := m.width - 6
+		if cmdInnerWidth < 20 {
+			cmdInnerWidth = 20
+		}
+
+		cmdPanelStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(panelBorderColor).
+			Width(m.width-2).
+			Height(12).
+			Padding(0, 1)
+
+		cmdTitle := pinkStyle.Render(" ⚡ Command Panel ") +
+			mutedStyle.Render(" (Esc to close, ':help' for commands) ")
+		promptLine := cmdPromptStyle.Render(":") + m.textInput.View()
+
+		suggestionsBlock := ""
+		if len(m.suggestions) > 0 {
+			dropdownWidth := suggestionDropdownWidth(m.suggestions, cmdInnerWidth)
+			suggestionsBlock = renderSuggestionDropdown(m.suggestions, m.selectedSugIdx, dropdownWidth)
+		}
+
+		cmdSections := []string{
+			cmdTitle,
+			m.cmdViewport.View(),
+			separatorStyle.Render(strings.Repeat("─", cmdInnerWidth)),
+		}
+		if suggestionsBlock != "" {
+			cmdSections = append(cmdSections, suggestionsBlock)
+		}
+		cmdSections = append(cmdSections, promptLine)
+
+		cmdContent := lipgloss.JoinVertical(lipgloss.Top, cmdSections...)
+		footerBody = cmdPanelStyle.Render(cmdContent)
+	}
+	// Footer (keep minimal - command panel will overlay the bottom of main content)
+	footer := footerBody
+
+	remainingHeight := m.height - lipgloss.Height(header) - 1
 	if remainingHeight < 1 {
 		remainingHeight = 1
 	}
 	paddedContent := lipgloss.NewStyle().Height(remainingHeight).Render(mainContent)
 
-	// Compose
+	// If command panel is active, overlay it by replacing the last `bottomBandHeight` lines
+	if m.state == StateCommand {
+		panel := footerBody
+		panelLines := strings.Split(panel, "\n")
+
+		// Use actual panel height (don't force fixed bottomBandHeight)
+		panelHeight := len(panelLines)
+		if panelHeight > remainingHeight {
+			// Trim panel if terminal is too small
+			panelLines = panelLines[panelHeight-remainingHeight:]
+			panelHeight = len(panelLines)
+		}
+
+		mainLines := strings.Split(paddedContent, "\n")
+		// Ensure mainLines length equals remainingHeight by padding if necessary
+		if len(mainLines) < remainingHeight {
+			padCount := remainingHeight - len(mainLines)
+			for i := 0; i < padCount; i++ {
+				mainLines = append(mainLines, strings.Repeat(" ", m.width))
+			}
+		}
+
+		// Replace the last panelHeight lines of mainLines with panelLines
+		start := len(mainLines) - panelHeight
+		if start < 0 {
+			start = 0
+		}
+		for i := 0; i < panelHeight && start+i < len(mainLines); i++ {
+			mainLines[start+i] = panelLines[i]
+		}
+
+		paddedContent = strings.Join(mainLines, "\n")
+		// Keep footer minimal line below overlay
+		footer = ""
+	}
+
+	// Compose final screen
 	return lipgloss.JoinVertical(lipgloss.Top, header, paddedContent, footer)
 }
 
