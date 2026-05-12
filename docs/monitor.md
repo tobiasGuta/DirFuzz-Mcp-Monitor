@@ -96,6 +96,4 @@ export SCAN_INTERVAL=1h
 - The monitor is conservative about private/internal IP targets; enabling `ALLOW_PRIVATE_TARGETS` bypasses the guard and should be done intentionally.
 - The JSONL state is intended as a compact, machine-friendly snapshot. If you need richer change history, archive snapshots externally (timestamped files) and diff them.
 
----
 
-If you'd like, I can also add an example Kubernetes CronJob manifest or a small systemd unit that runs the monitor on a schedule. Let me know which format you prefer.
