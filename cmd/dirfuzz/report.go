@@ -40,6 +40,15 @@ func writeReportIfRequested(cfg cliConfig, results []engine.Result) error {
 	default:
 		return fmt.Errorf("unsupported report format %q", cfg.ReportFormat)
 	}
+	if cfg.HeaderAudit {
+		findings := RunHeaderAudit(results)
+		switch strings.ToLower(cfg.ReportFormat) {
+		case "html":
+			body += "<pre>" + html.EscapeString(RenderHeaderAuditMarkdown(findings)) + "</pre>"
+		default:
+			body += "\n" + RenderHeaderAuditMarkdown(findings)
+		}
+	}
 	return os.WriteFile(cfg.ReportFile, []byte(body), 0o644)
 }
 

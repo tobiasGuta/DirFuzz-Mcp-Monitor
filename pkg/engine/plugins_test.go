@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -169,7 +170,7 @@ end
 func TestHTTPLibBlocksPrivateTargetWhenNotAllowed(t *testing.T) {
 	L := lua.NewState()
 	defer L.Close()
-	registerHTTPLib(L, 2*time.Second, "", false, false)
+	registerHTTPLib(L, context.Background(), 2*time.Second, "", false, false)
 
 	req := L.NewTable()
 	L.SetField(req, "url", lua.LString("http://127.0.0.1:65535/"))
@@ -197,7 +198,7 @@ func TestHTTPLibAllowsPrivateTargetWhenEnabled(t *testing.T) {
 
 	L := lua.NewState()
 	defer L.Close()
-	registerHTTPLib(L, 2*time.Second, "", false, true)
+	registerHTTPLib(L, context.Background(), 2*time.Second, "", false, true)
 
 	req := L.NewTable()
 	L.SetField(req, "url", lua.LString(srv.URL))

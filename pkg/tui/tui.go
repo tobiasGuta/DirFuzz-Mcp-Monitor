@@ -1799,7 +1799,7 @@ func (m *Model) updateDetailView() {
 		if selectedHit.Request != "" {
 			reqContent = selectedHit.Request
 			if isBinaryString(reqContent) {
-				reqContent = fmt.Sprintf("[Binary request: %s bytes]\nUse --save-raw to persist to disk.", len(selectedHit.Request))
+				reqContent = fmt.Sprintf("[Binary request: %d bytes]\nUse --save-raw to persist to disk.", len(selectedHit.Request))
 			}
 		}
 

@@ -1,3 +1,6 @@
+//go:build ignore
+// +build ignore
+
 package main
 
 import (
@@ -19,16 +22,20 @@ func main() {
 		if idx := strings.Index(line, "//"); idx != -1 {
 			line = line[:idx]
 		}
-		
+
 		if strings.HasPrefix(line, "func ") {
 			lastFunc = line
 		}
-		
+
 		for _, c := range line {
-			if c == '{' { count++ }
-			if c == '}' { count-- }
+			if c == '{' {
+				count++
+			}
+			if c == '}' {
+				count--
+			}
 		}
-		
+
 		if count == 0 && strings.HasPrefix(strings.TrimSpace(line), "}") {
 			fmt.Printf("Line %d: block closed. Last func: %s\n", i+1, lastFunc)
 		}

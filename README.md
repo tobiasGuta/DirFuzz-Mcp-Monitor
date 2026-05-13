@@ -1,4 +1,4 @@
-# 🦇 DirFuzz v3.0
+# 🦇 DirFuzz v4.0
 
 DirFuzz is a memory-efficient, high-performance web security testing and directory fuzzing engine. It is designed for a wide range of use cases, from large-scale automated scans and continuous monitoring to detailed manual vulnerability hunting and safe, AI-driven automation.
 
@@ -158,6 +158,8 @@ dirfuzz -u https://target.com -w discovery.txt -t 50 --bypass-403
     - Path mutations: trailing slashes, dot-slashes (`/./`), URL-encoded slashes, double-slash prefixes
 -   **Why:** Often misconfigured middleware or WAFs block on one representation but miss others. DirFuzz tests all common variants instantly and surfaces successful bypasses as separate results, passing them through your existing filters.
 -   **Pro Tip:** Combine with `--proxy-out http://127.0.0.1:8080` to immediately test each bypass in Burp Repeater for manual validation.
+
+<img width="1913" height="994" alt="Screenshot 2026-05-12 221749" src="https://github.com/user-attachments/assets/10a5877d-9cbb-49e7-96e7-b1062f862c0d" />
 
 5\. The "Eagle Mode" for Continuous Income
 ------------------------------------------

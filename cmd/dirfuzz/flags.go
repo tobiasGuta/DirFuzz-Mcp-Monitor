@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	cliVersion        = "2.3.0"
+	cliVersion        = "4.0.0"
 	defaultMatchCodes = "200,204,301,302,307,308,401,403,405,500"
 	defaultResumeFile = ".dirfuzz-resume.json"
 )
@@ -35,6 +35,11 @@ func parseFlags() cliConfig {
 	ua := flag.String("ua", "", "Override the User-Agent header")
 	cookie := flag.String("b", "", "Cookie header value  (shorthand for -H 'Cookie: …')")
 	methods := flag.String("m", "", "HTTP methods, comma-separated  (default: GET)")
+	verbTamper := flag.Bool(
+		"verb-tamper",
+		false,
+		"Inject X-HTTP-Method-Override / X-Forwarded-Method headers alongside every non-GET method (requires -m with non-GET verbs)",
+	)
 	body := flag.String("d", "", "Request body for POST / PUT")
 	follow := flag.Bool("follow", false, "Follow HTTP redirects")
 	maxRedirects := flag.Int("max-redirects", engine.DefaultMaxRedirects, "Maximum redirects to follow")
@@ -58,6 +63,11 @@ func parseFlags() cliConfig {
 	outputFormat := flag.String("of", "", "Output format: jsonl | csv | url  (default: jsonl when -o is set)")
 	outputFile := flag.String("o", "", "Write results to this file")
 	reportFile := flag.String("report", "", "Write a Markdown/HTML summary report to this file")
+	headerAudit := flag.Bool(
+		"header-audit",
+		false,
+		"After the scan, analyse security headers on every result and print a findings summary (appended to --report if set)",
+	)
 	reportFormat := flag.String("report-format", "", "Report format: markdown | html  (inferred from -report extension when empty)")
 	saveRaw := flag.Bool("save-raw", false, "Save raw HTTP request/response bytes in results")
 
@@ -150,6 +160,7 @@ func parseFlags() cliConfig {
 		Headers:      []string(headers),
 		Cookie:       *cookie,
 		Methods:      *methods,
+		VerbTamper:   *verbTamper,
 		Body:         *body,
 		Follow:       *follow,
 		MaxRedirects: *maxRedirects,
@@ -171,6 +182,7 @@ func parseFlags() cliConfig {
 		OutputFormat: outFmt,
 		OutputFile:   *outputFile,
 		ReportFile:   *reportFile,
+		HeaderAudit:  *headerAudit,
 		ReportFormat: *reportFormat,
 		SaveRaw:      *saveRaw,
 

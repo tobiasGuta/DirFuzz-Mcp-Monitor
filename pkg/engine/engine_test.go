@@ -7,10 +7,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/time/rate"
 )
@@ -263,4 +265,120 @@ func TestChangeWordlistConcurrency(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestVerbTamperHeaders(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		want   map[string]string
+	}{
+		{
+			name:   "GET returns nil",
+			method: "GET",
+			want:   nil,
+		},
+		{
+			name:   "HEAD returns nil",
+			method: "HEAD",
+			want:   nil,
+		},
+		{
+			name:   "DELETE returns override headers",
+			method: "DELETE",
+			want: map[string]string{
+				"X-HTTP-Method-Override": "DELETE",
+				"X-Forwarded-Method":     "DELETE",
+				"X-Method-Override":      "DELETE",
+			},
+		},
+		{
+			name:   "PATCH returns override headers",
+			method: "PATCH",
+			want: map[string]string{
+				"X-HTTP-Method-Override": "PATCH",
+				"X-Forwarded-Method":     "PATCH",
+				"X-Method-Override":      "PATCH",
+			},
+		},
+		{
+			name:   "POST returns override headers",
+			method: "POST",
+			want: map[string]string{
+				"X-HTTP-Method-Override": "POST",
+				"X-Forwarded-Method":     "POST",
+				"X-Method-Override":      "POST",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := verbTamperHeaders(tt.method)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("verbTamperHeaders(%q) = %#v, want %#v", tt.method, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWorkerVerbTamperHonorsManualOverrideHeader(t *testing.T) {
+	type observed struct {
+		xHTTPMethodOverride string
+		xForwardedMethod    string
+		xMethodOverride     string
+	}
+
+	observedCh := make(chan observed, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		observedCh <- observed{
+			xHTTPMethodOverride: r.Header.Get("X-HTTP-Method-Override"),
+			xForwardedMethod:    r.Header.Get("X-Forwarded-Method"),
+			xMethodOverride:     r.Header.Get("X-Method-Override"),
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	eng := NewEngine(1, 100, 0.01)
+	eng.Config.Lock()
+	eng.Config.AllowPrivateTargets = true
+	eng.Config.Unlock()
+	if err := eng.SetTarget(server.URL); err != nil {
+		t.Fatalf("SetTarget() failed: %v", err)
+	}
+	eng.UpdateConfig(func(c *Config) {
+		c.VerbTamper = true
+	})
+
+	eng.Start()
+	defer eng.Shutdown()
+
+	runID := atomic.LoadInt64(&eng.RunID)
+	eng.Submit(Job{
+		Path:   "/tamper",
+		Depth:  0,
+		Method: "DELETE",
+		RunID:  runID,
+		ExtraHeaders: map[string]string{
+			"X-HTTP-Method-Override": "PUT",
+		},
+	})
+	eng.Wait()
+
+	select {
+	case got := <-observedCh:
+		if got.xHTTPMethodOverride != "PUT" {
+			t.Fatalf("manual override should win: got X-HTTP-Method-Override=%q, want %q", got.xHTTPMethodOverride, "PUT")
+		}
+		if got.xForwardedMethod != "DELETE" {
+			t.Fatalf("expected auto X-Forwarded-Method to remain method value: got %q, want %q", got.xForwardedMethod, "DELETE")
+		}
+		if got.xMethodOverride != "DELETE" {
+			t.Fatalf("expected auto X-Method-Override to remain method value: got %q, want %q", got.xMethodOverride, "DELETE")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for worker request")
+	}
 }

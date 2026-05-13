@@ -84,6 +84,7 @@ type Config struct {
 	MaxRetries          int
 	SaveRaw             bool // NEW: include raw request/response bytes in Result
 	WAFEvasion          bool
+	VerbTamper          bool
 	FourOhThreeBypass   bool // retry 403s with path and header bypass techniques
 	Spidering           bool // NEW: dynamic HTML/JS scraping
 	WebhookURL          string
@@ -125,6 +126,7 @@ type configSnapshot struct {
 	MaxDepth            int
 	WordlistPath        string
 	WAFEvasion          bool
+	VerbTamper          bool
 	FourOhThreeBypass   bool
 	Spidering           bool
 	// HeadersTemplate is the pre-built header block (with any {PAYLOAD}
@@ -745,6 +747,7 @@ func (e *Engine) buildAndStoreConfigSnapshot() {
 		MaxDepth:            e.Config.MaxDepth,
 		WordlistPath:        e.Config.WordlistPath,
 		WAFEvasion:          e.Config.WAFEvasion,
+		VerbTamper:          e.Config.VerbTamper,
 		FourOhThreeBypass:   e.Config.FourOhThreeBypass,
 		Spidering:           e.Config.Spidering,
 	}
@@ -2109,6 +2112,21 @@ func (e *Engine) handleResultNonBlocking(res Result) {
 	}
 }
 
+// verbTamperHeaders returns method-override headers for non-GET/HEAD methods.
+// GET and HEAD are excluded by design since overriding to those verbs has no
+// access-control relevance.
+func verbTamperHeaders(method string) map[string]string {
+	switch strings.ToUpper(method) {
+	case "GET", "HEAD":
+		return nil
+	}
+	return map[string]string{
+		"X-HTTP-Method-Override": method,
+		"X-Forwarded-Method":     method,
+		"X-Method-Override":      method,
+	}
+}
+
 func (e *Engine) worker(id int) {
 	defer e.wg.Done()
 
@@ -2161,6 +2179,7 @@ func (e *Engine) worker(id int) {
 						MaxDepth:            e.Config.MaxDepth,
 						WordlistPath:        e.Config.WordlistPath,
 						WAFEvasion:          e.Config.WAFEvasion,
+						VerbTamper:          e.Config.VerbTamper,
 						FourOhThreeBypass:   e.Config.FourOhThreeBypass,
 						Spidering:           e.Config.Spidering,
 					}
@@ -2216,6 +2235,7 @@ func (e *Engine) worker(id int) {
 			maxDepth := snap.MaxDepth
 			wordlistPath := snap.WordlistPath
 			wafEvasion := snap.WAFEvasion
+			verbTamper := snap.VerbTamper
 			fourOhThreeBypass := snap.FourOhThreeBypass
 			spidering := snap.Spidering
 
@@ -2301,22 +2321,40 @@ func (e *Engine) worker(id int) {
 				ua = "DirFuzz/2.0"
 			}
 
-			// Build headers string by substituting the payload into the pre-built
-			// headers template from the snapshot. Strip CR/LF from the payload
-			// at substitution time to prevent header injection — applying this
-			// to the assembled string is too late, since a single \r\n inside a
-			// header value produces a syntactically valid injected header.
-			headerSafePayload := sanitizeHeaderToken(payload)
-			headersStr := strings.ReplaceAll(snap.HeadersTemplate, "{PAYLOAD}", headerSafePayload)
-			if len(job.ExtraHeaders) > 0 {
-				var extraHdrBuf strings.Builder
-				for k, v := range job.ExtraHeaders {
-					safeK := sanitizeHeaderToken(k)
-					safeV := sanitizeHeaderToken(v)
-					extraHdrBuf.WriteString(fmt.Sprintf("%s: %s\r\n", safeK, safeV))
-				}
-				headersStr += extraHdrBuf.String()
+			// Merge base + per-job headers into a local map, then render once.
+			// Keep user-provided header precedence by only adding auto verb
+			// tamper headers when they are not already present.
+			reqHeaders := make(map[string]string, len(headers)+len(job.ExtraHeaders)+3)
+			for k, v := range headers {
+				reqHeaders[k] = v
 			}
+			for k, v := range job.ExtraHeaders {
+				reqHeaders[k] = v
+			}
+			if verbTamper {
+				if overrideHdrs := verbTamperHeaders(job.Method); overrideHdrs != nil {
+					for k, v := range overrideHdrs {
+						if _, exists := reqHeaders[k]; !exists {
+							reqHeaders[k] = v
+						}
+					}
+				}
+			}
+
+			headerSafePayload := sanitizeHeaderToken(payload)
+			var reqHdrKeys []string
+			for k := range reqHeaders {
+				reqHdrKeys = append(reqHdrKeys, k)
+			}
+			sort.Strings(reqHdrKeys)
+			var headersBuilder strings.Builder
+			for _, k := range reqHdrKeys {
+				safeK := sanitizeHeaderToken(k)
+				safeV := sanitizeHeaderToken(strings.ReplaceAll(reqHeaders[k], "{PAYLOAD}", headerSafePayload))
+				headersBuilder.WriteString(fmt.Sprintf("%s: %s\r\n", safeK, safeV))
+			}
+			headersStr := headersBuilder.String()
+			headers = reqHeaders
 
 			var proxyAddr string
 			if e.proxyDialer {
@@ -2585,6 +2623,20 @@ func (e *Engine) worker(id int) {
 						capturedHeaders["X-Powered-By"] = val
 					case "cf-ray":
 						capturedHeaders["Cf-Ray"] = val
+					case "content-security-policy":
+						capturedHeaders["Content-Security-Policy"] = val
+					case "strict-transport-security":
+						capturedHeaders["Strict-Transport-Security"] = val
+					case "x-frame-options":
+						capturedHeaders["X-Frame-Options"] = val
+					case "x-content-type-options":
+						capturedHeaders["X-Content-Type-Options"] = val
+					case "referrer-policy":
+						capturedHeaders["Referrer-Policy"] = val
+					case "permissions-policy":
+						capturedHeaders["Permissions-Policy"] = val
+					case "access-control-allow-origin":
+						capturedHeaders["Access-Control-Allow-Origin"] = val
 					}
 				}
 			}

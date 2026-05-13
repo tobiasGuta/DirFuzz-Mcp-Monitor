@@ -30,7 +30,8 @@ type cliConfig struct {
 	Headers      []string // raw "Key: Value" strings from -H
 	Cookie       string   // shorthand for -H "Cookie: …"
 	Methods      string   // comma-separated HTTP verbs
-	Body         string   // request body for POST / PUT
+	VerbTamper   bool
+	Body         string // request body for POST / PUT
 	Follow       bool
 	MaxRedirects int
 	Timeout      time.Duration
@@ -53,6 +54,7 @@ type cliConfig struct {
 	OutputFormat string // jsonl | csv | url
 	OutputFile   string
 	ReportFile   string
+	HeaderAudit  bool
 	ReportFormat string // markdown | html
 	SaveRaw      bool
 

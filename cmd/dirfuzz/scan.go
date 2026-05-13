@@ -78,6 +78,7 @@ func run(cfg cliConfig) error {
 		c.ProxyOut = cfg.ProxyOut
 		c.AutoFilterThreshold = cfg.AutoFilterThreshold
 		c.MaxRetries = cfg.MaxRetries
+		c.VerbTamper = cfg.VerbTamper
 		c.FourOhThreeBypass = cfg.FourOhThreeBypass
 		c.AllowPrivateTargets = cfg.AllowPrivate
 		if cfg.OutputFile != "" {
@@ -240,8 +241,12 @@ func run(cfg cliConfig) error {
 
 	// ── 14. Display mode ──────────────────────────────────────────────────────
 	if cfg.NoTUI {
-		if err := runPlain(eng, cfg, writeResult); err != nil {
+		collectedResults, err := runPlain(eng, cfg, writeResult)
+		if err != nil {
 			return err
+		}
+		if cfg.HeaderAudit {
+			PrintHeaderAuditSummary(RunHeaderAudit(collectedResults))
 		}
 		reportMu.Lock()
 		defer reportMu.Unlock()
@@ -257,11 +262,13 @@ func run(cfg cliConfig) error {
 
 // ── Plain / no-TUI mode ───────────────────────────────────────────────────────
 
-func runPlain(eng *engine.Engine, cfg cliConfig, writeResult func(engine.Result)) error {
+func runPlain(eng *engine.Engine, cfg cliConfig, writeResult func(engine.Result)) ([]engine.Result, error) {
 	go func() {
 		eng.Wait()
 		eng.Shutdown()
 	}()
+
+	var collectedResults []engine.Result
 
 	for res := range eng.Results {
 		if res.IsAutoFilter {
@@ -276,6 +283,7 @@ func runPlain(eng *engine.Engine, cfg cliConfig, writeResult func(engine.Result)
 			}
 			continue
 		}
+		collectedResults = append(collectedResults, res)
 		if res.IsEagleAlert {
 			line := fmt.Sprintf("[EAGLE] %s  %d → %d", res.Path, res.OldStatusCode, res.StatusCode)
 			fmt.Println(line)
@@ -293,7 +301,7 @@ func runPlain(eng *engine.Engine, cfg cliConfig, writeResult func(engine.Result)
 		)
 	}
 
-	return nil
+	return collectedResults, nil
 }
 
 // ── TUI mode (default) ────────────────────────────────────────────────────────
