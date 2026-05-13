@@ -78,6 +78,7 @@ func run(cfg cliConfig) error {
 		c.ProxyOut = cfg.ProxyOut
 		c.AutoFilterThreshold = cfg.AutoFilterThreshold
 		c.MaxRetries = cfg.MaxRetries
+		c.FourOhThreeBypass = cfg.FourOhThreeBypass
 		c.AllowPrivateTargets = cfg.AllowPrivate
 		if cfg.OutputFile != "" {
 			c.OutputFile = cfg.OutputFile

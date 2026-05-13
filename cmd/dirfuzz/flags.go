@@ -71,6 +71,7 @@ func parseFlags() cliConfig {
 	maxRetries := flag.Int("retry", 0, "Retry failed requests up to N times on connection error")
 	dryRun := flag.Bool("dry-run", false, "Estimate request volume and exit without sending traffic")
 	maxWSFrames := flag.Int("max-ws-frames", 5000, "Maximum number of WebSocket frames to store in memory")
+	fourOhThreeBypass := flag.Bool("bypass-403", false, "On every 403 hit, retry with path and header bypass techniques (X-Original-URL, dot-slash, url-encoding, …)")
 
 	// ── Eagle mode ───────────────────────────────────────────────────────────
 	eagleFile := flag.String("eagle", "",
@@ -181,6 +182,7 @@ func parseFlags() cliConfig {
 		MaxRetries:          *maxRetries,
 		DryRun:              *dryRun,
 		MaxWSFrames:         *maxWSFrames,
+		FourOhThreeBypass:   *fourOhThreeBypass,
 
 		EagleFile: *eagleFile,
 

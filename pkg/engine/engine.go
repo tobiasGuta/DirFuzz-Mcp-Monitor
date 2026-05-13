@@ -84,6 +84,7 @@ type Config struct {
 	MaxRetries          int
 	SaveRaw             bool // NEW: include raw request/response bytes in Result
 	WAFEvasion          bool
+	FourOhThreeBypass   bool // retry 403s with path and header bypass techniques
 	Spidering           bool // NEW: dynamic HTML/JS scraping
 	WebhookURL          string
 	WebhookOnNew        bool
@@ -124,6 +125,7 @@ type configSnapshot struct {
 	MaxDepth            int
 	WordlistPath        string
 	WAFEvasion          bool
+	FourOhThreeBypass   bool
 	Spidering           bool
 	// HeadersTemplate is the pre-built header block (with any {PAYLOAD}
 	// placeholders intact) that workers can quickly clone and substitute
@@ -743,6 +745,7 @@ func (e *Engine) buildAndStoreConfigSnapshot() {
 		MaxDepth:            e.Config.MaxDepth,
 		WordlistPath:        e.Config.WordlistPath,
 		WAFEvasion:          e.Config.WAFEvasion,
+		FourOhThreeBypass:   e.Config.FourOhThreeBypass,
 		Spidering:           e.Config.Spidering,
 	}
 	// Honor User-Agent header override: worker formerly extracted UA from
@@ -2158,6 +2161,7 @@ func (e *Engine) worker(id int) {
 						MaxDepth:            e.Config.MaxDepth,
 						WordlistPath:        e.Config.WordlistPath,
 						WAFEvasion:          e.Config.WAFEvasion,
+						FourOhThreeBypass:   e.Config.FourOhThreeBypass,
 						Spidering:           e.Config.Spidering,
 					}
 					ua := local.UserAgent
@@ -2212,6 +2216,7 @@ func (e *Engine) worker(id int) {
 			maxDepth := snap.MaxDepth
 			wordlistPath := snap.WordlistPath
 			wafEvasion := snap.WAFEvasion
+			fourOhThreeBypass := snap.FourOhThreeBypass
 			spidering := snap.Spidering
 
 			shouldExit := id >= snap.MaxWorkers
@@ -2516,6 +2521,20 @@ func (e *Engine) worker(id int) {
 						}
 					}
 				}
+
+				if fourOhThreeBypass {
+					techniques := Bypass403Techniques(payload, headers)
+					for _, technique := range techniques {
+						bypassPath, bypassHeaders := technique.ModifyRequest(payload, headers, successfulMethod)
+						e.Submit(Job{
+							Path:         bypassPath,
+							Depth:        depth,
+							Method:       successfulMethod,
+							RunID:        job.RunID,
+							ExtraHeaders: bypassHeaders,
+						})
+					}
+				}
 			}
 
 			// Smart Filter.
@@ -2617,19 +2636,19 @@ func (e *Engine) worker(id int) {
 			}
 			if e.matchPlugin != nil {
 				matched, labels, confidence := e.matchPlugin.Match(resp.StatusCode, bodySize, wordCount, lineCount, bodyStr, contentType)
-			if !matched {
-				if e.cleanupJob(shouldExit) {
-					return
+				if !matched {
+					if e.cleanupJob(shouldExit) {
+						return
+					}
+					continue
 				}
-				continue
-			}
-			// Enrich result with any metadata provided by the matcher plugin.
-			if len(labels) > 0 {
-				result.Labels = labels
-			}
-			if confidence != "" {
-				result.Confidence = confidence
-			}
+				// Enrich result with any metadata provided by the matcher plugin.
+				if len(labels) > 0 {
+					result.Labels = labels
+				}
+				if confidence != "" {
+					result.Confidence = confidence
+				}
 
 				if e.cleanupJob(shouldExit) {
 					return

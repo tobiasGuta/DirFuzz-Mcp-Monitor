@@ -15,7 +15,7 @@ This repository contains:
 DirFuzz transcends a simple directory enumerator, acting as a complete protocol fuzzing suite tightly integrated with both AI environments and manual bug bounty workflows.
 
 -   **High-Performance HTTP Engine:** Built on a custom raw HTTP/1.1 and **HTTP/2** client with state-of-the-art connection pooling. It features **chunked transfer encoding** support, TLS cipher randomization, persistent connection recycling, and **SOCKS5/HTTP Proxy Rotation**.
--   **WAF Fingerprinting & Evasion:** Automatically fingerprints responses against major Web Application Firewalls (AWS WAF, Cloudflare, Akamai, Barracuda, F5). 
+-   **WAF Fingerprinting & Evasion + 403 Bypass Systematizer:** Automatically fingerprints responses against major Web Application Firewalls (AWS WAF, Cloudflare, Akamai, Barracuda, F5). When a 403 is encountered, DirFuzz can automatically retry with well-known bypass techniques (`--bypass-403`): header injection (X-Original-URL, X-Rewrite-URL, X-Forwarded-For), path normalization tricks (trailing slashes, dot-slashes, URL encoding), and IP-spoofing headers—all deduplicated and rate-limited naturally through the worker pool.
 -   **Suite Bridge & Interactive TUI:** An interactive Terminal UI featuring real-time logging, response insights, and a **Suite Bridge**. With a single keystroke, you can send any discovered endpoint straight to **Burp Suite Repeater (`r`)** or **Intruder (`i`)**.
 -   **Lua Plugin Ecosystem:** Write custom fuzzing logic using the built-in parallel Lua VM pool:
     -   **Transformers:** Manipulate requests raw on-the-fly (`transform_plugin.go`).
@@ -80,12 +80,19 @@ The included `docker-compose.yml` can build and run the monitor image and mount 
 ./dirfuzz -u https://api.example.com -w wordlists/common.txt --eagle previous_scan.jsonl
 ```
 
+**403 Bypass Systematizer:**
+```bash
+# Automatically retry every 403 with header injection and path mutations
+./dirfuzz -u https://example.com -w wordlists/common.txt --bypass-403 -t 50
+```
+
 ### Flag notes that trip people up
 
 - `-e` takes one comma-separated list of extensions. Use `-e php,html,js`, not multiple `-e` flags.
 - `-o` writes surfaced results to a file. It does not save every request the scanner sends.
 - `--save-raw` stores the raw request/response inside each saved hit when `-o` is enabled.
 - `--no-tui` is the cleanest mode when you want a plain JSONL file for piping or later analysis.
+- `--bypass-403` automatically retries every 403 hit with 8 standard bypass techniques (headers, path mutations). Bypass attempts are deduplicated and rate-limited naturally. Results pass through your existing filters just like normal hits.
 
 Here is a strategic workflow for how to use DirFuzz effectively in a real-world engagement:
 
@@ -134,7 +141,25 @@ dirfuzz -u https://target.com/api/v2/ -w api_endpoints.txt --smart-api -m GET,PO
 
 -   **Why:** `--smart-api` is intelligent. It won't try `DELETE` on a standard image directory, but it *will* cycle methods on paths that look like REST endpoints, potentially uncovering unauthorized data modification.
 
-4\. The "Eagle Mode" for Continuous Income
+4\. Bypassing Access Controls: "The 403 Systematizer"
+-----------------------------------------------------
+
+Sometimes a path exists but returns 403. Many security teams assume it's truly forbidden—but standard bypass techniques often work.
+
+Bash
+
+```
+dirfuzz -u https://target.com -w discovery.txt -t 50 --bypass-403
+
+```
+
+-   **What it does:** On every `403` hit, DirFuzz automatically retries with 8 bypass techniques:
+    - Header injection: `X-Original-URL`, `X-Rewrite-URL`, `X-Custom-IP-Authorization`, `X-Forwarded-For`
+    - Path mutations: trailing slashes, dot-slashes (`/./`), URL-encoded slashes, double-slash prefixes
+-   **Why:** Often misconfigured middleware or WAFs block on one representation but miss others. DirFuzz tests all common variants instantly and surfaces successful bypasses as separate results, passing them through your existing filters.
+-   **Pro Tip:** Combine with `--proxy-out http://127.0.0.1:8080` to immediately test each bypass in Burp Repeater for manual validation.
+
+5\. The "Eagle Mode" for Continuous Income
 ------------------------------------------
 
 If you are on a long-term private program, "New" is your best friend. New endpoints often lack the hardened security of the old ones.
@@ -152,7 +177,7 @@ dirfuzz -u https://target.com -w discovery.txt --eagle baseline.jsonl
 
 -   **Why:** `--eagle` filters out everything you've already seen. It highlights **only what changed**. If a developer pushes a `/dev/` or `/backup/` folder on a Friday night, Eagle mode surfaces it instantly.
 
-5\. Hunting for Hidden Treasures: "The Mutator"
+6\. Hunting for Hidden Treasures: "The Mutator"
 -----------------------------------------------
 
 Backups and swap files are gold mines for source code disclosure.
@@ -166,7 +191,7 @@ dirfuzz -u https://target.com -w files.txt -e php,asp,aspx --mutate
 
 -   **Why:** The `--mutate` flag will automatically check for `config.php.bak`, `index.php~`, or `.DS_Store`. These often contain hardcoded credentials or logic that the main app hides.
 
-6\. Advanced: The "Active PoC" (Lua)
+7\. Advanced: The "Active PoC" (Lua)
 ------------------------------------
 
 When a new CVE drops (like a Log4Shell or Spring4Shell), you can use the Lua engine to test for it at scale without needing a separate tool.

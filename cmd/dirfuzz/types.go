@@ -65,6 +65,7 @@ type cliConfig struct {
 	MaxRetries          int
 	DryRun              bool
 	MaxWSFrames         int
+	FourOhThreeBypass   bool
 
 	// ── Eagle mode (differential scan) ───────────────────────────────────────
 	EagleFile string // path to previous JSONL baseline
