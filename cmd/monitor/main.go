@@ -329,14 +329,8 @@ func runScanCycle(
 		curHashes[res.Path] = h
 	}
 
-	if shutdownRequested() {
-		if err := writeStateWithRetry(cfg.StateFile, results, logger, normalizeRe, curHashes); err != nil {
-			return 0, err
-		}
-	} else {
-		if err := writeStateAtomic(cfg.StateFile, results, normalizeRe, curHashes); err != nil {
-			return 0, fmt.Errorf("failed to persist state: %w", err)
-		}
+	if err := persistState(cfg.StateFile, results, logger, normalizeRe, curHashes, shutdownRequested()); err != nil {
+		return 0, err
 	}
 
 	// Baseline behavior: if the state file did not exist prior to this cycle,
@@ -678,6 +672,21 @@ func postDiscordWebhook(ctx context.Context, logger *slog.Logger, webhook, targe
 
 // ─── State persistence ───────────────────────────────────────────────────────
 
+func persistState(path string, results []engine.Result, logger *slog.Logger, normalizeRe *regexp.Regexp, precomputedHashes map[string]string, isShutdown bool) error {
+	var err error
+	if isShutdown {
+		err = writeStateWithRetry(path, results, logger, normalizeRe, precomputedHashes)
+	} else {
+		err = writeStateAtomic(path, results, normalizeRe, precomputedHashes)
+	}
+	if err != nil {
+		logger.Error("failed to persist state", "state_file", path, "entries", len(results), "error", err)
+		return fmt.Errorf("failed to persist state: %w", err)
+	}
+	logger.Info("persisted current state", "state_file", path, "entries", len(results))
+	return nil
+}
+
 func writeStateWithRetry(path string, results []engine.Result, logger *slog.Logger, normalizeRe *regexp.Regexp, precomputedHashes map[string]string) error {
 	for attempt := 1; attempt <= maxWriteRetries; attempt++ {
 		err := writeStateAtomic(path, results, normalizeRe, precomputedHashes)
@@ -691,12 +700,19 @@ func writeStateWithRetry(path string, results []engine.Result, logger *slog.Logg
 }
 
 func writeStateAtomic(path string, results []engine.Result, normalizeRe *regexp.Regexp, precomputedHashes map[string]string) error {
-	tmpPath := path + ".tmp"
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" {
+		dir = "."
+	}
 
-	file, err := os.Create(tmpPath)
+	file, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temp state file: %w", err)
 	}
+	tmpPath := file.Name()
+	defer func() {
+		_ = os.Remove(tmpPath)
+	}()
 
 	bufw := bufio.NewWriter(file)
 	encoder := json.NewEncoder(bufw)
@@ -731,7 +747,39 @@ func writeStateAtomic(path string, results []engine.Result, normalizeRe *regexp.
 	}
 
 	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("rename temp state file: %w", err)
+		if copyErr := replaceFileContents(tmpPath, path); copyErr != nil {
+			return fmt.Errorf("replace state file (rename: %v, copy fallback: %w)", err, copyErr)
+		}
+		return nil
+	}
+
+	return nil
+}
+
+func replaceFileContents(srcPath, dstPath string) error {
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return fmt.Errorf("open temp state file: %w", err)
+	}
+	defer src.Close()
+
+	dst, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("open destination state file: %w", err)
+	}
+
+	if _, err := io.Copy(dst, src); err != nil {
+		_ = dst.Close()
+		return fmt.Errorf("copy temp state file: %w", err)
+	}
+
+	if err := dst.Sync(); err != nil {
+		_ = dst.Close()
+		return fmt.Errorf("sync destination state file: %w", err)
+	}
+
+	if err := dst.Close(); err != nil {
+		return fmt.Errorf("close destination state file: %w", err)
 	}
 
 	return nil
