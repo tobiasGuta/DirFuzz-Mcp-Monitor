@@ -11,6 +11,8 @@ Thumbs.db
 # React build output (embedded into Go, but not tracked in Git)
 web/dist/
 web/build/
+wordlists/big.txt
+wordlists/actions.txt
 
 # Go build artifacts
 *.test
