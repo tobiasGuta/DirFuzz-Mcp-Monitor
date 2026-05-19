@@ -27,16 +27,16 @@ func printDryRunEstimate(cfg cliConfig, est engine.Estimate) {
 	}
 }
 
-func writeReportIfRequested(cfg cliConfig, results []engine.Result) error {
+func writeReportIfRequested(eng *engine.Engine, cfg cliConfig, results []engine.Result) error {
 	if cfg.ReportFile == "" {
 		return nil
 	}
 	var body string
 	switch strings.ToLower(cfg.ReportFormat) {
 	case "html":
-		body = renderHTMLReport(cfg, results)
+		body = renderHTMLReport(eng, cfg, results)
 	case "", "markdown", "md":
-		body = renderMarkdownReport(cfg, results)
+		body = renderMarkdownReport(eng, cfg, results)
 	default:
 		return fmt.Errorf("unsupported report format %q", cfg.ReportFormat)
 	}
@@ -52,13 +52,25 @@ func writeReportIfRequested(cfg cliConfig, results []engine.Result) error {
 	return os.WriteFile(cfg.ReportFile, []byte(body), 0o644)
 }
 
-func renderMarkdownReport(cfg cliConfig, results []engine.Result) string {
+func renderMarkdownReport(eng *engine.Engine, cfg cliConfig, results []engine.Result) string {
 	sortResults(results)
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "# DirFuzz Report\n\n")
 	fmt.Fprintf(&sb, "- Target: `%s`\n", cfg.Target)
 	fmt.Fprintf(&sb, "- Generated: `%s`\n", time.Now().Format(time.RFC3339))
 	fmt.Fprintf(&sb, "- Findings: `%d`\n\n", len(results))
+	if eng != nil {
+		rows := eng.EvasionSummaryRows()
+		if len(rows) > 0 {
+			sb.WriteString("## WAF Bypass Summary\n\n")
+			sb.WriteString("| Technique | Attempts | Bypasses | Rate% |\n")
+			sb.WriteString("| --- | ---: | ---: | ---: |\n")
+			for _, row := range rows {
+				fmt.Fprintf(&sb, "| %s | %d | %d | %.1f%% |\n", row.Technique, row.Attempts, row.Bypasses, row.Rate*100)
+			}
+			sb.WriteString("\n")
+		}
+	}
 	if len(results) == 0 {
 		sb.WriteString("No findings.\n")
 		return sb.String()
@@ -79,7 +91,7 @@ func renderMarkdownReport(cfg cliConfig, results []engine.Result) string {
 	return sb.String()
 }
 
-func renderHTMLReport(cfg cliConfig, results []engine.Result) string {
+func renderHTMLReport(eng *engine.Engine, cfg cliConfig, results []engine.Result) string {
 	sortResults(results)
 	var sb strings.Builder
 	sb.WriteString("<!doctype html><html><head><meta charset=\"utf-8\"><title>DirFuzz Report</title>")
@@ -87,6 +99,17 @@ func renderHTMLReport(cfg cliConfig, results []engine.Result) string {
 	sb.WriteString("</head><body>")
 	fmt.Fprintf(&sb, "<h1>DirFuzz Report</h1><p><strong>Target:</strong> <code>%s</code></p>", html.EscapeString(cfg.Target))
 	fmt.Fprintf(&sb, "<p><strong>Generated:</strong> <code>%s</code> <span class=\"pill\">%d findings</span></p>", time.Now().Format(time.RFC3339), len(results))
+	if eng != nil {
+		rows := eng.EvasionSummaryRows()
+		if len(rows) > 0 {
+			sb.WriteString("<h2>WAF Bypass Summary</h2><table><thead><tr><th>Technique</th><th>Attempts</th><th>Bypasses</th><th>Rate%</th></tr></thead><tbody>")
+			for _, row := range rows {
+				fmt.Fprintf(&sb, "<tr><td>%s</td><td>%d</td><td>%d</td><td>%.1f%%</td></tr>",
+					html.EscapeString(row.Technique), row.Attempts, row.Bypasses, row.Rate*100)
+			}
+			sb.WriteString("</tbody></table>")
+		}
+	}
 	if len(results) == 0 {
 		sb.WriteString("<p>No findings.</p></body></html>")
 		return sb.String()

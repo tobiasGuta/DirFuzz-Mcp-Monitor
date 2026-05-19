@@ -15,14 +15,15 @@ This repository contains:
 DirFuzz transcends a simple directory enumerator, acting as a complete protocol fuzzing suite tightly integrated with both AI environments and manual bug bounty workflows.
 
 -   **High-Performance HTTP Engine:** Built on a custom raw HTTP/1.1 and **HTTP/2** client with state-of-the-art connection pooling. It features **chunked transfer encoding** support, TLS cipher randomization, persistent connection recycling, and **SOCKS5/HTTP Proxy Rotation**.
--   **WAF Fingerprinting & Evasion + 403 Bypass Systematizer:** Automatically fingerprints responses against major Web Application Firewalls (AWS WAF, Cloudflare, Akamai, Barracuda, F5). When a 403 is encountered, DirFuzz can automatically retry with well-known bypass techniques (`--bypass-403`): header injection (X-Original-URL, X-Rewrite-URL, X-Forwarded-For), path normalization tricks (trailing slashes, dot-slashes, URL encoding), and IP-spoofing headers—all deduplicated and rate-limited naturally through the worker pool.
+-   **WAF Fingerprinting & Adaptive Evasion:** Automatically fingerprints responses against major Web Application Firewalls (AWS WAF, Cloudflare, Akamai, Barracuda, F5). When a 403 is encountered, DirFuzz can now use a stateful feedback loop (`--bypass-403`) that ranks bypass techniques by observed success rate, caps attempts per path with `--evasion-limit`, and writes a WAF bypass summary into the final report.
 -   **Suite Bridge & Interactive TUI:** An interactive Terminal UI featuring real-time logging, response insights, and a **Suite Bridge**. With a single keystroke, you can send any discovered endpoint straight to **Burp Suite Repeater (`r`)** or **Intruder (`i`)**.
 -   **Lua Plugin Ecosystem:** Write custom fuzzing logic using the built-in parallel Lua VM pool:
     -   **Transformers:** Manipulate requests raw on-the-fly (`transform_plugin.go`).
     -   **Matchers & Mutators:** Define custom payload generation and match signatures.
     -   **Active PoC:** Enables dynamic, multi-stage exploitation (e.g. `Spring4Shell`) directly from Lua using the exposed `http_send()` function. 
--   **Smart Target & Recursion Tracking:** Configurable `MaxDepth` recursion, intelligent wildcard calibration (`--calibrate`) to baseline soft-404s, and `SmartAPI` mode to heavily restrict method-fuzzing permutations uniquely to fuzzy path patterns (`/api/`, `/v1/`).
--   **Advanced Filtering & Deduplication:** Filter by HTTP codes, response sizes, payload content boundaries, regex body matches, word/line counts, or strict response time thresholds. Employs a low-contention Bloom filter for instant memory-efficient deduplication, alongside an **AutoFilter threshold** (`-af`) to silently suppress recurring spam sizes.
+-   **Smart Target Harvesting:** Before the main scan, `--harvest` can mine routes from JavaScript bundles, OpenAPI/Swagger specs, and GraphQL introspection to seed the queue with app-specific paths instead of only brute-forcing a static list.
+-   **Smart Target & Recursion Tracking:** Configurable `MaxDepth` recursion, intelligent wildcard calibration (`--calibrate`) to baseline soft-404s, `SmartAPI` mode to restrict method fuzzing to API-like paths (`/api/`, `/v1/`), and a response-time oracle (`--time-oracle`) for blind enumeration when the app returns identical status codes and bodies.
+-   **Advanced Filtering & Deduplication:** Filter by HTTP codes, response sizes, payload content boundaries, regex body matches, word/line counts, or strict response time thresholds. Employs a low-contention Bloom filter for instant memory-efficient deduplication, alongside an **AutoFilter threshold** (`-af`) and SimHash soft-404 clustering to suppress repetitive error templates.
 -   **WebSocket Frame Tracking:** Configurable WebSocket frame extraction and logging constraint (`--max-ws-frames`) extending scope across WS endpoints.
 -   **Eagle Mode & State Monitoring:** Conduct differential scans (`--eagle`) against previous baseline JSONL persistence files. A `cmd/monitor` binary orchestrates continuous execution hooks and **Discord webhook alerting** upon discovering new endpoints.
 -   **Safe AI Tooling (MCP):** A completely isolated Model Context Protocol (MCP) server that exposes fuzzing APIs `dirfuzz_scan` & `dirfuzz_list_wordlists` to Claude or Copilot—fortified by strict SSRF prevention, H1-Scope JSON validator, and path-traversal resistant wordlist selection.
@@ -64,10 +65,22 @@ The included `docker-compose.yml` can build and run the monitor image and mount 
 ./dirfuzz -u https://api.example.com -w wordlists/common.txt -t 50 -r -depth 3 --proxy-out http://127.0.0.1:8080
 ```
 
+**Modern Web-App Triage:**
+```bash
+# Harvest routes from JS/specs, fuzz over HTTP/2, and keep bypass attempts tight
+./dirfuzz -u https://app.example.com -w wordlists/common.txt --harvest --h2 --bypass-403 --evasion-limit 4 -af 10
+```
+
 **CLI Headless Fuzzing (Save to JSONL):**
 ```bash
 # Great for continuous baselining or piping into analysis workflows
 ./dirfuzz --no-tui -u https://example.com -w wordlists/common.txt -o results.jsonl -v
+```
+
+**Blind Enumeration with Timing Oracle:**
+```bash
+# Useful when everything returns the same status/body but real paths take longer
+./dirfuzz -u https://example.com -w wordlists/common.txt --time-oracle --time-n 5 --time-k 2.5 --time-trim
 ```
 
 **Lua Active PoC Bridge:**
@@ -83,7 +96,7 @@ The included `docker-compose.yml` can build and run the monitor image and mount 
 **403 Bypass Systematizer:**
 ```bash
 # Automatically retry every 403 with header injection and path mutations
-./dirfuzz -u https://example.com -w wordlists/common.txt --bypass-403 -t 50
+./dirfuzz -u https://example.com -w wordlists/common.txt --bypass-403 --evasion-limit 4 -t 50
 ```
 
 ### Flag notes that trip people up
@@ -92,9 +105,22 @@ The included `docker-compose.yml` can build and run the monitor image and mount 
 - `-o` writes surfaced results to a file. It does not save every request the scanner sends.
 - `--save-raw` stores the raw request/response inside each saved hit when `-o` is enabled.
 - `--no-tui` is the cleanest mode when you want a plain JSONL file for piping or later analysis.
-- `--bypass-403` automatically retries every 403 hit with 8 standard bypass techniques (headers, path mutations). Bypass attempts are deduplicated and rate-limited naturally. Results pass through your existing filters just like normal hits.
+- `--harvest` mines routes from JavaScript, OpenAPI/Swagger, and GraphQL before the main scan starts. Use `--harvest-js` or `--harvest-api` when you only want one discovery source family.
+- `--time-oracle` is for blind enumeration when every response looks the same. Tune `--time-n`, `--time-k`, and `--time-trim` to match the target's latency profile.
+- `--h2` switches the scan to HTTP/2, which is often worth trying against modern reverse proxies and WAFs that inspect H1 and H2 differently.
+- `--bypass-403` now learns over time. It ranks techniques by observed success rate, caps attempts per path with `--evasion-limit`, and includes a summary in the final report.
 
-Here is a strategic workflow for how to use DirFuzz effectively in a real-world engagement:
+Here is a practical workflow for using DirFuzz effectively in a real-world web application assessment:
+
+### Suggested Web App Pentest Playbook
+
+1. Start with `--calibrate` and `-af` so wildcard and soft-404 noise gets suppressed early.
+2. Add `--harvest` to pull app-specific routes from JavaScript bundles and API specs before the brute-force pass.
+3. Try `--h2` on modern apps behind CDNs, ALBs, or reverse proxies, especially when H1 looks heavily filtered.
+4. Use `--time-oracle` when every endpoint returns the same body and status but real endpoints are slower.
+5. Use `--bypass-403 --evasion-limit 4` when you know the path exists but access controls are blocking you.
+6. Keep `--proxy-out` pointed at Burp Suite when you want to inspect, replay, and tune findings manually.
+7. Export a report with `--report` so the WAF bypass summary and high-signal hits are easy to share.
 
 * * * * *
 
@@ -262,7 +288,7 @@ When `-o` is set, DirFuzz writes the results it surfaces as hits. The default fo
 
 `--save-raw` adds the raw HTTP request/response bytes to each saved hit. It does not create a full request log by itself, and it only affects results that are actually written.
 
-For standalone summaries, use `--report` with `--report-format html|markdown`.
+For standalone summaries, use `--report` with `--report-format html|markdown`. The report now includes a WAF bypass summary table when `--bypass-403` is active, which is useful for comparing technique effectiveness across a scan.
 
 * * * * *
 

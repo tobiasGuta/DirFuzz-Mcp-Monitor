@@ -74,6 +74,32 @@ func TestClassify403(t *testing.T) {
 	}
 }
 
+func TestSimhashBodyIsStable(t *testing.T) {
+	body := []byte("Page /foo not found")
+	if got, want := simhashBody(body), simhashBody(body); got != want {
+		t.Fatalf("simhashBody() = %d, want %d", got, want)
+	}
+}
+
+func TestSimhashSoft404Clustering(t *testing.T) {
+	eng := NewEngine(1, 100, 0.01)
+	eng.SimhashThreshold = 3
+	eng.SimhashClusterLimit = 2
+
+	if eng.isSimhashSoftFour(0x1234567890abcdef) {
+		t.Fatal("first cluster member should not be suppressed")
+	}
+	if !eng.isSimhashSoftFour(0x1234567890abcdee) {
+		t.Fatal("second close cluster member should be suppressed at the limit")
+	}
+	if !eng.isSimhashSoftFour(0x1234567890abcded) {
+		t.Fatal("subsequent close cluster member should stay suppressed")
+	}
+	if eng.isSimhashSoftFour(0xfedcba0987654321) {
+		t.Fatal("distant hash should start a fresh cluster")
+	}
+}
+
 func TestAutoCalibrate(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "Wildcard response")

@@ -3,8 +3,194 @@ package engine
 import (
 	"fmt"
 	"math/rand/v2"
+	"sort"
 	"strings"
+	"sync"
 )
+
+const evasionRankingFloor = 5
+
+// EvasionScoreboard tracks how each bypass technique performs across the scan.
+type EvasionScoreboard struct {
+	mu       sync.RWMutex
+	attempts map[string]int
+	hits     map[string]int
+}
+
+// EvasionScoreboardRow is a rendered scoreboard entry.
+type EvasionScoreboardRow struct {
+	Technique string
+	Attempts  int
+	Bypasses  int
+	Rate      float64
+}
+
+func NewEvasionScoreboard() *EvasionScoreboard {
+	return &EvasionScoreboard{
+		attempts: make(map[string]int),
+		hits:     make(map[string]int),
+	}
+}
+
+func (s *EvasionScoreboard) Record(technique string, bypassed bool) {
+	if s == nil || technique == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.attempts[technique]++
+	if bypassed {
+		s.hits[technique]++
+	}
+}
+
+func (s *EvasionScoreboard) snapshot() map[string]EvasionScoreboardRow {
+	out := make(map[string]EvasionScoreboardRow)
+	if s == nil {
+		return out
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for technique, attempts := range s.attempts {
+		row := EvasionScoreboardRow{
+			Technique: technique,
+			Attempts:  attempts,
+			Bypasses:  s.hits[technique],
+		}
+		if attempts > 0 {
+			row.Rate = float64(row.Bypasses) / float64(attempts)
+		}
+		out[technique] = row
+	}
+	for technique, bypasses := range s.hits {
+		if _, ok := out[technique]; ok {
+			continue
+		}
+		out[technique] = EvasionScoreboardRow{
+			Technique: technique,
+			Bypasses:  bypasses,
+			Rate:      0,
+		}
+	}
+	return out
+}
+
+func (s *EvasionScoreboard) Summary() []EvasionScoreboardRow {
+	rows := s.snapshot()
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]EvasionScoreboardRow, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Rate != out[j].Rate {
+			return out[i].Rate > out[j].Rate
+		}
+		if out[i].Attempts != out[j].Attempts {
+			return out[i].Attempts > out[j].Attempts
+		}
+		return out[i].Technique < out[j].Technique
+	})
+	return out
+}
+
+func (s *EvasionScoreboard) RankedTechniques(vendor string) []EvasionTechnique {
+	base := EvasionStrategiesFor(vendor)
+	if len(base) == 0 || s == nil {
+		return base
+	}
+
+	rows := s.snapshot()
+	totalAttempts := 0
+	for _, row := range rows {
+		totalAttempts += row.Attempts
+	}
+	if totalAttempts < evasionRankingFloor {
+		return base
+	}
+
+	type scoredTechnique struct {
+		tech  EvasionTechnique
+		rate  float64
+		score EvasionScoreboardRow
+		idx   int
+	}
+
+	scored := make([]scoredTechnique, 0, len(base))
+	for i, tech := range base {
+		row, ok := rows[tech.Name]
+		if !ok || row.Attempts == 0 {
+			scored = append(scored, scoredTechnique{tech: tech, rate: -1, idx: i})
+			continue
+		}
+		scored = append(scored, scoredTechnique{tech: tech, rate: row.Rate, score: row, idx: i})
+	}
+
+	sort.SliceStable(scored, func(i, j int) bool {
+		li, lj := scored[i], scored[j]
+		if li.rate < 0 && lj.rate < 0 {
+			return li.idx < lj.idx
+		}
+		if li.rate < 0 {
+			return false
+		}
+		if lj.rate < 0 {
+			return true
+		}
+		if li.rate != lj.rate {
+			return li.rate > lj.rate
+		}
+		if li.score.Attempts != lj.score.Attempts {
+			return li.score.Attempts > lj.score.Attempts
+		}
+		return li.idx < lj.idx
+	})
+
+	out := make([]EvasionTechnique, 0, len(scored))
+	for _, item := range scored {
+		out = append(out, item.tech)
+	}
+	return out
+}
+
+func (e *Engine) evasionTechniqueSeen(path, technique string) bool {
+	if e == nil || path == "" || technique == "" {
+		return false
+	}
+	v, ok := e.evasionAttempted.Load(path)
+	if !ok {
+		return false
+	}
+	seen, _ := v.([]string)
+	for _, name := range seen {
+		if name == technique {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Engine) markEvasionTechnique(path, technique string) {
+	if e == nil || path == "" || technique == "" {
+		return
+	}
+	v, _ := e.evasionAttempted.Load(path)
+	seen, _ := v.([]string)
+	if e.evasionTechniqueSeen(path, technique) {
+		return
+	}
+	updated := append(append([]string(nil), seen...), technique)
+	e.evasionAttempted.Store(path, updated)
+}
+
+func (e *Engine) EvasionSummaryRows() []EvasionScoreboardRow {
+	if e == nil || e.EvasionScoreboard == nil {
+		return nil
+	}
+	return e.EvasionScoreboard.Summary()
+}
 
 // WAFResult holds the result of WAF fingerprinting.
 type WAFResult struct {
@@ -125,23 +311,23 @@ type EvasionTechnique struct {
 	ModifyRequest func(rawPath string, headers map[string]string, method string) (string, map[string]string)
 }
 
+func cloneHeadersMap(h map[string]string) map[string]string {
+	n := make(map[string]string, len(h))
+	for k, v := range h {
+		n[k] = v
+	}
+	return n
+}
+
 // EvasionStrategiesFor returns evasion techniques for the given WAF vendor.
 func EvasionStrategiesFor(vendor string) []EvasionTechnique {
-	cloneHeaders := func(h map[string]string) map[string]string {
-		n := make(map[string]string, len(h))
-		for k, v := range h {
-			n[k] = v
-		}
-		return n
-	}
-
 	switch vendor {
 	case "modsecurity":
 		return []EvasionTechnique{
 			{
 				Name: "double-slash",
 				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
-					nh := cloneHeaders(h)
+					nh := cloneHeadersMap(h)
 					if method != "GET" && method != "HEAD" {
 						nh["Transfer-Encoding"] = "chunked"
 					}
@@ -151,13 +337,13 @@ func EvasionStrategiesFor(vendor string) []EvasionTechnique {
 			{
 				Name: "null-byte",
 				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
-					return p + "%00", cloneHeaders(h)
+					return p + "%00", cloneHeadersMap(h)
 				},
 			},
 			{
 				Name: "chunked-encoding",
 				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
-					nh := cloneHeaders(h)
+					nh := cloneHeadersMap(h)
 					if method != "GET" && method != "HEAD" {
 						nh["Transfer-Encoding"] = "chunked"
 					}
@@ -178,13 +364,13 @@ func EvasionStrategiesFor(vendor string) []EvasionTechnique {
 							sb.WriteString(strings.ToUpper(string(c)))
 						}
 					}
-					return sb.String(), cloneHeaders(h)
+					return sb.String(), cloneHeadersMap(h)
 				},
 			},
 			{
 				Name: "cache-buster",
 				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
-					return fmt.Sprintf("%s?cb=%d", p, rand.Int64()), cloneHeaders(h)
+					return fmt.Sprintf("%s?cb=%d", p, rand.Int64()), cloneHeadersMap(h)
 				},
 			},
 		}
@@ -193,7 +379,7 @@ func EvasionStrategiesFor(vendor string) []EvasionTechnique {
 			{
 				Name: "xff-localhost",
 				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
-					nh := cloneHeaders(h)
+					nh := cloneHeadersMap(h)
 					nh["X-Forwarded-For"] = "127.0.0.1"
 					nh["X-Remote-IP"] = "127.0.0.1"
 					nh["X-Originating-IP"] = "127.0.0.1"
@@ -206,7 +392,7 @@ func EvasionStrategiesFor(vendor string) []EvasionTechnique {
 			{
 				Name: "cf-connecting-ip",
 				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
-					nh := cloneHeaders(h)
+					nh := cloneHeadersMap(h)
 					nh["CF-Connecting-IP"] = "127.0.0.1"
 					nh["X-Forwarded-For"] = "127.0.0.1"
 					return p, nh
@@ -215,35 +401,133 @@ func EvasionStrategiesFor(vendor string) []EvasionTechnique {
 			{
 				Name: "path-dotslash",
 				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
-					return "/%2e" + p, cloneHeaders(h)
+					return "/%2e" + p, cloneHeadersMap(h)
 				},
 			},
 		}
 	default:
 		return []EvasionTechnique{
 			{
+				Name: "x-original-url",
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
+					nh := cloneHeadersMap(h)
+					nh["X-Original-URL"] = p
+					return "/", nh
+				},
+			},
+			{
+				Name: "x-rewrite-url",
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
+					nh := cloneHeadersMap(h)
+					nh["X-Rewrite-URL"] = p
+					return "/", nh
+				},
+			},
+			{
+				Name: "x-custom-ip-127",
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
+					nh := cloneHeadersMap(h)
+					nh["X-Custom-IP-Authorization"] = "127.0.0.1"
+					return p, nh
+				},
+			},
+			{
+				Name: "trailing-slash",
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
+					return strings.TrimRight(p, "/") + "/", cloneHeadersMap(h)
+				},
+			},
+			{
+				Name: "dot-slash",
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
+					return p + "/./", cloneHeadersMap(h)
+				},
+			},
+			{
+				Name: "url-encoded-slash",
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
+					return strings.Replace(p, "/", "%2f", 1), cloneHeadersMap(h)
+				},
+			},
+			{
+				Name: "double-slash-prefix",
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
+					return "//" + strings.TrimPrefix(p, "/"), cloneHeadersMap(h)
+				},
+			},
+			{
+				Name: "x-forwarded-for-127",
+				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
+					nh := cloneHeadersMap(h)
+					nh["X-Forwarded-For"] = "127.0.0.1"
+					return p, nh
+				},
+			},
+			{
 				Name: "head-method",
 				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
-					return p, cloneHeaders(h)
+					return p, cloneHeadersMap(h)
 				},
 			},
 			{
 				Name: "trailing-dot-slash",
 				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
-					return p + "/./", cloneHeaders(h)
+					return p + "/./", cloneHeadersMap(h)
 				},
 			},
 			{
 				Name: "unicode-first-char",
 				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
 					if len(p) > 1 {
-						return fmt.Sprintf("/%s%s", "%C0%AF", p[1:]), cloneHeaders(h)
+						return fmt.Sprintf("/%s%s", "%C0%AF", p[1:]), cloneHeadersMap(h)
 					}
-					return p, cloneHeaders(h)
+					return p, cloneHeadersMap(h)
 				},
 			},
 		}
 	}
+}
+
+// H2EvasionStrategies returns HTTP/2-specific evasion hooks.
+// The current client API exposes HTTP/2 streams but not raw frame injection,
+// so these techniques are lightweight request variants that keep the hooks in
+// place for future frame-level expansion.
+func H2EvasionStrategies() []EvasionTechnique {
+	return []EvasionTechnique{
+		{
+			Name: "h2-header-case",
+			ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
+				if strings.Contains(p, "?") {
+					return p + "&h2case=1", cloneHeadersMap(h)
+				}
+				return p + "?h2case=1", cloneHeadersMap(h)
+			},
+		},
+		{
+			Name: "h2-priority-frame",
+			ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
+				if strings.Contains(p, "?") {
+					return p + "&h2prio=1", cloneHeadersMap(h)
+				}
+				return p + "?h2prio=1", cloneHeadersMap(h)
+			},
+		},
+	}
+}
+
+func FormatEvasionSummaryRows(rows []EvasionScoreboardRow) string {
+	if len(rows) == 0 {
+		return "WAF Bypass Summary\nNo bypass attempts recorded."
+	}
+	var sb strings.Builder
+	sb.WriteString("WAF Bypass Summary\n")
+	sb.WriteString("Technique | Attempts | Bypasses | Rate%\n")
+	sb.WriteString("--- | ---: | ---: | ---:\n")
+	for _, row := range rows {
+		fmt.Fprintf(&sb, "%s | %d | %d | %.1f%%\n",
+			row.Technique, row.Attempts, row.Bypasses, row.Rate*100)
+	}
+	return sb.String()
 }
 
 // Bypass403Techniques returns path mutations and header sets that are

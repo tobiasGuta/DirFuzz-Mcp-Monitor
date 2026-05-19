@@ -45,6 +45,18 @@ type scanProfile struct {
 	Mutate              bool          `yaml:"mutate" json:"mutate"`
 	SmartAPI            bool          `yaml:"smart_api" json:"smart_api"`
 	AutoFilterThreshold int           `yaml:"auto_filter_threshold" json:"auto_filter_threshold"`
+	SimhashThreshold    int           `yaml:"simhash_threshold" json:"simhash_threshold"`
+	SimhashClusterLimit int           `yaml:"simhash_cluster_limit" json:"simhash_cluster_limit"`
+	H2Mode              bool          `yaml:"h2" json:"h2"`
+	H2ConcurrentStreams int           `yaml:"h2_streams" json:"h2_streams"`
+	TimingOracle        bool          `yaml:"time_oracle" json:"time_oracle"`
+	TimeOracleK         float64       `yaml:"time_k" json:"time_k"`
+	TimeOracleN         int           `yaml:"time_n" json:"time_n"`
+	TimeTrim            bool          `yaml:"time_trim" json:"time_trim"`
+	Harvest             bool          `yaml:"harvest" json:"harvest"`
+	HarvestJS           bool          `yaml:"harvest_js" json:"harvest_js"`
+	HarvestAPI          bool          `yaml:"harvest_api" json:"harvest_api"`
+	EvasionLimit        int           `yaml:"evasion_limit" json:"evasion_limit"`
 	MaxRetries          int           `yaml:"max_retries" json:"max_retries"`
 	DryRun              bool          `yaml:"dry_run" json:"dry_run"`
 	EagleFile           string        `yaml:"eagle_file" json:"eagle_file"`
@@ -71,58 +83,194 @@ func applyProfile(cfg *cliConfig, set map[string]bool) error {
 	p.MatchWords = -1
 	p.MatchLines = -1
 	p.AutoFilterThreshold = -1
+	p.SimhashThreshold = -1
+	p.SimhashClusterLimit = -1
+	p.H2ConcurrentStreams = -1
+	p.TimeOracleN = -1
+	p.TimeOracleK = -1
+	p.EvasionLimit = -1
 
 	if err := yaml.Unmarshal(data, &p); err != nil {
 		return err
 	}
 
-	if !set["u"] && p.Target != "" { cfg.Target = p.Target }
-	if !set["w"] && p.Wordlist != "" { cfg.Wordlist = p.Wordlist }
-	if !set["t"] && p.Threads > 0 { cfg.Threads = p.Threads }
-	if !set["delay"] && p.Delay > 0 { cfg.Delay = p.Delay }
-	if !set["rps"] && p.RPS > 0 { cfg.RPS = p.RPS }
-	if !set["ua"] && p.UserAgent != "" { cfg.UserAgent = p.UserAgent }
-	if !set["H"] && len(p.Headers) > 0 { cfg.Headers = p.Headers }
-	if !set["b"] && p.Cookie != "" { cfg.Cookie = p.Cookie }
-	if !set["m"] && p.Methods != "" { cfg.Methods = p.Methods }
-	if !set["d"] && p.Body != "" { cfg.Body = p.Body }
-	if !set["follow"] && p.Follow { cfg.Follow = true }
-	if !set["max-redirects"] && p.MaxRedirects > 0 { cfg.MaxRedirects = p.MaxRedirects }
-	if !set["timeout"] && p.Timeout > 0 { cfg.Timeout = p.Timeout }
-	if !set["k"] && p.Insecure { cfg.Insecure = true }
-	if !set["mc"] && p.MatchCodes != "" { cfg.MatchCodes = p.MatchCodes }
-	if !set["fs"] && p.FilterSizes != "" { cfg.FilterSizes = p.FilterSizes }
-	if !set["e"] && p.Extensions != "" { cfg.Extensions = p.Extensions }
-	if !set["mr"] && p.MatchRegex != "" { cfg.MatchRegex = p.MatchRegex }
-	if !set["fr"] && p.FilterRegex != "" { cfg.FilterRegex = p.FilterRegex }
-	if !set["fw"] && p.FilterWords != -1 { cfg.FilterWords = p.FilterWords }
-	if !set["fl"] && p.FilterLines != -1 { cfg.FilterLines = p.FilterLines }
-	if !set["mw"] && p.MatchWords != -1 { cfg.MatchWords = p.MatchWords }
-	if !set["ml"] && p.MatchLines != -1 { cfg.MatchLines = p.MatchLines }
-	if !set["rt-min"] && p.RTMin > 0 { cfg.RTMin = p.RTMin }
-	if !set["rt-max"] && p.RTMax > 0 { cfg.RTMax = p.RTMax }
-	if !set["of"] && p.OutputFormat != "" { cfg.OutputFormat = p.OutputFormat }
-	if !set["o"] && p.OutputFile != "" { cfg.OutputFile = p.OutputFile }
-	if !set["report"] && p.ReportFile != "" { cfg.ReportFile = p.ReportFile }
-	if !set["report-format"] && p.ReportFormat != "" { cfg.ReportFormat = p.ReportFormat }
-	if !set["save-raw"] && p.SaveRaw { cfg.SaveRaw = true }
-	if !set["r"] && p.Recursive { cfg.Recursive = true }
-	if !set["depth"] && p.MaxDepth > 0 { cfg.MaxDepth = p.MaxDepth }
-	if !set["mutate"] && p.Mutate { cfg.Mutate = true }
-	if !set["smart-api"] && p.SmartAPI { cfg.SmartAPI = true }
-	if !set["af"] && p.AutoFilterThreshold != -1 { cfg.AutoFilterThreshold = p.AutoFilterThreshold }
-	if !set["retry"] && p.MaxRetries > 0 { cfg.MaxRetries = p.MaxRetries }
-	if !set["dry-run"] && p.DryRun { cfg.DryRun = true }
-	if !set["eagle"] && p.EagleFile != "" { cfg.EagleFile = p.EagleFile }
-	if !set["resume"] && p.Resume { cfg.Resume = true }
-	if !set["resume-file"] && p.ResumeFile != "" { cfg.ResumeFile = p.ResumeFile }
-	if !set["calibrate"] && p.Calibrate { cfg.Calibrate = true }
-	if !set["proxy"] && p.ProxyFile != "" { cfg.ProxyFile = p.ProxyFile }
-	if !set["proxy-out"] && p.ProxyOut != "" { cfg.ProxyOut = p.ProxyOut }
-	if !set["plugin-match"] && p.PluginMatch != "" { cfg.PluginMatch = p.PluginMatch }
-	if !set["plugin-mutate"] && p.PluginMutate != "" { cfg.PluginMutate = p.PluginMutate }
-	if !set["no-tui"] && p.NoTUI { cfg.NoTUI = true }
-	if !set["v"] && p.Verbose { cfg.Verbose = true }
+	if !set["u"] && p.Target != "" {
+		cfg.Target = p.Target
+	}
+	if !set["w"] && p.Wordlist != "" {
+		cfg.Wordlist = p.Wordlist
+	}
+	if !set["t"] && p.Threads > 0 {
+		cfg.Threads = p.Threads
+	}
+	if !set["delay"] && p.Delay > 0 {
+		cfg.Delay = p.Delay
+	}
+	if !set["rps"] && p.RPS > 0 {
+		cfg.RPS = p.RPS
+	}
+	if !set["ua"] && p.UserAgent != "" {
+		cfg.UserAgent = p.UserAgent
+	}
+	if !set["H"] && len(p.Headers) > 0 {
+		cfg.Headers = p.Headers
+	}
+	if !set["b"] && p.Cookie != "" {
+		cfg.Cookie = p.Cookie
+	}
+	if !set["m"] && p.Methods != "" {
+		cfg.Methods = p.Methods
+	}
+	if !set["d"] && p.Body != "" {
+		cfg.Body = p.Body
+	}
+	if !set["follow"] && p.Follow {
+		cfg.Follow = true
+	}
+	if !set["max-redirects"] && p.MaxRedirects > 0 {
+		cfg.MaxRedirects = p.MaxRedirects
+	}
+	if !set["timeout"] && p.Timeout > 0 {
+		cfg.Timeout = p.Timeout
+	}
+	if !set["k"] && p.Insecure {
+		cfg.Insecure = true
+	}
+	if !set["mc"] && p.MatchCodes != "" {
+		cfg.MatchCodes = p.MatchCodes
+	}
+	if !set["fs"] && p.FilterSizes != "" {
+		cfg.FilterSizes = p.FilterSizes
+	}
+	if !set["e"] && p.Extensions != "" {
+		cfg.Extensions = p.Extensions
+	}
+	if !set["mr"] && p.MatchRegex != "" {
+		cfg.MatchRegex = p.MatchRegex
+	}
+	if !set["fr"] && p.FilterRegex != "" {
+		cfg.FilterRegex = p.FilterRegex
+	}
+	if !set["fw"] && p.FilterWords != -1 {
+		cfg.FilterWords = p.FilterWords
+	}
+	if !set["fl"] && p.FilterLines != -1 {
+		cfg.FilterLines = p.FilterLines
+	}
+	if !set["mw"] && p.MatchWords != -1 {
+		cfg.MatchWords = p.MatchWords
+	}
+	if !set["ml"] && p.MatchLines != -1 {
+		cfg.MatchLines = p.MatchLines
+	}
+	if !set["rt-min"] && p.RTMin > 0 {
+		cfg.RTMin = p.RTMin
+	}
+	if !set["rt-max"] && p.RTMax > 0 {
+		cfg.RTMax = p.RTMax
+	}
+	if !set["of"] && p.OutputFormat != "" {
+		cfg.OutputFormat = p.OutputFormat
+	}
+	if !set["o"] && p.OutputFile != "" {
+		cfg.OutputFile = p.OutputFile
+	}
+	if !set["report"] && p.ReportFile != "" {
+		cfg.ReportFile = p.ReportFile
+	}
+	if !set["report-format"] && p.ReportFormat != "" {
+		cfg.ReportFormat = p.ReportFormat
+	}
+	if !set["save-raw"] && p.SaveRaw {
+		cfg.SaveRaw = true
+	}
+	if !set["r"] && p.Recursive {
+		cfg.Recursive = true
+	}
+	if !set["depth"] && p.MaxDepth > 0 {
+		cfg.MaxDepth = p.MaxDepth
+	}
+	if !set["mutate"] && p.Mutate {
+		cfg.Mutate = true
+	}
+	if !set["smart-api"] && p.SmartAPI {
+		cfg.SmartAPI = true
+	}
+	if !set["af"] && p.AutoFilterThreshold != -1 {
+		cfg.AutoFilterThreshold = p.AutoFilterThreshold
+	}
+	if !set["simhash-threshold"] && p.SimhashThreshold != -1 {
+		cfg.SimhashThreshold = p.SimhashThreshold
+	}
+	if !set["simhash-cluster"] && p.SimhashClusterLimit != -1 {
+		cfg.SimhashClusterLimit = p.SimhashClusterLimit
+	}
+	if !set["h2"] && p.H2Mode {
+		cfg.H2Mode = true
+	}
+	if !set["h2-streams"] && p.H2ConcurrentStreams != -1 {
+		cfg.H2ConcurrentStreams = p.H2ConcurrentStreams
+	}
+	if !set["time-oracle"] && p.TimingOracle {
+		cfg.TimingOracle = true
+	}
+	if !set["time-k"] && p.TimeOracleK > 0 {
+		cfg.TimeOracleK = p.TimeOracleK
+	}
+	if !set["time-n"] && p.TimeOracleN != -1 {
+		cfg.TimeOracleN = p.TimeOracleN
+	}
+	if !set["time-trim"] && p.TimeTrim {
+		cfg.TimeTrim = true
+	}
+	if !set["harvest"] && p.Harvest {
+		cfg.Harvest = true
+	}
+	if !set["harvest-js"] && p.HarvestJS {
+		cfg.HarvestJS = true
+	}
+	if !set["harvest-api"] && p.HarvestAPI {
+		cfg.HarvestAPI = true
+	}
+	if !set["evasion-limit"] && p.EvasionLimit != -1 {
+		cfg.EvasionLimit = p.EvasionLimit
+	}
+	if !set["retry"] && p.MaxRetries > 0 {
+		cfg.MaxRetries = p.MaxRetries
+	}
+	if !set["dry-run"] && p.DryRun {
+		cfg.DryRun = true
+	}
+	if !set["eagle"] && p.EagleFile != "" {
+		cfg.EagleFile = p.EagleFile
+	}
+	if !set["resume"] && p.Resume {
+		cfg.Resume = true
+	}
+	if !set["resume-file"] && p.ResumeFile != "" {
+		cfg.ResumeFile = p.ResumeFile
+	}
+	if !set["calibrate"] && p.Calibrate {
+		cfg.Calibrate = true
+	}
+	if !set["proxy"] && p.ProxyFile != "" {
+		cfg.ProxyFile = p.ProxyFile
+	}
+	if !set["proxy-out"] && p.ProxyOut != "" {
+		cfg.ProxyOut = p.ProxyOut
+	}
+	if !set["plugin-match"] && p.PluginMatch != "" {
+		cfg.PluginMatch = p.PluginMatch
+	}
+	if !set["plugin-mutate"] && p.PluginMutate != "" {
+		cfg.PluginMutate = p.PluginMutate
+	}
+	if !set["no-tui"] && p.NoTUI {
+		cfg.NoTUI = true
+	}
+	if !set["v"] && p.Verbose {
+		cfg.Verbose = true
+	}
 	return nil
 }
 

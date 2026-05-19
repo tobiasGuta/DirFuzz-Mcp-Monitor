@@ -434,7 +434,16 @@ func findInteresting(results []engine.Result, previous map[string]prevInfo, curH
 				if delta < 0 {
 					delta = -delta
 				}
-				if delta > sizeChangeTolerance {
+
+				// Calculate percentage change to avoid false positives on large files
+				percentChange := 0.0
+				if prev.Size > 0 {
+					percentChange = (float64(delta) / float64(prev.Size)) * 100.0
+				}
+
+				// Trigger if change is > 1.5% OR if the raw byte difference is huge (> 2000 bytes).
+				// (Keeps the 100 byte tolerance for extremely tiny files under ~7KB)
+				if percentChange >= 1.5 || (delta > 2000) || (delta > sizeChangeTolerance && prev.Size < 500) {
 					key := fmt.Sprintf("%s|size|%d|%d", res.Path, prev.Size, res.Size)
 					if _, exists := sizeSeen[key]; !exists {
 						sizeSeen[key] = struct{}{}

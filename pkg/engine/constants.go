@@ -13,6 +13,23 @@ const (
 	DefaultAutoFilterThreshold = 15
 )
 
+// ─── SimHash Soft-404 Clustering ─────────────────────────────────────────────
+const (
+	DefaultSimhashThreshold    = 3
+	DefaultSimhashClusterLimit = 5
+)
+
+// ─── WAF Evasion ─────────────────────────────────────────────────────────────
+const (
+	DefaultEvasionLimit = 4
+)
+
+// ─── HTTP/2 ──────────────────────────────────────────────────────────────────
+const (
+	DefaultH2ConcurrentStreams = 100
+	DefaultH2MaxHeaderListSize = 1 << 20
+)
+
 // ─── HTTP Client ─────────────────────────────────────────────────────────────
 const (
 	DefaultHTTPTimeout = 5 * time.Second
@@ -33,6 +50,14 @@ const (
 	CalibrationRandomStringLen = 16
 	CalibrationTestCount       = 10
 	CalibrationTimeout         = 5 * time.Second
+)
+
+// ─── Timing Oracle ──────────────────────────────────────────────────────────
+const (
+	TimingOracleBaselineSamples = 30
+	TimingOracleMinDelta        = 50 * time.Millisecond
+	TimingOracleDefaultK        = 2.5
+	TimingOracleDefaultRepeatN  = 5
 )
 
 // ─── Recursion ────────────────────────────────────────────────────────────────

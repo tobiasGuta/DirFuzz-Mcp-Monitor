@@ -78,6 +78,20 @@ func parseFlags() cliConfig {
 	smartAPI := flag.Bool("smart-api", false, "Multi-method fuzzing only on API-style paths (/api/, /v1/, …)")
 	autoFilterThreshold := flag.Int("af", engine.DefaultAutoFilterThreshold,
 		"Auto-filter: suppress repeated same-size responses after N occurrences")
+	simhashThreshold := flag.Int("simhash-threshold", engine.DefaultSimhashThreshold,
+		"Soft-404 SimHash Hamming distance threshold")
+	simhashClusterLimit := flag.Int("simhash-cluster", engine.DefaultSimhashClusterLimit,
+		"Soft-404 SimHash cluster size before suppression")
+	h2Mode := flag.Bool("h2", false, "Send fuzzing requests over HTTP/2 (ALPN h2 or h2c)")
+	h2Streams := flag.Int("h2-streams", engine.DefaultH2ConcurrentStreams, "Max concurrent HTTP/2 streams per connection")
+	timeOracle := flag.Bool("time-oracle", false, "Use response-time oracle mode for blind path enumeration")
+	timeK := flag.Float64("time-k", engine.TimingOracleDefaultK, "Timing oracle sigma multiplier")
+	timeN := flag.Int("time-n", engine.TimingOracleDefaultRepeatN, "Timing oracle requests per path")
+	timeTrim := flag.Bool("time-trim", false, "Trim highest and lowest timing samples before analysis")
+	harvest := flag.Bool("harvest", false, "Harvest endpoints from JS, OpenAPI, and GraphQL before scanning")
+	harvestJS := flag.Bool("harvest-js", false, "Harvest endpoints from JavaScript only")
+	harvestAPI := flag.Bool("harvest-api", false, "Harvest endpoints from OpenAPI and GraphQL only")
+	evasionLimit := flag.Int("evasion-limit", engine.DefaultEvasionLimit, "Max bypass techniques to try per path")
 	maxRetries := flag.Int("retry", 0, "Retry failed requests up to N times on connection error")
 	dryRun := flag.Bool("dry-run", false, "Estimate request volume and exit without sending traffic")
 	maxWSFrames := flag.Int("max-ws-frames", 5000, "Maximum number of WebSocket frames to store in memory")
@@ -191,6 +205,18 @@ func parseFlags() cliConfig {
 		Mutate:              *mutate,
 		SmartAPI:            *smartAPI,
 		AutoFilterThreshold: *autoFilterThreshold,
+		SimhashThreshold:    *simhashThreshold,
+		SimhashClusterLimit: *simhashClusterLimit,
+		H2Mode:              *h2Mode,
+		H2ConcurrentStreams: *h2Streams,
+		TimingOracle:        *timeOracle,
+		TimeOracleK:         *timeK,
+		TimeOracleN:         *timeN,
+		TimeTrim:            *timeTrim,
+		Harvest:             *harvest,
+		HarvestJS:           *harvestJS,
+		HarvestAPI:          *harvestAPI,
+		EvasionLimit:        *evasionLimit,
 		MaxRetries:          *maxRetries,
 		DryRun:              *dryRun,
 		MaxWSFrames:         *maxWSFrames,
@@ -246,6 +272,34 @@ func parseFlags() cliConfig {
 
 	if cfg.Threads < 1 {
 		fmt.Fprintln(os.Stderr, "error: -t must be >= 1")
+		os.Exit(1)
+	}
+	if cfg.H2ConcurrentStreams < 1 {
+		fmt.Fprintln(os.Stderr, "error: --h2-streams must be >= 1")
+		os.Exit(1)
+	}
+	if cfg.TimeOracleK <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --time-k must be > 0")
+		os.Exit(1)
+	}
+	if cfg.TimeOracleN < 1 {
+		fmt.Fprintln(os.Stderr, "error: --time-n must be >= 1")
+		os.Exit(1)
+	}
+	if cfg.EvasionLimit < 1 {
+		fmt.Fprintln(os.Stderr, "error: --evasion-limit must be >= 1")
+		os.Exit(1)
+	}
+	if cfg.SimhashThreshold < 0 {
+		fmt.Fprintln(os.Stderr, "error: --simhash-threshold must be >= 0")
+		os.Exit(1)
+	}
+	if cfg.SimhashClusterLimit < 1 {
+		fmt.Fprintln(os.Stderr, "error: --simhash-cluster must be >= 1")
+		os.Exit(1)
+	}
+	if cfg.H2Mode && cfg.ProxyFile != "" {
+		fmt.Fprintln(os.Stderr, "error: --h2 cannot be used together with --proxy")
 		os.Exit(1)
 	}
 	return cfg

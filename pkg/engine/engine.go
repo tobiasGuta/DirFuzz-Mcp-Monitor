@@ -81,6 +81,18 @@ type Config struct {
 	Timeout             time.Duration
 	Insecure            bool
 	AutoFilterThreshold int
+	SimhashThreshold    int
+	SimhashClusterLimit int
+	H2Mode              bool
+	H2ConcurrentStreams int
+	TimingOracle        bool
+	TimeOracleK         float64
+	TimeOracleN         int
+	TimeTrim            bool
+	Harvest             bool
+	HarvestJS           bool
+	HarvestAPI          bool
+	EvasionLimit        int
 	MaxRetries          int
 	SaveRaw             bool // NEW: include raw request/response bytes in Result
 	WAFEvasion          bool
@@ -121,6 +133,18 @@ type configSnapshot struct {
 	SmartAPI            bool
 	Extensions          []string
 	AutoFilterThreshold int
+	SimhashThreshold    int
+	SimhashClusterLimit int
+	H2Mode              bool
+	H2ConcurrentStreams int
+	TimingOracle        bool
+	TimeOracleK         float64
+	TimeOracleN         int
+	TimeTrim            bool
+	Harvest             bool
+	HarvestJS           bool
+	HarvestAPI          bool
+	EvasionLimit        int
 	Mutate              bool
 	Recursive           bool
 	MaxDepth            int
@@ -329,12 +353,15 @@ type Engine struct {
 	workerStopCh chan struct{}
 
 	// Telemetry (Atomic counters)
-	Count200     int64
-	Count403     int64
-	Count404     int64
-	Count429     int64
-	Count500     int64
-	CountConnErr int64
+	Count200             int64
+	Count403             int64
+	Count404             int64
+	Count429             int64
+	Count500             int64
+	CountConnErr         int64
+	AutoFilterSuppressed int64
+	SimhashSuppressed    int64
+	HarvestedPaths       int64
 
 	// RPS calculation
 	// `lastProcessed` and `lastTick` are accessed concurrently; use
@@ -344,10 +371,25 @@ type Engine struct {
 	CurrentRPS    int64
 
 	// Smart Filter State
-	fpMutex           sync.RWMutex
-	fpCounts          map[string]int
-	manualFilterSizes map[int]bool
-	autoFilterSizes   map[int]bool
+	fpMutex            sync.RWMutex
+	fpCounts           map[string]int
+	manualFilterSizes  map[int]bool
+	autoFilterSizes    map[int]bool
+	simhashClusters    map[uint64]int
+	simhashClusterLock sync.Mutex
+	evasionAttempted   sync.Map
+
+	// SimHash soft-404 clustering settings.
+	SimhashThreshold    int
+	SimhashClusterLimit int
+	EvasionScoreboard   *EvasionScoreboard
+
+	// HTTP/2 client path.
+	H2Client    *http.Client
+	h2StreamSem chan struct{}
+
+	// Timing oracle state (calibrated at scan startup when enabled).
+	timingOracle *TimingOracle
 
 	// Auto-throttle state
 	autoThrottle     bool
@@ -539,11 +581,20 @@ func NewEngine(numWorkers int, expectedItems uint, falsePositiveRate float64) *E
 			Timeout:             DefaultHTTPTimeout,
 			Insecure:            false,
 			AllowPrivateTargets: false,
+			AutoFilterThreshold: DefaultAutoFilterThreshold,
+			SimhashThreshold:    DefaultSimhashThreshold,
+			SimhashClusterLimit: DefaultSimhashClusterLimit,
+			H2ConcurrentStreams: DefaultH2ConcurrentStreams,
+			TimeOracleK:         TimingOracleDefaultK,
+			TimeOracleN:         TimingOracleDefaultRepeatN,
+			EvasionLimit:        DefaultEvasionLimit,
 		},
 		Results:           make(chan Result, ResultsChannelSize),
 		fpCounts:          make(map[string]int),
 		manualFilterSizes: make(map[int]bool),
 		autoFilterSizes:   make(map[int]bool),
+		simhashClusters:   make(map[uint64]int),
+		EvasionScoreboard: NewEvasionScoreboard(),
 		lastTick:          time.Now().UnixNano(),
 		autoThrottle:      true,
 		recursiveSem:      make(chan struct{}, MaxConcurrentRecursions),
@@ -742,6 +793,18 @@ func (e *Engine) buildAndStoreConfigSnapshot() {
 		SmartAPI:            e.Config.SmartAPI,
 		Extensions:          make([]string, len(e.Config.Extensions)),
 		AutoFilterThreshold: e.Config.AutoFilterThreshold,
+		SimhashThreshold:    e.Config.SimhashThreshold,
+		SimhashClusterLimit: e.Config.SimhashClusterLimit,
+		H2Mode:              e.Config.H2Mode,
+		H2ConcurrentStreams: e.Config.H2ConcurrentStreams,
+		TimingOracle:        e.Config.TimingOracle,
+		TimeOracleK:         e.Config.TimeOracleK,
+		TimeOracleN:         e.Config.TimeOracleN,
+		TimeTrim:            e.Config.TimeTrim,
+		Harvest:             e.Config.Harvest,
+		HarvestJS:           e.Config.HarvestJS,
+		HarvestAPI:          e.Config.HarvestAPI,
+		EvasionLimit:        e.Config.EvasionLimit,
 		Mutate:              e.Config.Mutate,
 		Recursive:           e.Config.Recursive,
 		MaxDepth:            e.Config.MaxDepth,
@@ -790,6 +853,8 @@ func (e *Engine) buildAndStoreConfigSnapshot() {
 	copy(s.Methods, e.Config.Methods)
 	copy(s.Extensions, e.Config.Extensions)
 	e.Config.RUnlock()
+	e.SimhashThreshold = s.SimhashThreshold
+	e.SimhashClusterLimit = s.SimhashClusterLimit
 
 	e.configSnap.Store(s)
 }
@@ -984,6 +1049,39 @@ func (e *Engine) clearAutoFilterSizes() {
 	e.buildAndStoreConfigSnapshot()
 }
 
+func (e *Engine) clearSimhashClusters() {
+	e.simhashClusterLock.Lock()
+	e.simhashClusters = make(map[uint64]int)
+	e.simhashClusterLock.Unlock()
+}
+
+// isSimhashSoftFour tracks a SimHash cluster and returns true once the cluster
+// has reached the suppression limit.
+func (e *Engine) isSimhashSoftFour(bodyHash uint64) bool {
+	threshold := e.SimhashThreshold
+	if threshold < 0 {
+		threshold = 0
+	}
+	limit := e.SimhashClusterLimit
+	if limit <= 0 {
+		return false
+	}
+
+	e.simhashClusterLock.Lock()
+	defer e.simhashClusterLock.Unlock()
+
+	for centroid, count := range e.simhashClusters {
+		if hammingDistance(centroid, bodyHash) <= threshold {
+			count++
+			e.simhashClusters[centroid] = count
+			return count >= limit
+		}
+	}
+
+	e.simhashClusters[bodyHash] = 1
+	return false
+}
+
 func (e *Engine) AddMatchCode(code int) {
 	e.Config.Lock()
 	e.Config.MatchCodes[code] = true
@@ -1103,6 +1201,42 @@ func (e *Engine) SetTarget(targetURL string) error {
 		e.scopeDomain = hostname
 	}
 	e.targetLock.Unlock()
+	if err := e.RefreshH2Client(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// RefreshH2Client rebuilds the shared HTTP/2 client when H2 mode is enabled.
+// It is safe to call after the target URL changes or when H2 settings change.
+func (e *Engine) RefreshH2Client() error {
+	e.Config.RLock()
+	h2Mode := e.Config.H2Mode
+	streams := e.Config.H2ConcurrentStreams
+	timeout := e.Config.Timeout
+	insecure := e.Config.Insecure
+	e.Config.RUnlock()
+
+	if !h2Mode {
+		e.H2Client = nil
+		e.h2StreamSem = nil
+		return nil
+	}
+
+	baseURL := e.BaseURL()
+	if baseURL == "" {
+		return fmt.Errorf("H2 mode requires a target URL")
+	}
+	if streams < 1 {
+		streams = DefaultH2ConcurrentStreams
+	}
+
+	client, err := httpclient.NewH2Client(baseURL, timeout, insecure, DefaultH2MaxHeaderListSize)
+	if err != nil {
+		return err
+	}
+	e.H2Client = client
+	e.h2StreamSem = make(chan struct{}, streams)
 	return nil
 }
 
@@ -1157,6 +1291,9 @@ func (e *Engine) ChangeWordlist(path string) error {
 	atomic.StoreInt64(&e.CountConnErr, 0)
 	atomic.StoreInt64(&e.CurrentRPS, 0)
 	atomic.StoreInt32(&e.alreadyThrottled, 0)
+	atomic.StoreInt64(&e.HarvestedPaths, 0)
+	e.evasionAttempted = sync.Map{}
+	e.EvasionScoreboard = NewEvasionScoreboard()
 	e.headRejectedHosts.Range(func(k, _ interface{}) bool {
 		e.headRejectedHosts.Delete(k)
 		return true
@@ -1166,6 +1303,9 @@ func (e *Engine) ChangeWordlist(path string) error {
 	e.fpCounts = make(map[string]int)
 	e.fpMutex.Unlock()
 	e.clearAutoFilterSizes()
+	e.clearSimhashClusters()
+	atomic.StoreInt64(&e.AutoFilterSuppressed, 0)
+	atomic.StoreInt64(&e.SimhashSuppressed, 0)
 
 	e.drainJobs()
 
@@ -1883,10 +2023,15 @@ func (e *Engine) executeRequestWithRetry(ctx context.Context, targetURL string, 
 	e.Config.RLock()
 	retries := e.Config.MaxRetries
 	insecure := e.Config.Insecure
+	h2Mode := e.Config.H2Mode
 	e.Config.RUnlock()
 
 	if ctx == nil {
 		ctx = context.Background()
+	}
+
+	if h2Mode && e.H2Client != nil {
+		return e.executeH2RequestWithRetry(ctx, targetURL, rawRequest, timeout)
 	}
 
 	backoff := 1 * time.Second
@@ -1909,6 +2054,152 @@ func (e *Engine) executeRequestWithRetry(ctx context.Context, targetURL string, 
 		}
 	}
 	return resp, err
+}
+
+func (e *Engine) executeH2RequestWithRetry(ctx context.Context, targetURL string, rawRequest []byte, timeout time.Duration) (*httpclient.RawResponse, error) {
+	e.Config.RLock()
+	retries := e.Config.MaxRetries
+	e.Config.RUnlock()
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	backoff := 1 * time.Second
+	var (
+		resp *httpclient.RawResponse
+		err  error
+	)
+	for attempt := 0; attempt <= retries; attempt++ {
+		resp, err = e.executeH2Request(ctx, targetURL, rawRequest, timeout)
+		if err == nil {
+			return resp, nil
+		}
+		if attempt < retries {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+				backoff *= 2
+			}
+		}
+	}
+	return resp, err
+}
+
+func (e *Engine) executeH2Request(ctx context.Context, targetURL string, rawRequest []byte, timeout time.Duration) (*httpclient.RawResponse, error) {
+	if e.H2Client == nil {
+		if err := e.RefreshH2Client(); err != nil {
+			return nil, err
+		}
+	}
+	if e.H2Client == nil {
+		return nil, fmt.Errorf("HTTP/2 client is not initialized")
+	}
+
+	if sem := e.h2StreamSem; sem != nil {
+		select {
+		case sem <- struct{}{}:
+			defer func() { <-sem }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	req, err := buildH2HTTPRequest(ctx, targetURL, rawRequest)
+	if err != nil {
+		return nil, err
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+		req = req.WithContext(ctx)
+	}
+
+	start := time.Now()
+	resp, err := e.H2Client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	return rawResponseFromHTTPResponse(resp, start)
+}
+
+func buildH2HTTPRequest(ctx context.Context, targetURL string, rawRequest []byte) (*http.Request, error) {
+	parsedTarget, err := url.Parse(targetURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid target URL: %w", err)
+	}
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(rawRequest)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse raw request: %w", err)
+	}
+	defer req.Body.Close()
+
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read raw request body: %w", err)
+	}
+
+	reqURL := *parsedTarget
+	reqURL.Path = req.URL.Path
+	reqURL.RawPath = req.URL.RawPath
+	reqURL.RawQuery = req.URL.RawQuery
+	reqURL.Fragment = ""
+	if reqURL.Path == "" {
+		reqURL.Path = "/"
+	}
+
+	outReq, err := http.NewRequestWithContext(ctx, req.Method, reqURL.String(), bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to build H2 request: %w", err)
+	}
+	outReq.Host = req.Host
+	if outReq.Host == "" {
+		outReq.Host = parsedTarget.Host
+	}
+	outReq.Header = req.Header.Clone()
+	for _, key := range []string{"Connection", "Proxy-Connection", "Keep-Alive", "Transfer-Encoding", "Upgrade", "HTTP2-Settings"} {
+		outReq.Header.Del(key)
+	}
+	return outReq, nil
+}
+
+func rawResponseFromHTTPResponse(resp *http.Response, start time.Time) (*httpclient.RawResponse, error) {
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, httpclient.MaxBodySize))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	var headersStr bytes.Buffer
+	headersStr.WriteString(fmt.Sprintf("%s %s\r\n", resp.Proto, resp.Status))
+	headerMap := make(map[string]string, len(resp.Header))
+	for k, vals := range resp.Header {
+		if len(vals) == 0 {
+			continue
+		}
+		headerMap[strings.ToLower(k)] = vals[0]
+		for _, v := range vals {
+			headersStr.WriteString(fmt.Sprintf("%s: %s\r\n", k, v))
+		}
+	}
+
+	var raw bytes.Buffer
+	raw.WriteString(headersStr.String())
+	raw.WriteString("\r\n")
+	raw.Write(respBody)
+
+	return &httpclient.RawResponse{
+		StatusCode:   resp.StatusCode,
+		Headers:      headersStr.String(),
+		HeaderMap:    headerMap,
+		Body:         respBody,
+		Raw:          raw.Bytes(),
+		Duration:     time.Since(start),
+		BodyComplete: true,
+	}, nil
 }
 
 // ─── Worker ───────────────────────────────────────────────────────────────────
@@ -1950,6 +2241,59 @@ func buildRequest(method, reqPath, reqHost, ua, headersStr, bodyContent string) 
 	))
 }
 
+func computeResponseMetrics(resp *httpclient.RawResponse, successfulMethod string) (bodySize, wordCount, lineCount int, contentType string, bodyHash uint64) {
+	bodySize = len(resp.Body)
+	wordCount = -1
+	lineCount = -1
+
+	if resp.BodyEncoded {
+		bodySize = -1
+	} else {
+		if successfulMethod == "HEAD" {
+			clVal := resp.GetHeader("Content-Length")
+			if clVal != "" {
+				if s, parseErr := strconv.Atoi(clVal); parseErr == nil {
+					bodySize = s
+				}
+			}
+		}
+
+		if len(resp.Body) == 0 {
+			wordCount = 0
+			lineCount = 0
+		} else {
+			wordCount = 0
+			lineCount = 0
+			inWord := false
+			for i := 0; i < len(resp.Body); {
+				r, size := utf8.DecodeRune(resp.Body[i:])
+				i += size
+				if r == '\n' {
+					lineCount++
+				}
+				if unicode.IsSpace(r) {
+					if inWord {
+						inWord = false
+					}
+				} else {
+					if !inWord {
+						wordCount++
+						inWord = true
+					}
+				}
+			}
+			lineCount = lineCount + 1
+		}
+	}
+
+	contentType = resp.GetHeader("Content-Type")
+	if idx := strings.Index(contentType, ";"); idx != -1 {
+		contentType = strings.TrimSpace(contentType[:idx])
+	}
+	bodyHash = simhashBody(resp.Body)
+	return
+}
+
 func isSameSpiderScopeHost(baseHostname string, parsedLink *url.URL) bool {
 	if !parsedLink.IsAbs() {
 		return true
@@ -1961,14 +2305,20 @@ func isSameSpiderScopeHost(baseHostname string, parsedLink *url.URL) bool {
 func (e *Engine) applyFilters(
 	resp *httpclient.RawResponse,
 	bodySize, wordCount, lineCount int,
+	bodyHash uint64,
 	contentType string,
+	forceKeep bool,
 	filterSizes map[int]bool,
 	filterSizeRanges []SizeRange,
 	matchCodes map[int]bool,
 	filterWords, filterLines, matchWords, matchLines int,
 	matchContentTypes, filterContentTypes []string,
 	filterRTMin, filterRTMax time.Duration,
+	skipRT bool,
 ) bool {
+	if forceKeep {
+		return true
+	}
 	// 1. Status code.
 	if len(matchCodes) > 0 && !matchCodes[resp.StatusCode] {
 		return false
@@ -2007,11 +2357,13 @@ func (e *Engine) applyFilters(
 		return false
 	}
 	// 6. Response time.
-	if filterRTMin > 0 && resp.Duration < filterRTMin {
-		return false
-	}
-	if filterRTMax > 0 && resp.Duration > filterRTMax {
-		return false
+	if !skipRT {
+		if filterRTMin > 0 && resp.Duration < filterRTMin {
+			return false
+		}
+		if filterRTMax > 0 && resp.Duration > filterRTMax {
+			return false
+		}
 	}
 	// 7. Content-type match (NEW).
 	ctLower := strings.ToLower(contentType)
@@ -2032,6 +2384,11 @@ func (e *Engine) applyFilters(
 		if strings.Contains(ctLower, strings.ToLower(ct)) {
 			return false
 		}
+	}
+	// 9. SimHash soft-404 clustering.
+	if e.isSimhashSoftFour(bodyHash) {
+		atomic.AddInt64(&e.SimhashSuppressed, 1)
+		return false
 	}
 	return true
 }
@@ -2174,6 +2531,18 @@ func (e *Engine) worker(id int) {
 						Timeout:             e.Config.Timeout,
 						SaveRaw:             e.Config.SaveRaw,
 						AutoFilterThreshold: e.Config.AutoFilterThreshold,
+						SimhashThreshold:    e.Config.SimhashThreshold,
+						SimhashClusterLimit: e.Config.SimhashClusterLimit,
+						H2Mode:              e.Config.H2Mode,
+						H2ConcurrentStreams: e.Config.H2ConcurrentStreams,
+						TimingOracle:        e.Config.TimingOracle,
+						TimeOracleK:         e.Config.TimeOracleK,
+						TimeOracleN:         e.Config.TimeOracleN,
+						TimeTrim:            e.Config.TimeTrim,
+						Harvest:             e.Config.Harvest,
+						HarvestJS:           e.Config.HarvestJS,
+						HarvestAPI:          e.Config.HarvestAPI,
+						EvasionLimit:        e.Config.EvasionLimit,
 						Mutate:              e.Config.Mutate,
 						Recursive:           e.Config.Recursive,
 						MaxDepth:            e.Config.MaxDepth,
@@ -2366,22 +2735,39 @@ func (e *Engine) worker(id int) {
 			var err error
 			var successfulMethod string
 			var rawRequest []byte
+			var bodyContent string
+			var timingMedian time.Duration
+			var timingOracleHit bool
+			var timingOracleZ float64
+			var samples []time.Duration
+			var oracleErr error
+			oracleEnabled := snap.TimingOracle && e.timingOracle != nil
 
 			if job.Method == "" {
 				bodyFilterActive := e.matchRe.Load() != nil || e.filterRe.Load() != nil ||
 					filterWords >= 0 || filterLines >= 0 || matchWords >= 0 || matchLines >= 0 ||
 					len(matchContentTypes) > 0 || len(filterContentTypes) > 0
 
-				if bodyFilterActive || e.isHeadRejected(reqHost) || followRedirects {
+				if bodyFilterActive || e.isHeadRejected(reqHost) || followRedirects || oracleEnabled {
 					successfulMethod = "GET"
 					rawRequest = buildRequest("GET", reqPath, reqHost, ua, headersStr, "")
-					resp, err = e.executeRequestWithRetry(localCtx, currentBaseURL, rawRequest, requestTimeout, proxyAddr)
 				} else {
 					successfulMethod = "HEAD"
 					rawRequest = buildRequest("HEAD", reqPath, reqHost, ua, headersStr, "")
-					resp, err = e.executeRequestWithRetry(localCtx, currentBaseURL, rawRequest, requestTimeout, proxyAddr)
+				}
 
-					if err == nil && (resp.StatusCode == 405 || resp.StatusCode == 501) {
+				if oracleEnabled {
+					resp, samples, oracleErr = e.executeTimingOracleRequests(localCtx, currentBaseURL, rawRequest, requestTimeout, proxyAddr)
+					if oracleErr != nil {
+						err = oracleErr
+					} else if e.timingOracle != nil {
+						timingMedian = e.timingOracle.Median(samples)
+						timingOracleHit = e.timingOracle.IsAnomaly(timingMedian)
+						timingOracleZ = e.timingOracle.ZScore(timingMedian)
+					}
+				} else {
+					resp, err = e.executeRequestWithRetry(localCtx, currentBaseURL, rawRequest, requestTimeout, proxyAddr)
+					if err == nil && successfulMethod == "HEAD" && (resp.StatusCode == 405 || resp.StatusCode == 501) {
 						e.markHeadRejected(reqHost)
 						successfulMethod = "GET"
 						rawRequest = buildRequest("GET", reqPath, reqHost, ua, headersStr, "")
@@ -2395,7 +2781,7 @@ func (e *Engine) worker(id int) {
 				atomic.AddInt64(&e.ProcessedLines, 1)
 			} else {
 				successfulMethod = job.Method
-				bodyContent := ""
+				bodyContent = ""
 				var methodHdrBuf strings.Builder
 				methodHdrBuf.WriteString(headersStr)
 
@@ -2417,7 +2803,18 @@ func (e *Engine) worker(id int) {
 					methodHdrBuf.WriteString("Content-Length: 0\r\n")
 				}
 				rawRequest = buildRequest(job.Method, reqPath, reqHost, ua, methodHdrBuf.String(), bodyContent)
-				resp, err = e.executeRequestWithRetry(localCtx, currentBaseURL, rawRequest, requestTimeout, proxyAddr)
+				if oracleEnabled {
+					resp, samples, oracleErr = e.executeTimingOracleRequests(localCtx, currentBaseURL, rawRequest, requestTimeout, proxyAddr)
+					if oracleErr != nil {
+						err = oracleErr
+					} else if e.timingOracle != nil {
+						timingMedian = e.timingOracle.Median(samples)
+						timingOracleHit = e.timingOracle.IsAnomaly(timingMedian)
+						timingOracleZ = e.timingOracle.ZScore(timingMedian)
+					}
+				} else {
+					resp, err = e.executeRequestWithRetry(localCtx, currentBaseURL, rawRequest, requestTimeout, proxyAddr)
+				}
 				atomic.AddInt64(&e.ProcessedLines, 1)
 			}
 
@@ -2461,74 +2858,17 @@ func (e *Engine) worker(id int) {
 				}
 			}
 
-			// Determine body metrics. If the body is encoded with an unsupported
-			// algorithm (e.g. Brotli) or decompression failed, the RawResponse
-			// will have BodyEncoded=true. In that case skip content-based metrics
-			// and report unknown size/counts as -1 so filters don't operate on
-			// misleading numbers.
-			bodySize := len(resp.Body)
-
-			// Initialize counts to -1 (unknown) to make intent explicit.
-			wordCount := -1
-			lineCount := -1
-
-			if resp.BodyEncoded {
-				bodySize = -1
-			} else {
-				// Use the decoded body length (after dechunk/gunzip). Only use the
-				// Content-Length header for HEAD responses where no body is present.
-				if successfulMethod == "HEAD" {
-					clVal := resp.GetHeader("Content-Length")
-					if clVal != "" {
-						if s, parseErr := strconv.Atoi(clVal); parseErr == nil {
-							bodySize = s
-						}
-					}
-				}
-
-				// Count words and lines without allocating large intermediate strings.
-				// Use rune-wise decoding so we correctly detect Unicode whitespace
-				// without converting the entire body into a string.
-				if len(resp.Body) == 0 {
-					wordCount = 0
-					lineCount = 0
-				} else {
-					wordCount = 0
-					lineCount = 0
-					inWord := false
-					for i := 0; i < len(resp.Body); {
-						r, size := utf8.DecodeRune(resp.Body[i:])
-						i += size
-						if r == '\n' {
-							lineCount++
-						}
-						if unicode.IsSpace(r) {
-							if inWord {
-								inWord = false
-							}
-						} else {
-							if !inWord {
-								wordCount++
-								inWord = true
-							}
-						}
-					}
-					// Match previous behaviour: lines = count('\n') + 1 when non-empty.
-					lineCount = lineCount + 1
-				}
-			}
-
-			contentType := resp.GetHeader("Content-Type")
-			if idx := strings.Index(contentType, ";"); idx != -1 {
-				contentType = strings.TrimSpace(contentType[:idx])
-			}
+			bodySize, wordCount, lineCount, contentType, bodyHash := computeResponseMetrics(resp, successfulMethod)
+			skipRTFilters := timingOracleHit
 
 			// Apply all filters.
-			if !e.applyFilters(resp, bodySize, wordCount, lineCount, contentType,
+			if !e.applyFilters(resp, bodySize, wordCount, lineCount, bodyHash, contentType,
+				timingOracleHit,
 				filterSizes, filterSizeRanges, matchCodes,
 				filterWords, filterLines, matchWords, matchLines,
 				matchContentTypes, filterContentTypes,
-				filterRTMin, filterRTMax) {
+				filterRTMin, filterRTMax,
+				skipRTFilters) {
 				if e.cleanupJob(shouldExit) {
 					return
 				}
@@ -2537,6 +2877,7 @@ func (e *Engine) worker(id int) {
 
 			// 403 classification.
 			forbidden403Type := ""
+			var bypassTechniqueLabel string
 			if resp.StatusCode == 403 {
 				classifyBody := resp.Body
 				classifyHeaders := resp.Headers
@@ -2549,28 +2890,89 @@ func (e *Engine) worker(id int) {
 				}
 				forbidden403Type = Classify403(classifyBody, classifyHeaders)
 
-				if wafEvasion {
+				if wafEvasion || fourOhThreeBypass {
+					detectedWAFVendor := "unknown"
 					wafRes := FingerprintWAF(classifyBody, classifyHeaders, resp.StatusCode, int64(resp.Duration.Milliseconds()))
 					if wafRes.Detected {
-						strategies := EvasionStrategiesFor(wafRes.Vendor)
-						for _, strategy := range strategies {
-							newPath, newHeaders := strategy.ModifyRequest(payload, headers, job.Method)
-							e.Submit(Job{Path: newPath, Depth: depth, Method: successfulMethod, RunID: job.RunID, ExtraHeaders: newHeaders})
+						detectedWAFVendor = wafRes.Vendor
+					}
+
+					evasionLimit := snap.EvasionLimit
+					if evasionLimit < 1 {
+						evasionLimit = DefaultEvasionLimit
+					}
+
+					techniques := EvasionStrategiesFor(detectedWAFVendor)
+					if len(techniques) > 0 && e.EvasionScoreboard != nil {
+						tried := 0
+						for _, technique := range techniques {
+							if tried >= evasionLimit {
+								break
+							}
+							if e.evasionTechniqueSeen(payload, technique.Name) {
+								continue
+							}
+							e.markEvasionTechnique(payload, technique.Name)
+							tried++
+
+							bypassPath, bypassHeaders := technique.ModifyRequest(payload, headers, successfulMethod)
+							reqHeaders := make(map[string]string, len(headers)+len(bypassHeaders)+3)
+							for k, v := range headers {
+								reqHeaders[k] = v
+							}
+							for k, v := range bypassHeaders {
+								reqHeaders[k] = v
+							}
+							var reqHdrKeys []string
+							for k := range reqHeaders {
+								reqHdrKeys = append(reqHdrKeys, k)
+							}
+							sort.Strings(reqHdrKeys)
+							var bypassHdrBuf strings.Builder
+							headerSafePayload := sanitizeHeaderToken(payload)
+							for _, k := range reqHdrKeys {
+								safeK := sanitizeHeaderToken(k)
+								safeV := sanitizeHeaderToken(strings.ReplaceAll(reqHeaders[k], "{PAYLOAD}", headerSafePayload))
+								bypassHdrBuf.WriteString(fmt.Sprintf("%s: %s\r\n", safeK, safeV))
+							}
+							bypassReq := buildRequest(successfulMethod, bypassPath, reqHost, ua, bypassHdrBuf.String(), bodyContent)
+							bypassResp, bypassErr := e.executeRequestWithRetry(localCtx, currentBaseURL, bypassReq, requestTimeout, proxyAddr)
+							if bypassErr != nil {
+								e.EvasionScoreboard.Record(technique.Name, false)
+								continue
+							}
+							if bypassResp.StatusCode == 403 || bypassResp.StatusCode == 429 || bypassResp.StatusCode == 444 {
+								e.EvasionScoreboard.Record(technique.Name, false)
+								continue
+							}
+
+							e.EvasionScoreboard.Record(technique.Name, true)
+							resp = bypassResp
+							rawRequest = bypassReq
+							bodySize, wordCount, lineCount, contentType, bodyHash = computeResponseMetrics(resp, successfulMethod)
+							if strings.Contains(currentBaseURL, "{PAYLOAD}") {
+								fullURL = strings.Replace(currentBaseURL, "{PAYLOAD}", bypassPath, 1)
+							} else {
+								bypassURLPath := bypassPath
+								if !strings.HasPrefix(bypassURLPath, "/") {
+									bypassURLPath = "/" + bypassURLPath
+								}
+								fullURL = strings.TrimRight(currentBaseURL, "/") + bypassURLPath
+							}
+							bypassTechniqueLabel = "BYPASS:" + technique.Name
+							break
 						}
 					}
 				}
-
-				if fourOhThreeBypass {
-					techniques := Bypass403Techniques(payload, headers)
-					for _, technique := range techniques {
-						bypassPath, bypassHeaders := technique.ModifyRequest(payload, headers, successfulMethod)
-						e.Submit(Job{
-							Path:         bypassPath,
-							Depth:        depth,
-							Method:       successfulMethod,
-							RunID:        job.RunID,
-							ExtraHeaders: bypassHeaders,
-						})
+				if bypassTechniqueLabel != "" && resp.StatusCode != 403 {
+					atomic.AddInt64(&e.Count403, -1)
+					switch {
+					case resp.StatusCode == 200:
+						atomic.AddInt64(&e.Count200, 1)
+					case resp.StatusCode == 404:
+						atomic.AddInt64(&e.Count404, 1)
+					case resp.StatusCode >= 500:
+						atomic.AddInt64(&e.Count500, 1)
 					}
 				}
 			}
@@ -2603,6 +3005,7 @@ func (e *Engine) worker(id int) {
 					}
 				}
 				if threshold > 0 && count >= threshold {
+					atomic.AddInt64(&e.AutoFilterSuppressed, 1)
 					if e.cleanupJob(shouldExit) {
 						return
 					}
@@ -2653,6 +3056,9 @@ func (e *Engine) worker(id int) {
 				Headers:     capturedHeaders,
 				URL:         fullURL,
 			}
+			if timingOracleHit {
+				result.Duration = timingMedian
+			}
 
 			// Only include raw request/response when SaveRaw is enabled.
 			if saveRaw {
@@ -2669,6 +3075,9 @@ func (e *Engine) worker(id int) {
 			if resp.StatusCode == 403 {
 				result.Forbidden403Type = forbidden403Type
 			}
+			if bypassTechniqueLabel != "" {
+				result.Labels = append(result.Labels, bypassTechniqueLabel)
+			}
 
 			// Eagle Mode.
 			e.eagleLock.RLock()
@@ -2683,10 +3092,10 @@ func (e *Engine) worker(id int) {
 			// Lua plugin match. Allocate the response body string only when a
 			// match plugin is configured to avoid unnecessary large allocations.
 			var bodyStr string
-			if e.matchPlugin != nil {
+			if e.matchPlugin != nil && bypassTechniqueLabel == "" {
 				bodyStr = string(resp.Body)
 			}
-			if e.matchPlugin != nil {
+			if e.matchPlugin != nil && bypassTechniqueLabel == "" {
 				matched, labels, confidence := e.matchPlugin.Match(resp.StatusCode, bodySize, wordCount, lineCount, bodyStr, contentType)
 				if !matched {
 					if e.cleanupJob(shouldExit) {
@@ -2706,6 +3115,16 @@ func (e *Engine) worker(id int) {
 					return
 				}
 				continue
+			}
+
+			if timingOracleHit {
+				result.Labels = append(result.Labels, "TIMING-ORACLE")
+				oracleConfidence := fmt.Sprintf("z=%.1f", timingOracleZ)
+				if result.Confidence == "" {
+					result.Confidence = oracleConfidence
+				} else {
+					result.Confidence = result.Confidence + ";" + oracleConfidence
+				}
 			}
 
 			// Spidering / dynamic link extraction

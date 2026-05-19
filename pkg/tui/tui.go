@@ -242,6 +242,20 @@ func renderPaneHeader(style lipgloss.Style, width int, title string) string {
 	return style.Width(width).Align(lipgloss.Left).Render(title)
 }
 
+func renderEvasionSummary(rows []engine.EvasionScoreboardRow) string {
+	if len(rows) == 0 {
+		return mutedStyle.Render("WAF Bypass Summary: none recorded")
+	}
+	var sb strings.Builder
+	sb.WriteString("WAF Bypass Summary\n")
+	sb.WriteString("Technique | Attempts | Bypasses | Rate%\n")
+	sb.WriteString("--- | ---: | ---: | ---:\n")
+	for _, row := range rows {
+		fmt.Fprintf(&sb, "%s | %d | %d | %.1f%%\n", row.Technique, row.Attempts, row.Bypasses, row.Rate*100)
+	}
+	return sb.String()
+}
+
 func renderSparkline(values []int64, width int) string {
 	if width <= 0 {
 		return ""
@@ -851,6 +865,18 @@ func (m *Model) initCommands() {
 			timeout := m.Engine.Config.Timeout
 			insecure := m.Engine.Config.Insecure
 			autoFilterThreshold := m.Engine.Config.AutoFilterThreshold
+			simhashThreshold := m.Engine.Config.SimhashThreshold
+			simhashClusterLimit := m.Engine.Config.SimhashClusterLimit
+			h2Mode := m.Engine.Config.H2Mode
+			h2Streams := m.Engine.Config.H2ConcurrentStreams
+			timeOracle := m.Engine.Config.TimingOracle
+			timeOracleK := m.Engine.Config.TimeOracleK
+			timeOracleN := m.Engine.Config.TimeOracleN
+			timeTrim := m.Engine.Config.TimeTrim
+			harvest := m.Engine.Config.Harvest
+			harvestJS := m.Engine.Config.HarvestJS
+			harvestAPI := m.Engine.Config.HarvestAPI
+			evasionLimit := m.Engine.Config.EvasionLimit
 			maxRetries := m.Engine.Config.MaxRetries
 			saveRaw := m.Engine.Config.SaveRaw
 			spidering := m.Engine.Config.Spidering
@@ -927,6 +953,10 @@ func (m *Model) initCommands() {
 			writeLine(fmt.Sprintf("InsecureTLS: %v", insecure))
 			writeLine(fmt.Sprintf("SmartAPI: %v", smartAPI))
 			writeLine(fmt.Sprintf("AutoFilterThreshold: %d", autoFilterThreshold))
+			writeLine(fmt.Sprintf("SimhashThreshold: %d", simhashThreshold))
+			writeLine(fmt.Sprintf("SimhashClusterLimit: %d", simhashClusterLimit))
+			writeLine(fmt.Sprintf("H2Mode: %v", h2Mode))
+			writeLine(fmt.Sprintf("H2ConcurrentStreams: %d", h2Streams))
 			writeLine(fmt.Sprintf("Retries: %d", maxRetries))
 			writeLine(fmt.Sprintf("Spidering: %v", spidering))
 			if matchRegex != "" {
@@ -1059,6 +1089,42 @@ func (m *Model) initCommands() {
 			}
 			if autoFilterThreshold != engine.DefaultAutoFilterThreshold {
 				writeLine(fmt.Sprintf("  -af %d", autoFilterThreshold))
+			}
+			if simhashThreshold != engine.DefaultSimhashThreshold {
+				writeLine(fmt.Sprintf("  --simhash-threshold %d", simhashThreshold))
+			}
+			if simhashClusterLimit != engine.DefaultSimhashClusterLimit {
+				writeLine(fmt.Sprintf("  --simhash-cluster %d", simhashClusterLimit))
+			}
+			if h2Mode {
+				writeLine("  --h2")
+			}
+			if h2Streams != engine.DefaultH2ConcurrentStreams {
+				writeLine(fmt.Sprintf("  --h2-streams %d", h2Streams))
+			}
+			if timeOracle {
+				writeLine("  --time-oracle")
+			}
+			if timeOracleK != engine.TimingOracleDefaultK {
+				writeLine(fmt.Sprintf("  --time-k %.2f", timeOracleK))
+			}
+			if timeOracleN != engine.TimingOracleDefaultRepeatN {
+				writeLine(fmt.Sprintf("  --time-n %d", timeOracleN))
+			}
+			if timeTrim {
+				writeLine("  --time-trim")
+			}
+			if harvest {
+				writeLine("  --harvest")
+			}
+			if harvestJS {
+				writeLine("  --harvest-js")
+			}
+			if harvestAPI {
+				writeLine("  --harvest-api")
+			}
+			if evasionLimit != engine.DefaultEvasionLimit {
+				writeLine(fmt.Sprintf("  --evasion-limit %d", evasionLimit))
 			}
 			if spidering {
 				writeLine("  --spider")
@@ -2057,7 +2123,8 @@ func formatResult(r engine.Result) string {
 
 func (m *Model) View() string {
 	if m.quitting {
-		return "\n  " + mutedStyle.Render("DirFuzz finished. Goodbye!") + "\n"
+		summary := renderEvasionSummary(m.Engine.EvasionSummaryRows())
+		return "\n  " + mutedStyle.Render("DirFuzz finished. Goodbye!") + "\n\n  " + summary + "\n"
 	}
 
 	if !m.ready {
@@ -2076,6 +2143,9 @@ func (m *Model) View() string {
 	count429 := atomic.LoadInt64(&m.Engine.Count429)
 	count500 := atomic.LoadInt64(&m.Engine.Count500)
 	connErr := atomic.LoadInt64(&m.Engine.CountConnErr)
+	autoFilterSuppressed := atomic.LoadInt64(&m.Engine.AutoFilterSuppressed)
+	simhashSuppressed := atomic.LoadInt64(&m.Engine.SimhashSuppressed)
+	harvestedPaths := atomic.LoadInt64(&m.Engine.HarvestedPaths)
 
 	m.Engine.Config.RLock()
 	paused := m.Engine.Config.IsPaused
@@ -2123,7 +2193,9 @@ func (m *Model) View() string {
 		renderStatusBadge(DraculaYellow, "🐢", "429", count429),
 		renderStatusBadge(DraculaRed, "💥", "5xx", count500),
 		renderStatusBadge(DraculaPink, "⚠", "Err", connErr),
-	}, " ") + droppedStr
+		renderStatusBadge(DraculaPink, "◌", "AF", autoFilterSuppressed),
+		renderStatusBadge(DraculaCyan, "⬢", "S404", simhashSuppressed),
+	}, " ") + fmt.Sprintf(" [HARVEST: %d paths]", harvestedPaths) + droppedStr
 	rpsSparkline := highlightStyle.Render(renderSparkline(m.rpsHistory, 10))
 
 	// 1. Re-calculate stable widths

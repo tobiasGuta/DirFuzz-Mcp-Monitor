@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"dirfuzz/pkg/engine"
 	"dirfuzz/pkg/tui"
@@ -77,6 +79,18 @@ func run(cfg cliConfig) error {
 		c.FilterRTMax = cfg.RTMax
 		c.ProxyOut = cfg.ProxyOut
 		c.AutoFilterThreshold = cfg.AutoFilterThreshold
+		c.SimhashThreshold = cfg.SimhashThreshold
+		c.SimhashClusterLimit = cfg.SimhashClusterLimit
+		c.H2Mode = cfg.H2Mode
+		c.H2ConcurrentStreams = cfg.H2ConcurrentStreams
+		c.TimingOracle = cfg.TimingOracle
+		c.TimeOracleK = cfg.TimeOracleK
+		c.TimeOracleN = cfg.TimeOracleN
+		c.TimeTrim = cfg.TimeTrim
+		c.Harvest = cfg.Harvest
+		c.HarvestJS = cfg.HarvestJS
+		c.HarvestAPI = cfg.HarvestAPI
+		c.EvasionLimit = cfg.EvasionLimit
 		c.MaxRetries = cfg.MaxRetries
 		c.VerbTamper = cfg.VerbTamper
 		c.FourOhThreeBypass = cfg.FourOhThreeBypass
@@ -134,9 +148,18 @@ func run(cfg cliConfig) error {
 		}
 	}
 
+	if cfg.H2Mode && cfg.ProxyFile != "" {
+		return fmt.Errorf("--h2 cannot be used together with --proxy")
+	}
+
 	// ── 9. Target ─────────────────────────────────────────────────────────────
 	if err := eng.SetTarget(cfg.Target); err != nil {
 		return fmt.Errorf("invalid target: %w", err)
+	}
+	if cfg.H2Mode {
+		if err := eng.RefreshH2Client(); err != nil {
+			return fmt.Errorf("initializing HTTP/2 client: %w", err)
+		}
 	}
 
 	// ── 10. Auto-calibration ──────────────────────────────────────────────────
@@ -145,6 +168,16 @@ func run(cfg cliConfig) error {
 		if err := eng.AutoCalibrate(); err != nil {
 			fmt.Fprintf(os.Stderr, "[!] Calibration warning: %v\n", err)
 		}
+	}
+
+	if cfg.TimingOracle {
+		fmt.Fprintln(os.Stderr, "[*] Calibrating timing oracle…")
+		oracle, err := eng.CalibrateTimingOracle()
+		if err != nil {
+			return fmt.Errorf("calibrating timing oracle: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "[*] Timing oracle ready: baseline=%s threshold=%s repeat=%d\n",
+			oracle.BaselineMedian().Round(time.Millisecond), oracle.Threshold().Round(time.Millisecond), oracle.RepeatN)
 	}
 
 	// ── 11. Resume ────────────────────────────────────────────────────────────
@@ -206,6 +239,20 @@ func run(cfg cliConfig) error {
 		}
 	}
 
+	// ── 13. Harvest endpoints ────────────────────────────────────────────────
+	if cfg.Harvest || cfg.HarvestJS || cfg.HarvestAPI {
+		paths, err := eng.HarvestEndpoints(context.Background())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[!] Harvest warning: %v\n", err)
+		}
+		runID := atomic.LoadInt64(&eng.RunID)
+		for _, p := range paths {
+			eng.Submit(engine.Job{Path: p, Depth: 0, Method: "GET", RunID: runID})
+		}
+		atomic.AddInt64(&eng.HarvestedPaths, int64(len(paths)))
+		fmt.Fprintf(os.Stderr, "[*] Harvested %d endpoint(s)\n", len(paths))
+	}
+
 	// writeResult writes one result to the output file. It is always called
 	// from the fanout goroutine (never dropped) and never from the TUI path.
 	var reportResults []engine.Result
@@ -235,11 +282,11 @@ func run(cfg cliConfig) error {
 		}
 	}
 
-	// ── 13. Start engine ──────────────────────────────────────────────────────
+	// ── 14. Start engine ──────────────────────────────────────────────────────
 	eng.Start()
 	eng.KickoffScanner(wordlistPath, startLine)
 
-	// ── 14. Display mode ──────────────────────────────────────────────────────
+	// ── 15. Display mode ──────────────────────────────────────────────────────
 	if cfg.NoTUI {
 		collectedResults, err := runPlain(eng, cfg, writeResult)
 		if err != nil {
@@ -250,14 +297,14 @@ func run(cfg cliConfig) error {
 		}
 		reportMu.Lock()
 		defer reportMu.Unlock()
-		return writeReportIfRequested(cfg, reportResults)
+		return writeReportIfRequested(eng, cfg, reportResults)
 	}
 	if err := runTUI(eng, cfg, writeResult); err != nil {
 		return err
 	}
 	reportMu.Lock()
 	defer reportMu.Unlock()
-	return writeReportIfRequested(cfg, reportResults)
+	return writeReportIfRequested(eng, cfg, reportResults)
 }
 
 // ── Plain / no-TUI mode ───────────────────────────────────────────────────────

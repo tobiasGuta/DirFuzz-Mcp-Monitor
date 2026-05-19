@@ -64,6 +64,18 @@ type cliConfig struct {
 	Mutate              bool
 	SmartAPI            bool
 	AutoFilterThreshold int
+	SimhashThreshold    int
+	SimhashClusterLimit int
+	H2Mode              bool
+	H2ConcurrentStreams int
+	TimingOracle        bool
+	TimeOracleK         float64
+	TimeOracleN         int
+	TimeTrim            bool
+	Harvest             bool
+	HarvestJS           bool
+	HarvestAPI          bool
+	EvasionLimit        int
 	MaxRetries          int
 	DryRun              bool
 	MaxWSFrames         int
