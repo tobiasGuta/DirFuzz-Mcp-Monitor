@@ -18,6 +18,7 @@ DirFuzz is a memory-efficient, high-performance web security testing and directo
 - Hidden parameter fuzzing with chunked probes and bisection to isolate interesting parameters.
 - Role-based auth matrix execution for comparing the same path across multiple header/cookie states.
 - Raw request/response capture with hex inspection and split-screen replay/diff workflows in the TUI.
+- Live system logs, a multi-tab metrics dashboard, log search/filter/export, and context-aware related logs in the TUI.
 - Lua plugins for transformers, matchers, mutators, and active proof-of-concept flows.
 - Swarm mode for authorized distributed execution. It is opt-in only and stays disabled unless `--swarm` is provided.
 - Eagle mode, resume support, and continuous monitoring with webhook alerts.
@@ -126,9 +127,15 @@ The TUI is where the new inspection features shine.
 - `d` opens the split diff view against the saved reference.
 - `D` opens the replay diff view from the repeater.
 - `r` sends a selected request to the repeater.
+- `L` toggles the live log panel.
+- `m` cycles the main view between the list, dashboard, and log panel modes.
+- `1` to `5` switch between the dashboard analytics tabs.
+- `f` cycles the dashboard time range.
+- `e` exports the current metrics snapshot to JSON.
+- `x` expands or collapses detail rows in the system log panel.
 - `Esc` or `q` returns to the previous screen.
 
-The list view footer also advertises the most important shortcuts so they are discoverable without opening detail first.
+The list, dashboard, detail, hex, repeater, and log views all advertise their own shortcut hints in the footer, so the controls stay discoverable without opening a separate help screen.
 
 ## Diff and Replay Workflow
 
@@ -143,6 +150,8 @@ The diff view highlights deleted text in red on the left and added text in green
 ## Feature Notes
 
 - `--save-raw` is what enables the hex viewer, replay comparison, and diff screens.
+- The TUI includes a live system log stream, a bounded log buffer, log search/filter/export commands, and a split layout that can show logs under the main results list.
+- The dashboard includes performance, error, discovery, network, and timeline views with rolling histories.
 - `--auth` is repeatable and accepts `role=Header: Value||Header2: Value2`.
 - `--swarm-provider lambda` expects a Lambda function name in `DIRFUZZ_SWARM_LAMBDA_FUNCTION`, `SWARM_LAMBDA_FUNCTION`, or `AWS_LAMBDA_FUNCTION_NAME`.
 - `--harvest-js` and `--harvest-api` let you narrow route harvesting to one source family.
