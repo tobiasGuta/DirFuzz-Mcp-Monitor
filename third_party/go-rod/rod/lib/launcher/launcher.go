@@ -3,6 +3,7 @@ package launcher
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -76,8 +77,9 @@ func (l *Launcher) Launch() (string, error) {
 	args = append(args, "about:blank")
 
 	cmd := exec.Command(bin, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// Keep Chromium/Chrome startup chatter out of the parent TUI terminal.
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
 		_ = os.RemoveAll(userDir)
 		return "", err
