@@ -256,6 +256,184 @@ func renderEvasionSummary(rows []engine.EvasionScoreboardRow) string {
 	return sb.String()
 }
 
+type contentTypeRow struct {
+	label string
+	count int
+}
+
+func renderMarkdownTable(title string, headers []string, rows [][]string) string {
+	if len(headers) == 0 {
+		return title
+	}
+
+	cols := len(headers)
+	widths := make([]int, cols)
+	for i, header := range headers {
+		widths[i] = len([]rune(header))
+	}
+	for _, row := range rows {
+		for i := 0; i < cols && i < len(row); i++ {
+			if cellWidth := len([]rune(row[i])); cellWidth > widths[i] {
+				widths[i] = cellWidth
+			}
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(title)
+	sb.WriteString("\n")
+	for i, header := range headers {
+		if i > 0 {
+			sb.WriteString(" | ")
+		}
+		sb.WriteString(header)
+		padding := widths[i] - len([]rune(header))
+		if padding > 0 {
+			sb.WriteString(strings.Repeat(" ", padding))
+		}
+	}
+	sb.WriteString("\n")
+
+	for i, width := range widths {
+		if i > 0 {
+			sb.WriteString(" | ")
+		}
+		sb.WriteString(strings.Repeat("-", width))
+	}
+	sb.WriteString("\n")
+
+	for _, row := range rows {
+		for i := 0; i < cols; i++ {
+			if i > 0 {
+				sb.WriteString(" | ")
+			}
+			cell := ""
+			if i < len(row) {
+				cell = row[i]
+			}
+			sb.WriteString(cell)
+			padding := widths[i] - len([]rune(cell))
+			if padding > 0 {
+				sb.WriteString(strings.Repeat(" ", padding))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+func buildTopContentTypes(rows []engine.Result, limit int) []contentTypeRow {
+	if limit < 1 {
+		limit = 1
+	}
+	counts := make(map[string]int)
+	for _, hit := range rows {
+		label := strings.TrimSpace(hit.ContentType)
+		if label == "" {
+			label = "unknown"
+		}
+		counts[label]++
+	}
+
+	if len(counts) == 0 {
+		return nil
+	}
+
+	out := make([]contentTypeRow, 0, len(counts))
+	for label, count := range counts {
+		out = append(out, contentTypeRow{label: label, count: count})
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].count != out[j].count {
+			return out[i].count > out[j].count
+		}
+		return out[i].label < out[j].label
+	})
+
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+func (m *Model) renderDashboardView() {
+	rows := m.Engine.EvasionSummaryRows()
+	wafSummary := renderEvasionSummary(rows)
+
+	m.Engine.Config.RLock()
+	workers := m.Engine.Config.MaxWorkers
+	delay := m.Engine.Config.Delay
+	m.Engine.Config.RUnlock()
+
+	rps := atomic.LoadInt64(&m.Engine.CurrentRPS)
+	queueSize := m.Engine.QueueSize()
+	processed := atomic.LoadInt64(&m.Engine.ProcessedLines)
+	total := atomic.LoadInt64(&m.Engine.TotalLines)
+	autoFilterSuppressed := atomic.LoadInt64(&m.Engine.AutoFilterSuppressed)
+	simhashSuppressed := atomic.LoadInt64(&m.Engine.SimhashSuppressed)
+	harvestedPaths := atomic.LoadInt64(&m.Engine.HarvestedPaths)
+	tuiDropped := atomic.LoadInt64(&m.Engine.TUIDropped)
+
+	performanceRows := [][]string{{
+		strconv.FormatInt(rps, 10),
+		strconv.Itoa(workers),
+		fmt.Sprintf("%.2f", func() float64 {
+			if workers <= 0 {
+				return 0
+			}
+			return float64(rps) / float64(workers)
+		}()),
+		strconv.Itoa(queueSize),
+		fmt.Sprintf("%d/%d", processed, total),
+		delay.String(),
+	}}
+	performanceTable := renderMarkdownTable(
+		"Performance",
+		[]string{"CurrentRPS", "MaxWorkers", "RPS/Worker", "Queue", "Progress", "Delay"},
+		performanceRows,
+	)
+
+	contentTypeRows := buildTopContentTypes(m.hits, 5)
+	contentTypeTable := mutedStyle.Render("Top Content Types: none recorded")
+	if len(contentTypeRows) > 0 {
+		totalHits := len(m.hits)
+		rows := make([][]string, 0, len(contentTypeRows))
+		for _, row := range contentTypeRows {
+			share := 0.0
+			if totalHits > 0 {
+				share = float64(row.count) / float64(totalHits) * 100
+			}
+			rows = append(rows, []string{
+				row.label,
+				strconv.Itoa(row.count),
+				fmt.Sprintf("%.1f%%", share),
+			})
+		}
+		contentTypeTable = renderMarkdownTable(
+			"Top Content Types",
+			[]string{"Content-Type", "Count", "Share"},
+			rows,
+		)
+	}
+
+	dashboardSections := []string{
+		mutedStyle.Render("Live metrics, updated while the scan runs."),
+		wafSummary,
+		performanceTable,
+		contentTypeTable,
+		fmt.Sprintf(
+			"%s %s %s",
+			renderStatusBadge(DraculaPink, "◌", "AF", autoFilterSuppressed),
+			renderStatusBadge(DraculaCyan, "⬢", "S404", simhashSuppressed),
+			mutedStyle.Render(fmt.Sprintf("Harvested:%d TUI-dropped:%d", harvestedPaths, tuiDropped)),
+		),
+	}
+
+	m.viewport.SetContent(strings.Join(dashboardSections, "\n\n"))
+}
+
 func renderSparkline(values []int64, width int) string {
 	if width <= 0 {
 		return ""
@@ -464,6 +642,7 @@ type ViewState int
 
 const (
 	StateList ViewState = iota
+	StateDashboard
 	StateDetail
 	StateHexView
 	StateDiffView
@@ -1440,8 +1619,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.commandPulseOn = !m.commandPulseOn
 		if m.logsChanged {
-			m.renderListView()
+			if m.state == StateDashboard {
+				m.renderDashboardView()
+			} else {
+				m.renderListView()
+			}
 			m.logsChanged = false
+		}
+		if m.state == StateDashboard {
+			m.renderDashboardView()
 		}
 		cmds = append(cmds, tickCmd())
 
@@ -1572,8 +1758,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "q":
-			if m.state == StateDetail || m.state == StateHexView || m.state == StateDiffView || m.state == StateRepeater {
+			if m.state == StateDashboard || m.state == StateDetail || m.state == StateHexView || m.state == StateDiffView || m.state == StateRepeater {
 				m.state = StateList
+				m.renderListView()
 				return m, nil
 			}
 			if !m.commandMode {
@@ -1602,8 +1789,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.suggestions = nil
 				return m, nil
 			}
-			if m.state == StateDetail || m.state == StateHexView || m.state == StateDiffView {
+			if m.state == StateDashboard || m.state == StateDetail || m.state == StateHexView || m.state == StateDiffView {
 				m.state = StateList
+				m.renderListView()
 				return m, nil
 			}
 
@@ -1638,6 +1826,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if m.state == StateDashboard {
+				return m, nil
+			}
 
 		case "up", "k":
 			if m.commandMode && len(m.suggestions) > 0 {
@@ -1666,6 +1857,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.renderListView()
 				}
+				return m, nil
+			}
+			if m.state == StateDashboard {
+				m.viewport.LineUp(1)
 				return m, nil
 			}
 			if m.state == StateDetail || m.state == StateHexView || m.state == StateDiffView {
@@ -1712,6 +1907,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if m.state == StateDashboard {
+				m.viewport.LineDown(1)
+				return m, nil
+			}
 			if m.state == StateDetail || m.state == StateHexView || m.state == StateDiffView {
 				m.reqViewport.LineDown(1)
 				m.resViewport.LineDown(1)
@@ -1742,6 +1941,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				m.renderListView()
+			} else if m.state == StateDashboard {
+				m.viewport.ViewDown()
 			} else if m.state == StateDetail || m.state == StateHexView || m.state == StateDiffView {
 				m.reqViewport.ViewDown()
 				m.resViewport.ViewDown()
@@ -1763,7 +1964,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.listScrollIdx = 0
 				}
 				m.renderListView()
-			} else if m.state == StateDetail || m.state == StateHexView || m.state == StateDiffView {
+			} else if m.state == StateDashboard || m.state == StateDetail || m.state == StateHexView || m.state == StateDiffView {
+				if m.state == StateDashboard {
+					m.viewport.ViewUp()
+				}
 				m.reqViewport.ViewUp()
 				m.resViewport.ViewUp()
 				m.hexViewport.ViewUp()
@@ -1911,6 +2115,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "?":
 			output := m.commands[0].Handler(m, "")
 			m.appendCmd(output)
+		case "m":
+			if m.state == StateDashboard {
+				m.state = StateList
+				m.renderListView()
+			} else {
+				m.state = StateDashboard
+				m.renderDashboardView()
+			}
+			return m, nil
 		}
 	}
 
@@ -2370,6 +2583,9 @@ func (m *Model) View() string {
 
 	if m.state == StateList {
 		mainContent = m.viewport.View()
+	} else if m.state == StateDashboard {
+		m.renderDashboardView()
+		mainContent = m.viewport.View()
 	} else if m.state == StateDetail {
 		headerHeight := 6
 		footerHeight := bottomBandHeight
@@ -2523,7 +2739,9 @@ func (m *Model) View() string {
 		footerBody = m.statusMessage
 	} else {
 		if m.state == StateList {
-			footerBody = m.footerBarStyle.Render("Enter: details | R: save ref | d: diff | h/H: hex | r: repeater | ':' commands | q: quit")
+			footerBody = m.footerBarStyle.Render("Enter: details | m: metrics | R: save ref | d: diff | h/H: hex | r: repeater | ':' commands | q: quit")
+		} else if m.state == StateDashboard {
+			footerBody = m.footerBarStyle.Render("m/q/Esc: back to scan list | Up/Down/PgUp/PgDn: scroll metrics")
 		} else if m.state == StateDetail {
 			footerBody = m.footerBarStyle.Render("R: save ref | d: diff | h/H: hex | Esc/q: back | Up/Down to scroll")
 		} else if m.state == StateHexView {
