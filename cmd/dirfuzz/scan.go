@@ -372,30 +372,51 @@ func runPlain(eng *engine.Engine, cfg cliConfig, writeResult func(engine.Result)
 //     counted in eng.TUIDropped and shown in the TUI header as ⚠ TUI-dropped:N.
 func runTUI(eng *engine.Engine, cfg cliConfig, writeResult func(engine.Result)) error {
 	tuiCh := make(chan engine.Result, tuiResultBufSize)
+	logEventCh := make(chan engine.LogEvent, 5000)
 
-	// Fanout goroutine to pass results to TUI and file writer.
+	// Fanout goroutine to pass results and log events to the TUI channels.
 	var fanoutWg sync.WaitGroup
 	fanoutWg.Add(1)
 	go func() {
 		defer fanoutWg.Done()
-		for res := range eng.Results {
-			// File write is guaranteed.
-			if !res.IsAutoFilter {
-				writeResult(res)
-			}
-
-			// TUI receive is best-effort.
+		resultsCh := eng.Results
+		logsCh := eng.LogEvents
+		for resultsCh != nil || logsCh != nil {
 			select {
-			case tuiCh <- res:
-			default:
-				atomic.AddInt64(&eng.TUIDropped, 1)
+			case res, ok := <-resultsCh:
+				if !ok {
+					resultsCh = nil
+					continue
+				}
+				// File write is guaranteed.
+				if !res.IsAutoFilter {
+					writeResult(res)
+				}
+
+				// TUI receive is best-effort.
+				select {
+				case tuiCh <- res:
+				default:
+					atomic.AddInt64(&eng.TUIDropped, 1)
+				}
+			case ev, ok := <-logsCh:
+				if !ok {
+					logsCh = nil
+					continue
+				}
+				select {
+				case logEventCh <- ev:
+				default:
+					eng.LogEventsDropped.Add(1)
+				}
 			}
 		}
 		// When eng.Results is closed, unblock the TUI so it can exit.
 		close(tuiCh)
+		close(logEventCh)
 	}()
 
-	model := tui.NewModel(eng, tuiCh)
+	model := tui.NewModel(eng, tuiCh, logEventCh)
 	p := tea.NewProgram(&model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI error: %w", err)

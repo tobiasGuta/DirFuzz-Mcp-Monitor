@@ -57,7 +57,7 @@ type graphqlIntrospection struct {
 // HarvestEndpoints fetches and parses discovery surfaces from the target and
 // returns a deduplicated list of discovered paths and keywords.
 func HarvestEndpoints(ctx context.Context, baseURL string, client *http.Client) []string {
-	return harvestEndpointsWithOptions(ctx, baseURL, client, harvestOptions{js: true, api: true})
+	return harvestEndpointsWithOptions(nil, ctx, baseURL, client, harvestOptions{js: true, api: true})
 }
 
 // HarvestEndpoints builds the harvesting client from the engine config and
@@ -114,7 +114,7 @@ func (e *Engine) HarvestEndpoints(ctx context.Context) ([]string, error) {
 		opts.js = true
 		opts.api = true
 	}
-	return harvestEndpointsWithOptions(ctx, baseURL, client, opts), nil
+	return harvestEndpointsWithOptions(e, ctx, baseURL, client, opts), nil
 }
 
 func newHarvestClient(baseURL string, timeout time.Duration, insecure bool, h2Mode bool) (*http.Client, error) {
@@ -134,7 +134,7 @@ func newHarvestClient(baseURL string, timeout time.Duration, insecure bool, h2Mo
 	}, nil
 }
 
-func harvestEndpointsWithOptions(ctx context.Context, baseURL string, client *http.Client, opts harvestOptions) []string {
+func harvestEndpointsWithOptions(e *Engine, ctx context.Context, baseURL string, client *http.Client, opts harvestOptions) []string {
 	if client == nil || baseURL == "" {
 		return nil
 	}
@@ -154,19 +154,29 @@ func harvestEndpointsWithOptions(ctx context.Context, baseURL string, client *ht
 	discovered := make(map[string]struct{})
 	add := func(candidate string) {
 		if normalized := canonicalHarvestCandidate(base, candidate); normalized != "" {
+			if _, exists := discovered[normalized]; !exists && e != nil {
+				e.emitLogEvent(LogLevelInfo, LogCategoryDiscovery, EventHarvestDiscovery, fmt.Sprintf("discovered endpoint %s", normalized), map[string]interface{}{
+					"path": normalized,
+				})
+			}
 			discovered[normalized] = struct{}{}
 		}
 	}
 
 	if opts.js {
 		if rootBody, _, err := fetchHarvestBody(ctx, client, baseURL, nil); err == nil {
-			scriptURLs := collectScriptSrcs(rootBody, &resourceBase)
+			scriptURLs := collectScriptSrcs(e, rootBody, &resourceBase)
 			for _, scriptURL := range scriptURLs {
 				if scriptBody, _, err := fetchHarvestBody(ctx, client, scriptURL, nil); err == nil {
 					for _, candidate := range extractJSHarvestCandidates(scriptBody) {
 						add(candidate)
 					}
 				}
+			}
+			if e != nil {
+				e.emitLogEvent(LogLevelSuccess, LogCategoryDiscovery, EventHarvestJSAnalysisComplete, fmt.Sprintf("JS analysis completed with %d script URL(s)", len(scriptURLs)), map[string]interface{}{
+					"script_urls": len(scriptURLs),
+				})
 			}
 		}
 	}
@@ -177,7 +187,7 @@ func harvestEndpointsWithOptions(ctx context.Context, baseURL string, client *ht
 			if err != nil || resp == nil || resp.StatusCode != http.StatusOK {
 				continue
 			}
-			for _, candidate := range extractOpenAPIHarvestCandidates(body) {
+			for _, candidate := range extractOpenAPIHarvestCandidates(e, body) {
 				add(candidate)
 			}
 		}
@@ -188,7 +198,7 @@ func harvestEndpointsWithOptions(ctx context.Context, baseURL string, client *ht
 			if err != nil || resp == nil || resp.StatusCode != http.StatusOK {
 				continue
 			}
-			for _, candidate := range extractGraphQLHarvestCandidates(body) {
+			for _, candidate := range extractGraphQLHarvestCandidates(e, body) {
 				add(candidate)
 			}
 		}
@@ -229,9 +239,14 @@ func fetchHarvestBody(ctx context.Context, client *http.Client, target string, b
 	return data, resp, nil
 }
 
-func collectScriptSrcs(rootBody []byte, base *url.URL) []string {
+func collectScriptSrcs(e *Engine, rootBody []byte, base *url.URL) []string {
 	doc, err := html.Parse(bytes.NewReader(rootBody))
 	if err != nil {
+		if e != nil {
+			e.emitLogEvent(LogLevelError, LogCategoryDiscovery, EventHarvestParseError, fmt.Sprintf("failed to parse HTML discovery body: %v", err), map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 		return nil
 	}
 
@@ -275,10 +290,15 @@ func extractJSHarvestCandidates(body []byte) []string {
 	return out
 }
 
-func extractOpenAPIHarvestCandidates(body []byte) []string {
+func extractOpenAPIHarvestCandidates(e *Engine, body []byte) []string {
 	var spec openAPISpec
 	if err := json.Unmarshal(body, &spec); err != nil {
 		if err := yaml.Unmarshal(body, &spec); err != nil {
+			if e != nil {
+				e.emitLogEvent(LogLevelError, LogCategoryDiscovery, EventHarvestParseError, fmt.Sprintf("failed to parse OpenAPI discovery body: %v", err), map[string]interface{}{
+					"error": err.Error(),
+				})
+			}
 			return nil
 		}
 	}
@@ -300,9 +320,14 @@ func extractOpenAPIHarvestCandidates(body []byte) []string {
 	return out
 }
 
-func extractGraphQLHarvestCandidates(body []byte) []string {
+func extractGraphQLHarvestCandidates(e *Engine, body []byte) []string {
 	var spec graphqlIntrospection
 	if err := json.Unmarshal(body, &spec); err != nil {
+		if e != nil {
+			e.emitLogEvent(LogLevelError, LogCategoryDiscovery, EventHarvestParseError, fmt.Sprintf("failed to parse GraphQL discovery body: %v", err), map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 		return nil
 	}
 

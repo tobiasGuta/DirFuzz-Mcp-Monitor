@@ -305,6 +305,36 @@ func FingerprintWAF(body []byte, headers string, statusCode int, durationMs int6
 	}
 }
 
+func (e *Engine) logWAFBypassAttempt(vendor, technique, path string, attempt int) {
+	if e == nil {
+		return
+	}
+	e.emitLogEvent(LogLevelInfo, LogCategoryNetwork, EventWAFBypassAttempt, fmt.Sprintf("trying %s on %s", technique, vendor), map[string]interface{}{
+		"vendor":    vendor,
+		"technique": technique,
+		"path":      path,
+		"attempt":   attempt,
+	})
+}
+
+func (e *Engine) logWAFBypassOutcome(vendor, technique, path string, bypassed bool, statusCode int) {
+	if e == nil {
+		return
+	}
+	level := LogLevelWarning
+	if bypassed {
+		level = LogLevelSuccess
+	}
+	message := fmt.Sprintf("%s on %s %s", technique, vendor, map[bool]string{true: "succeeded", false: "failed"}[bypassed])
+	e.emitLogEvent(level, LogCategoryNetwork, EventWAFBypassOutcome, message, map[string]interface{}{
+		"vendor":      vendor,
+		"technique":   technique,
+		"path":        path,
+		"bypassed":    bypassed,
+		"status_code": statusCode,
+	})
+}
+
 // EvasionTechnique is a single WAF bypass strategy.
 type EvasionTechnique struct {
 	Name          string

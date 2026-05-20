@@ -99,7 +99,7 @@ func TestHarvestEndpointsModes(t *testing.T) {
 
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	jsOnly := harvestEndpointsWithOptions(context.Background(), srv.URL, client, harvestOptions{js: true})
+	jsOnly := harvestEndpointsWithOptions(nil, context.Background(), srv.URL, client, harvestOptions{js: true})
 	if !containsString(jsOnly, "/api/from-js") {
 		t.Fatalf("js-only harvest missing JS endpoint: %v", jsOnly)
 	}
@@ -107,7 +107,7 @@ func TestHarvestEndpointsModes(t *testing.T) {
 		t.Fatalf("js-only harvest leaked API candidates: %v", jsOnly)
 	}
 
-	apiOnly := harvestEndpointsWithOptions(context.Background(), srv.URL, client, harvestOptions{api: true})
+	apiOnly := harvestEndpointsWithOptions(nil, context.Background(), srv.URL, client, harvestOptions{api: true})
 	if !containsString(apiOnly, "/api/from-spec") || !containsString(apiOnly, "GraphUser") {
 		t.Fatalf("api-only harvest missing API candidates: %v", apiOnly)
 	}

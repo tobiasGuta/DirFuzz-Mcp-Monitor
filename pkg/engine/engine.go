@@ -35,6 +35,58 @@ import (
 
 var linkRegex = regexp.MustCompile(`(?i)(?:href|src|action)=['"]([^'"]+)['"]`)
 
+// ─── Log events ───────────────────────────────────────────────────────────────
+
+type LogLevel string
+
+const (
+	LogLevelDebug   LogLevel = "DEBUG"
+	LogLevelInfo    LogLevel = "INFO"
+	LogLevelWarning LogLevel = "WARNING"
+	LogLevelError   LogLevel = "ERROR"
+	LogLevelSuccess LogLevel = "SUCCESS"
+)
+
+type LogCategory string
+
+const (
+	LogCategorySystem    LogCategory = "SYSTEM"
+	LogCategoryWorker    LogCategory = "WORKER"
+	LogCategoryNetwork   LogCategory = "NETWORK"
+	LogCategoryPlugin    LogCategory = "PLUGIN"
+	LogCategoryDiscovery LogCategory = "DISCOVERY"
+	LogCategoryFilter    LogCategory = "FILTER"
+)
+
+type EventType string
+
+const (
+	EventWorkerStarted             EventType = "WorkerStarted"
+	EventWorkerStopped             EventType = "WorkerStopped"
+	EventProxyRotated              EventType = "ProxyRotated"
+	EventRateLimitHit              EventType = "RateLimitHit"
+	EventRetryAttempt              EventType = "RetryAttempt"
+	EventHarvestDiscovery          EventType = "HarvestDiscovery"
+	EventHarvestParseError         EventType = "HarvestParseError"
+	EventHarvestJSAnalysisComplete EventType = "HarvestJSAnalysisComplete"
+	EventAutoFilterTriggered       EventType = "AutoFilterTriggered"
+	EventSimhashCluster            EventType = "SimhashCluster"
+	EventWAFBypassAttempt          EventType = "WAFBypassAttempt"
+	EventWAFBypassOutcome          EventType = "WAFBypassOutcome"
+	EventTimingOracleStarted       EventType = "TimingOracleStarted"
+	EventTimingOracleCalibrated    EventType = "TimingOracleCalibrated"
+	EventNetworkError              EventType = "NetworkError"
+)
+
+type LogEvent struct {
+	Timestamp time.Time              `json:"timestamp"`
+	Level     LogLevel               `json:"level"`
+	Category  LogCategory            `json:"category"`
+	Type      EventType              `json:"type"`
+	Message   string                 `json:"message"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+}
+
 // ─── Config types ─────────────────────────────────────────────────────────────
 
 // SizeRange represents an inclusive min–max byte-size range used for filtering.
@@ -221,6 +273,27 @@ type scannerContext struct {
 	cancel context.CancelFunc
 }
 
+func (e *Engine) emitLogEvent(level LogLevel, category LogCategory, typ EventType, message string, metadata map[string]interface{}) {
+	if e == nil || e.LogEvents == nil {
+		return
+	}
+	defer func() {
+		_ = recover()
+	}()
+	ev := LogEvent{
+		Timestamp: time.Now(),
+		Level:     level,
+		Category:  category,
+		Type:      typ,
+		Message:   message,
+		Metadata:  metadata,
+	}
+	select {
+	case e.LogEvents <- ev:
+	default:
+	}
+}
+
 // ─── Sharded Bloom Filter ─────────────────────────────────────────────────────
 
 const bloomFilterShards = 32
@@ -332,6 +405,7 @@ type Engine struct {
 	scannerWg     sync.WaitGroup
 	activeJobs    sync.WaitGroup
 	Results       chan Result
+	LogEvents     chan LogEvent
 
 	// Eagle Mode State
 	PreviousState map[string]int
@@ -410,6 +484,8 @@ type Engine struct {
 
 	// TUIDropped counts results the TUI channel dropped due to backpressure.
 	TUIDropped int64
+	// LogEventsDropped counts system log events dropped on the TUI fanout path.
+	LogEventsDropped atomic.Int64
 
 	// Resume support
 	ResumeFile string
@@ -618,6 +694,7 @@ func NewEngine(numWorkers int, expectedItems uint, falsePositiveRate float64) *E
 			EvasionLimit:        DefaultEvasionLimit,
 		},
 		Results:           make(chan Result, ResultsChannelSize),
+		LogEvents:         make(chan LogEvent, 5000),
 		antiBot:           newAntiBotManager(),
 		fpCounts:          make(map[string]int),
 		manualFilterSizes: make(map[int]bool),
@@ -687,7 +764,12 @@ func (e *Engine) GetNextProxy() string {
 		return ""
 	}
 	idx := atomic.AddUint64(&e.proxyIndex, 1)
-	return e.proxies[(idx-1)%uint64(len(e.proxies))]
+	proxy := e.proxies[(idx-1)%uint64(len(e.proxies))]
+	e.emitLogEvent(LogLevelInfo, LogCategoryNetwork, EventProxyRotated, fmt.Sprintf("rotated to proxy %s", proxy), map[string]interface{}{
+		"proxy": proxy,
+		"index": idx - 1,
+	})
+	return proxy
 }
 
 // ─── Scan state / Eagle Mode ─────────────────────────────────────────────────
@@ -1880,6 +1962,7 @@ func (e *Engine) Start() {
 	defer e.workerLock.Unlock()
 	for i := 0; i < e.numWorkers; i++ {
 		e.wg.Add(1)
+		e.emitLogEvent(LogLevelInfo, LogCategoryWorker, EventWorkerStarted, fmt.Sprintf("worker %d started", i), map[string]interface{}{"worker_id": i})
 		go e.worker(i)
 	}
 }
@@ -1901,7 +1984,9 @@ func (e *Engine) SetWorkerCount(n int) {
 		diff := n - e.numWorkers
 		for i := 0; i < diff; i++ {
 			e.wg.Add(1)
-			go e.worker(e.numWorkers + i)
+			workerID := e.numWorkers + i
+			e.emitLogEvent(LogLevelInfo, LogCategoryWorker, EventWorkerStarted, fmt.Sprintf("worker %d started", workerID), map[string]interface{}{"worker_id": workerID, "new_size": n})
+			go e.worker(workerID)
 		}
 	} else if n < e.numWorkers {
 		// Shrink the pool
@@ -1949,6 +2034,11 @@ func (e *Engine) autoThrottleCheck() {
 
 		e.SetWorkerCount(newWorkers)
 		e.SetDelay(newDelay)
+		e.emitLogEvent(LogLevelWarning, LogCategorySystem, EventRateLimitHit, fmt.Sprintf("auto-throttle applied: workers %d -> %d, delay %s", currentWorkers, newWorkers, newDelay), map[string]interface{}{
+			"current_workers": currentWorkers,
+			"new_workers":     newWorkers,
+			"new_delay_ms":    newDelay.Milliseconds(),
+		})
 
 		res := Result{
 			Path:         "AUTO-THROTTLE",
@@ -2090,6 +2180,13 @@ func (e *Engine) executeRequestWithRetry(ctx context.Context, targetURL string, 
 			}
 			return resp, nil
 		}
+		e.emitLogEvent(LogLevelWarning, LogCategoryNetwork, EventRetryAttempt, fmt.Sprintf("request attempt %d failed: %v", attempt+1, err), map[string]interface{}{
+			"attempt":     attempt + 1,
+			"max_retries": retries,
+			"target":      targetURL,
+			"proxy":       proxyAddr,
+			"error":       err.Error(),
+		})
 		if attempt < retries {
 			select {
 			case <-ctx.Done():
@@ -2098,6 +2195,14 @@ func (e *Engine) executeRequestWithRetry(ctx context.Context, targetURL string, 
 				backoff *= 2
 			}
 		}
+	}
+	if err != nil {
+		e.emitLogEvent(LogLevelError, LogCategoryNetwork, EventNetworkError, fmt.Sprintf("request failed after %d attempt(s): %v", retries+1, err), map[string]interface{}{
+			"attempts": retries + 1,
+			"target":   targetURL,
+			"proxy":    proxyAddr,
+			"error":    err.Error(),
+		})
 	}
 	return resp, err
 }
@@ -2121,6 +2226,12 @@ func (e *Engine) executeH2RequestWithRetry(ctx context.Context, targetURL string
 		if err == nil {
 			return resp, nil
 		}
+		e.emitLogEvent(LogLevelWarning, LogCategoryNetwork, EventRetryAttempt, fmt.Sprintf("h2 attempt %d failed: %v", attempt+1, err), map[string]interface{}{
+			"attempt":     attempt + 1,
+			"max_retries": retries,
+			"target":      targetURL,
+			"error":       err.Error(),
+		})
 		if attempt < retries {
 			select {
 			case <-ctx.Done():
@@ -2129,6 +2240,13 @@ func (e *Engine) executeH2RequestWithRetry(ctx context.Context, targetURL string
 				backoff *= 2
 			}
 		}
+	}
+	if err != nil {
+		e.emitLogEvent(LogLevelError, LogCategoryNetwork, EventNetworkError, fmt.Sprintf("h2 request failed after %d attempt(s): %v", retries+1, err), map[string]interface{}{
+			"attempts": retries + 1,
+			"target":   targetURL,
+			"error":    err.Error(),
+		})
 	}
 	return resp, err
 }
@@ -2443,6 +2561,11 @@ func (e *Engine) applyFilters(
 	// 9. SimHash soft-404 clustering.
 	if e.isSimhashSoftFour(bodyHash) {
 		atomic.AddInt64(&e.SimhashSuppressed, 1)
+		e.emitLogEvent(LogLevelWarning, LogCategoryFilter, EventSimhashCluster, fmt.Sprintf("simhash cluster suppressed body hash %x", bodyHash), map[string]interface{}{
+			"body_hash": bodyHash,
+			"status":    resp.StatusCode,
+			"size":      bodySize,
+		})
 		return false
 	}
 	return true
@@ -2540,10 +2663,15 @@ func verbTamperHeaders(method string) map[string]string {
 }
 
 func (e *Engine) worker(id int) {
-	defer e.wg.Done()
+	defer func() {
+		e.emitLogEvent(LogLevelInfo, LogCategoryWorker, EventWorkerStopped, fmt.Sprintf("worker %d stopped", id), map[string]interface{}{"worker_id": id})
+		e.wg.Done()
+	}()
 
 	for {
 		select {
+		case <-e.workerStopCh:
+			return
 		case job, ok := <-e.jobs:
 			if !ok {
 				return
@@ -2729,11 +2857,21 @@ func (e *Engine) worker(id int) {
 			reqHostname := parsedURL.Hostname()
 
 			// Per-host rate limiter.
-			if err := e.getLimiter(reqHost).Wait(localCtx); err != nil {
+			limiter := e.getLimiter(reqHost)
+			waitStart := time.Now()
+			if err := limiter.Wait(localCtx); err != nil {
 				if e.cleanupJob(shouldExit) {
 					return
 				}
 				continue
+			} else if waited := time.Since(waitStart); waited > time.Millisecond {
+				e.emitLogEvent(LogLevelInfo, LogCategoryNetwork, EventRateLimitHit, fmt.Sprintf("rate limiter delayed request by %s", waited.Round(time.Millisecond)), map[string]interface{}{
+					"host":    reqHost,
+					"wait_ms": waited.Milliseconds(),
+					"path":    job.Path,
+					"method":  job.Method,
+					"run_id":  job.RunID,
+				})
 			}
 
 			reqPath := parsedURL.Path
@@ -2990,6 +3128,7 @@ func (e *Engine) worker(id int) {
 							}
 							e.markEvasionTechnique(payload, technique.Name)
 							tried++
+							e.logWAFBypassAttempt(detectedWAFVendor, technique.Name, payload, tried)
 
 							bypassPath, bypassHeaders := technique.ModifyRequest(payload, headers, successfulMethod)
 							reqHeaders := make(map[string]string, len(headers)+len(bypassHeaders)+3)
@@ -3015,14 +3154,17 @@ func (e *Engine) worker(id int) {
 							bypassResp, bypassErr := e.executeRequestWithRetry(localCtx, currentBaseURL, bypassReq, requestTimeout, proxyAddr)
 							if bypassErr != nil {
 								e.EvasionScoreboard.Record(technique.Name, false)
+								e.logWAFBypassOutcome(detectedWAFVendor, technique.Name, payload, false, 0)
 								continue
 							}
 							if bypassResp.StatusCode == 403 || bypassResp.StatusCode == 429 || bypassResp.StatusCode == 444 {
 								e.EvasionScoreboard.Record(technique.Name, false)
+								e.logWAFBypassOutcome(detectedWAFVendor, technique.Name, payload, false, bypassResp.StatusCode)
 								continue
 							}
 
 							e.EvasionScoreboard.Record(technique.Name, true)
+							e.logWAFBypassOutcome(detectedWAFVendor, technique.Name, payload, true, bypassResp.StatusCode)
 							resp = bypassResp
 							rawRequest = bypassReq
 							bodySize, wordCount, lineCount, contentType, bodyHash = computeResponseMetrics(resp, successfulMethod)
@@ -3068,6 +3210,12 @@ func (e *Engine) worker(id int) {
 				threshold := autoFilterThreshold
 				if threshold > 0 && count == threshold {
 					e.AddAutoFilterSize(bodySize)
+					e.emitLogEvent(LogLevelSuccess, LogCategoryFilter, EventAutoFilterTriggered, fmt.Sprintf("auto-filter triggered for size %d", bodySize), map[string]interface{}{
+						"body_size": bodySize,
+						"status":    resp.StatusCode,
+						"count":     count,
+						"threshold": threshold,
+					})
 					select {
 					case e.Results <- Result{
 						Path:         "AUTO-FILTER",
@@ -3513,6 +3661,7 @@ func (e *Engine) Shutdown() {
 			return true
 		})
 
+		close(e.LogEvents)
 		close(e.Results)
 	})
 }

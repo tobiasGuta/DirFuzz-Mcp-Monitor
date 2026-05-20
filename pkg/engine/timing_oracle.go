@@ -173,6 +173,13 @@ func (e *Engine) CalibrateTimingOracle() (*TimingOracle, error) {
 		k = TimingOracleDefaultK
 	}
 
+	e.emitLogEvent(LogLevelInfo, LogCategorySystem, EventTimingOracleStarted, "starting timing oracle calibration", map[string]interface{}{
+		"baseline_samples": TimingOracleBaselineSamples,
+		"repeat_n":         repeatN,
+		"k":                k,
+		"trim":             trim,
+	})
+
 	samples := make([]time.Duration, 0, TimingOracleBaselineSamples)
 	for i := 0; i < TimingOracleBaselineSamples; i++ {
 		word := randomString(CalibrationRandomStringLen)
@@ -232,6 +239,11 @@ func (e *Engine) CalibrateTimingOracle() (*TimingOracle, error) {
 		return nil, err
 	}
 	e.timingOracle = oracle
+	e.emitLogEvent(LogLevelSuccess, LogCategorySystem, EventTimingOracleCalibrated, fmt.Sprintf("timing oracle ready with threshold %s", oracle.Threshold().Round(time.Millisecond)), map[string]interface{}{
+		"baseline_median_ms": oracle.BaselineMedian().Milliseconds(),
+		"threshold_ms":       oracle.Threshold().Milliseconds(),
+		"repeat_n":           oracle.RepeatN,
+	})
 	return oracle, nil
 }
 

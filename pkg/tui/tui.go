@@ -376,15 +376,21 @@ func buildTopContentTypes(rows []engine.Result, limit int) []contentTypeRow {
 }
 
 func (m *Model) renderDashboardView() {
+	if !m.dashboardDirty && m.dashboardCacheValid && m.dashboardCache != "" {
+		m.viewport.SetContent(m.dashboardCache)
+		return
+	}
+
 	rows := m.Engine.EvasionSummaryRows()
 	wafSummary := renderEvasionSummary(rows)
 
 	m.Engine.Config.RLock()
 	workers := m.Engine.Config.MaxWorkers
 	delay := m.Engine.Config.Delay
+	proxyOut := m.Engine.Config.ProxyOut
 	m.Engine.Config.RUnlock()
 
-	rps := atomic.LoadInt64(&m.Engine.CurrentRPS)
+	currentRPS := atomic.LoadInt64(&m.Engine.CurrentRPS)
 	queueSize := m.Engine.QueueSize()
 	processed := atomic.LoadInt64(&m.Engine.ProcessedLines)
 	total := atomic.LoadInt64(&m.Engine.TotalLines)
@@ -392,63 +398,1198 @@ func (m *Model) renderDashboardView() {
 	simhashSuppressed := atomic.LoadInt64(&m.Engine.SimhashSuppressed)
 	harvestedPaths := atomic.LoadInt64(&m.Engine.HarvestedPaths)
 	tuiDropped := atomic.LoadInt64(&m.Engine.TUIDropped)
+	logDropped := m.Engine.LogEventsDropped.Load()
 
-	performanceRows := [][]string{{
-		strconv.FormatInt(rps, 10),
-		strconv.Itoa(workers),
-		fmt.Sprintf("%.2f", func() float64 {
-			if workers <= 0 {
-				return 0
-			}
-			return float64(rps) / float64(workers)
-		}()),
-		strconv.Itoa(queueSize),
-		fmt.Sprintf("%d/%d", processed, total),
-		delay.String(),
-	}}
-	performanceTable := renderMarkdownTable(
-		"Performance",
-		[]string{"CurrentRPS", "MaxWorkers", "RPS/Worker", "Queue", "Progress", "Delay"},
-		performanceRows,
-	)
-
-	contentTypeRows := buildTopContentTypes(m.hits, 5)
-	contentTypeTable := mutedStyle.Render("Top Content Types: none recorded")
-	if len(contentTypeRows) > 0 {
-		totalHits := len(m.hits)
-		rows := make([][]string, 0, len(contentTypeRows))
-		for _, row := range contentTypeRows {
-			share := 0.0
-			if totalHits > 0 {
-				share = float64(row.count) / float64(totalHits) * 100
-			}
-			rows = append(rows, []string{
-				row.label,
-				strconv.Itoa(row.count),
-				fmt.Sprintf("%.1f%%", share),
-			})
-		}
-		contentTypeTable = renderMarkdownTable(
-			"Top Content Types",
-			[]string{"Content-Type", "Count", "Share"},
-			rows,
-		)
-	}
-
-	dashboardSections := []string{
+	overview := strings.Join([]string{
 		mutedStyle.Render("Live metrics, updated while the scan runs."),
-		wafSummary,
-		performanceTable,
-		contentTypeTable,
+		m.renderDashboardTabBar(),
 		fmt.Sprintf(
 			"%s %s %s",
 			renderStatusBadge(DraculaPink, "◌", "AF", autoFilterSuppressed),
 			renderStatusBadge(DraculaCyan, "⬢", "S404", simhashSuppressed),
-			mutedStyle.Render(fmt.Sprintf("Harvested:%d TUI-dropped:%d", harvestedPaths, tuiDropped)),
+			mutedStyle.Render(fmt.Sprintf("Harvested:%d Queue:%d TUI-dropped:%d Log-dropped:%d", harvestedPaths, queueSize, tuiDropped, logDropped)),
 		),
+		fmt.Sprintf(
+			"Workers: %d  Active: %d  Current RPS: %d  Peak RPS: %d  Avg RT: %s  Delay: %s",
+			workers,
+			atomic.LoadInt64(&m.activeWorkers),
+			currentRPS,
+			m.peakRPS,
+			m.avgResponseTime.Round(time.Millisecond),
+			delay.Round(time.Millisecond),
+		),
+		fmt.Sprintf("Proxy rotation: %d  Proxy configured: %s  Progress: %d/%d",
+			m.totalProxyRotations,
+			func() string {
+				if strings.TrimSpace(proxyOut) == "" {
+					return "no"
+				}
+				return "yes"
+			}(),
+			processed,
+			total,
+		),
+	}, "\n")
+
+	var body string
+	switch m.dashboardTab {
+	case DashboardTabErrors:
+		body = m.renderErrorAnalysisDashboard()
+	case DashboardTabDiscovery:
+		body = m.renderDiscoveryDashboard()
+	case DashboardTabNetwork:
+		body = m.renderNetworkDashboard()
+	case DashboardTabTimeline:
+		body = m.renderTimelineDashboard()
+	default:
+		body = m.renderPerformanceDashboard()
 	}
 
-	m.viewport.SetContent(strings.Join(dashboardSections, "\n\n"))
+	content := strings.Join([]string{overview, wafSummary, body}, "\n\n")
+	m.viewport.SetContent(content)
+	m.dashboardCache = content
+	m.dashboardCacheValid = true
+	m.dashboardDirty = false
+}
+
+func (m *Model) appendSystemLog(ev engine.LogEvent) {
+	relative := relativeScanTime(m.startTime, ev.Timestamp)
+	searchParts := []string{
+		strings.ToLower(relative),
+		strings.ToLower(string(ev.Level)),
+		strings.ToLower(string(ev.Category)),
+		strings.ToLower(string(ev.Type)),
+		strings.ToLower(ev.Message),
+	}
+	path := ""
+	if ev.Metadata != nil {
+		keys := make([]string, 0, len(ev.Metadata))
+		for k := range ev.Metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			val := fmt.Sprintf("%v", ev.Metadata[k])
+			searchParts = append(searchParts, strings.ToLower(k), strings.ToLower(val))
+			if path == "" && (k == "path" || k == "target" || k == "url") {
+				path = val
+			}
+		}
+	}
+	m.systemLogs.append(systemLogEntry{
+		Event:      ev,
+		Rendered:   formatLogEvent(ev, relative),
+		Relative:   relative,
+		SearchText: strings.Join(searchParts, " "),
+		HasDetail:  len(ev.Metadata) > 0,
+		Path:       path,
+	})
+	m.logsChanged = true
+	m.logPanelDirty = true
+	m.dashboardDirty = true
+	m.logEventsSinceRender++
+}
+
+func dashboardTabLabel(tab DashboardTab) string {
+	switch tab {
+	case DashboardTabErrors:
+		return "Errors"
+	case DashboardTabDiscovery:
+		return "Discovery"
+	case DashboardTabNetwork:
+		return "Network"
+	case DashboardTabTimeline:
+		return "Timeline"
+	default:
+		return "Performance"
+	}
+}
+
+func dashboardRangeLabel(idx int) string {
+	switch DashboardRange(idx) {
+	case DashboardRange5m:
+		return "5m"
+	case DashboardRangeAll:
+		return "All"
+	default:
+		return "30s"
+	}
+}
+
+func (m *Model) dashboardSampleLimit() int {
+	switch DashboardRange(m.dashboardRangeIdx) {
+	case DashboardRange5m:
+		return 300
+	case DashboardRangeAll:
+		return 1000
+	default:
+		return 30
+	}
+}
+
+func (m *Model) cycleDashboardRange() {
+	m.dashboardRangeIdx++
+	if m.dashboardRangeIdx > int(DashboardRangeAll) {
+		m.dashboardRangeIdx = int(DashboardRange30s)
+	}
+}
+
+func sampleIntHistory(values []int64, limit int) []int64 {
+	if limit <= 0 || len(values) == 0 {
+		return nil
+	}
+	if len(values) > limit {
+		values = values[len(values)-limit:]
+	}
+	out := make([]int64, len(values))
+	copy(out, values)
+	return out
+}
+
+func sampleFloatHistory(values []float64, limit int) []float64 {
+	if limit <= 0 || len(values) == 0 {
+		return nil
+	}
+	if len(values) > limit {
+		values = values[len(values)-limit:]
+	}
+	out := make([]float64, len(values))
+	copy(out, values)
+	return out
+}
+
+func sampleIntSlice(values []int, limit int) []int64 {
+	if limit <= 0 || len(values) == 0 {
+		return nil
+	}
+	if len(values) > limit {
+		values = values[len(values)-limit:]
+	}
+	out := make([]int64, len(values))
+	for i, v := range values {
+		out[i] = int64(v)
+	}
+	return out
+}
+
+func averageIntHistory(values []int64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	var total int64
+	for _, v := range values {
+		total += v
+	}
+	return float64(total) / float64(len(values))
+}
+
+func averageFloatHistory(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	var total float64
+	for _, v := range values {
+		total += v
+	}
+	return total / float64(len(values))
+}
+
+func maxInt64(values []int64) int64 {
+	var max int64
+	for i, v := range values {
+		if i == 0 || v > max {
+			max = v
+		}
+	}
+	return max
+}
+
+func renderFloatSparkline(values []float64, width int) string {
+	if len(values) == 0 {
+		return strings.Repeat("▁", width)
+	}
+	ints := make([]int64, len(values))
+	for i, v := range values {
+		ints[i] = int64(math.Round(v * 100))
+	}
+	return renderSparkline(ints, width)
+}
+
+func renderSizedBars(items map[string]int64, width int) string {
+	if len(items) == 0 {
+		return mutedStyle.Render("none")
+	}
+	type barItem struct {
+		label string
+		count int64
+	}
+	rows := make([]barItem, 0, len(items))
+	var total int64
+	for label, count := range items {
+		rows = append(rows, barItem{label: label, count: count})
+		total += count
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].count != rows[j].count {
+			return rows[i].count > rows[j].count
+		}
+		return rows[i].label < rows[j].label
+	})
+	if len(rows) > 8 {
+		rows = rows[:8]
+	}
+	var sb strings.Builder
+	if width < 10 {
+		width = 10
+	}
+	for _, row := range rows {
+		pct := 0.0
+		if total > 0 {
+			pct = float64(row.count) / float64(total)
+		}
+		fill := int(math.Round(pct * float64(width)))
+		if fill < 1 && row.count > 0 {
+			fill = 1
+		}
+		if fill > width {
+			fill = width
+		}
+		fmt.Fprintf(&sb, "%s %s %s\n", highlightStyle.Render(padOrTrim(row.label, 22)), statusStyle.Render(strings.Repeat("█", fill)), mutedStyle.Render(fmt.Sprintf("%d", row.count)))
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func padOrTrim(text string, width int) string {
+	runes := []rune(text)
+	if len(runes) == width {
+		return text
+	}
+	if len(runes) > width {
+		if width <= 1 {
+			return string(runes[:1])
+		}
+		return string(runes[:width-1]) + "…"
+	}
+	return text + strings.Repeat(" ", width-len(runes))
+}
+
+func formatBytesEstimate(bytes int64) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	units := []string{"KiB", "MiB", "GiB", "TiB"}
+	value := float64(bytes) / 1024.0
+	unitIdx := 0
+	for value >= 1024 && unitIdx < len(units)-1 {
+		value /= 1024.0
+		unitIdx++
+	}
+	return fmt.Sprintf("%.1f %s", value, units[unitIdx])
+}
+
+func statusCategoryLabel(status int) string {
+	switch {
+	case status >= 200 && status < 300:
+		return "2xx"
+	case status >= 300 && status < 400:
+		return "3xx"
+	case status >= 400 && status < 500:
+		return "4xx"
+	case status >= 500:
+		return "5xx"
+	default:
+		return "other"
+	}
+}
+
+func logEventMetadataString(meta map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if meta == nil {
+			continue
+		}
+		if v, ok := meta[key]; ok {
+			if s := strings.TrimSpace(fmt.Sprint(v)); s != "" && s != "<nil>" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func logEventMetadataBool(meta map[string]interface{}, key string) bool {
+	if meta == nil {
+		return false
+	}
+	v, ok := meta[key]
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
+}
+
+func logEventMetadataInt64(meta map[string]interface{}, key string) int64 {
+	if meta == nil {
+		return 0
+	}
+	v, ok := meta[key]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case int:
+		return int64(n)
+	case int64:
+		return n
+	case float64:
+		return int64(n)
+	case float32:
+		return int64(n)
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return i
+		}
+	}
+	return 0
+}
+
+func logEventPath(ev engine.LogEvent) string {
+	if path := logEventMetadataString(ev.Metadata, "path", "url", "endpoint"); path != "" {
+		return path
+	}
+	msg := ev.Message
+	if idx := strings.Index(msg, " "); idx >= 0 {
+		candidate := strings.TrimSpace(msg[idx+1:])
+		if strings.HasPrefix(candidate, "/") {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func (m *Model) renderDashboardTabBar() string {
+	tabs := []DashboardTab{
+		DashboardTabPerformance,
+		DashboardTabErrors,
+		DashboardTabDiscovery,
+		DashboardTabNetwork,
+		DashboardTabTimeline,
+	}
+	parts := make([]string, 0, len(tabs)+1)
+	for idx, tab := range tabs {
+		label := fmt.Sprintf("%d %s", idx+1, dashboardTabLabel(tab))
+		styled := mutedStyle.Render(label)
+		if tab == m.dashboardTab {
+			styled = highlightStyle.Render(label)
+		}
+		parts = append(parts, styled)
+	}
+	parts = append(parts, mutedStyle.Render(fmt.Sprintf("range:%s  tab:%s", dashboardRangeLabel(m.dashboardRangeIdx), dashboardTabLabel(m.dashboardTab))))
+	return strings.Join(parts, "  ")
+}
+
+func (m *Model) renderPerformanceDashboard() string {
+	window := m.dashboardSampleLimit()
+	rpsSamples := sampleIntHistory(m.rpsHistoryFull, window)
+	rps30 := sampleIntHistory(m.rpsHistoryFull, 30)
+	rps300 := sampleIntHistory(m.rpsHistoryFull, 300)
+	utilSamples := sampleFloatHistory(m.workerUtilizationHistory, window)
+	errorSamples := sampleFloatHistory(m.errorRateHistory, window)
+	queueSamples := sampleIntSlice(m.queueDepthHistory, window)
+	queueSize := m.Engine.QueueSize()
+
+	currentRPS := atomic.LoadInt64(&m.Engine.CurrentRPS)
+	peakRPS := m.peakRPS
+	if len(rpsSamples) > 0 {
+		if samplePeak := maxInt64(rpsSamples); samplePeak > peakRPS {
+			peakRPS = samplePeak
+		}
+	}
+
+	avgRPS := averageIntHistory(rpsSamples)
+	workerUtil := averageFloatHistory(utilSamples) * 100
+	currentUtil := 0.0
+	m.Engine.Config.RLock()
+	maxWorkers := m.Engine.Config.MaxWorkers
+	m.Engine.Config.RUnlock()
+	if maxWorkers > 0 {
+		currentUtil = float64(atomic.LoadInt64(&m.activeWorkers)) / float64(maxWorkers) * 100
+	}
+
+	metricsRows := [][]string{{
+		strconv.Itoa(window),
+		strconv.FormatInt(currentRPS, 10),
+		fmt.Sprintf("%.1f", avgRPS),
+		strconv.FormatInt(peakRPS, 10),
+		fmt.Sprintf("%.1f%%", currentUtil),
+		fmt.Sprintf("%.1f%%", workerUtil),
+		strconv.Itoa(queueSize),
+	}}
+
+	parts := []string{
+		renderMarkdownTable(
+			"Performance Trends",
+			[]string{"Window", "Current RPS", "Avg RPS", "Peak RPS", "Current Util", "Avg Util", "Queue"},
+			metricsRows,
+		),
+		fmt.Sprintf("%s %s", mutedStyle.Render("RPS 30s"), highlightStyle.Render(renderSparkline(rps30, 30))),
+		fmt.Sprintf("%s %s", mutedStyle.Render("RPS 5m"), highlightStyle.Render(renderSparkline(rps300, 50))),
+		fmt.Sprintf("%s %s", mutedStyle.Render("Worker utilization"), highlightStyle.Render(renderFloatSparkline(utilSamples, 30))),
+		fmt.Sprintf("%s %s", mutedStyle.Render("Queue depth"), highlightStyle.Render(renderSparkline(queueSamples, 30))),
+		fmt.Sprintf("%s %s", mutedStyle.Render("Error rate / min"), errorStyle.Render(renderFloatSparkline(errorSamples, 30))),
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func (m *Model) renderErrorAnalysisDashboard() string {
+	connErr := atomic.LoadInt64(&m.Engine.CountConnErr)
+	fiveXX := int64(0)
+	timeoutErr := int64(0)
+	rateLimitErr := int64(0)
+	errorPathCounts := make(map[string]int64)
+	retryAttempts := int64(0)
+	retrySuccesses := int64(0)
+	entries := m.systemLogEntries()
+
+	for _, entry := range entries {
+		ev := entry.Event
+		lower := strings.ToLower(ev.Message)
+		if ev.Level == engine.LogLevelError || ev.Type == engine.EventNetworkError || strings.Contains(lower, "error") {
+			if path := logEventPath(ev); path != "" {
+				errorPathCounts[path]++
+			}
+		}
+		if strings.Contains(lower, "timeout") {
+			timeoutErr++
+		}
+		if strings.Contains(lower, "rate limit") || ev.Type == engine.EventRateLimitHit {
+			rateLimitErr++
+		}
+		if ev.Type == engine.EventRetryAttempt {
+			retryAttempts++
+			if logEventMetadataBool(ev.Metadata, "success") || strings.EqualFold(logEventMetadataString(ev.Metadata, "outcome", "result"), "success") {
+				retrySuccesses++
+			}
+		}
+	}
+
+	for _, hit := range m.hits {
+		if hit.StatusCode >= 500 {
+			fiveXX++
+		}
+		if hit.StatusCode == 429 {
+			rateLimitErr++
+		}
+		if hit.StatusCode >= 400 && hit.StatusCode < 500 {
+			if path := hit.Path; path != "" {
+				errorPathCounts[path]++
+			}
+		}
+	}
+
+	retryRate := mutedStyle.Render("n/a")
+	if retryAttempts > 0 {
+		retryRate = statusStyle.Render(fmt.Sprintf("%.1f%%", float64(retrySuccesses)/float64(retryAttempts)*100))
+	}
+
+	pathRows := [][]string{}
+	if len(errorPathCounts) > 0 {
+		type pair struct {
+			path  string
+			count int64
+		}
+		pairs := make([]pair, 0, len(errorPathCounts))
+		for path, count := range errorPathCounts {
+			pairs = append(pairs, pair{path: path, count: count})
+		}
+		sort.Slice(pairs, func(i, j int) bool {
+			if pairs[i].count != pairs[j].count {
+				return pairs[i].count > pairs[j].count
+			}
+			return pairs[i].path < pairs[j].path
+		})
+		if len(pairs) > 5 {
+			pairs = pairs[:5]
+		}
+		for _, pair := range pairs {
+			pathRows = append(pathRows, []string{pair.path, strconv.FormatInt(pair.count, 10)})
+		}
+	}
+	if len(pathRows) == 0 {
+		pathRows = append(pathRows, []string{mutedStyle.Render("none yet"), mutedStyle.Render("0")})
+	}
+
+	buckets := [][]string{
+		{"Connection errors", strconv.FormatInt(connErr, 10)},
+		{"Timeouts", strconv.FormatInt(timeoutErr, 10)},
+		{"5xx responses", strconv.FormatInt(fiveXX, 10)},
+		{"Rate limiting", strconv.FormatInt(rateLimitErr, 10)},
+		{"Retries", strconv.FormatInt(atomic.LoadInt64(&m.totalRetries), 10)},
+		{"Retry success", retryRate},
+	}
+
+	parts := []string{
+		renderMarkdownTable("Error Analysis", []string{"Signal", "Value"}, buckets),
+		fmt.Sprintf("%s %s", mutedStyle.Render("Error rate trend"), errorStyle.Render(renderFloatSparkline(m.errorRateHistory, 30))),
+		renderMarkdownTable("Most Common Error Paths", []string{"Path", "Hits"}, pathRows),
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func (m *Model) renderDiscoveryDashboard() string {
+	interesting := make([]string, 0, 10)
+	entries := m.systemLogEntries()
+	for i := len(entries) - 1; i >= 0 && len(interesting) < 10; i-- {
+		ev := entries[i].Event
+		switch ev.Type {
+		case engine.EventHarvestDiscovery, engine.EventHarvestJSAnalysisComplete, engine.EventWAFBypassAttempt, engine.EventWAFBypassOutcome, engine.EventTimingOracleCalibrated, engine.EventSimhashCluster, engine.EventAutoFilterTriggered:
+			interesting = append(interesting, entries[i].Rendered)
+		}
+	}
+	for i := len(m.hits) - 1; i >= 0 && len(interesting) < 10; i-- {
+		hit := m.hits[i]
+		switch {
+		case len(hit.DiscoveredParams) > 0:
+			interesting = append(interesting, fmt.Sprintf("%s discovered params: %s", hit.Path, strings.Join(hit.DiscoveredParams, ", ")))
+		case hit.ContentDrift:
+			interesting = append(interesting, fmt.Sprintf("%s content drift detected (%d -> %d bytes)", hit.Path, hit.OldSize, hit.Size))
+		case hit.IsEagleAlert:
+			interesting = append(interesting, fmt.Sprintf("%s status changed %d -> %d", hit.Path, hit.OldStatusCode, hit.StatusCode))
+		}
+	}
+	if len(interesting) == 0 {
+		interesting = append(interesting, mutedStyle.Render("No discoveries yet."))
+	} else {
+		for i, j := 0, len(interesting)-1; i < j; i, j = i+1, j-1 {
+			interesting[i], interesting[j] = interesting[j], interesting[i]
+		}
+	}
+
+	contentTypes := buildTopContentTypes(m.hits, 8)
+	contentRows := [][]string{}
+	if len(contentTypes) > 0 {
+		totalHits := len(m.hits)
+		for _, row := range contentTypes {
+			share := 0.0
+			if totalHits > 0 {
+				share = float64(row.count) / float64(totalHits) * 100
+			}
+			contentRows = append(contentRows, []string{
+				row.label,
+				strconv.Itoa(row.count),
+				fmt.Sprintf("%.1f%%", share),
+				strings.Repeat("█", int(math.Round(share/5))+1),
+			})
+		}
+	}
+	if len(contentRows) == 0 {
+		contentRows = append(contentRows, []string{mutedStyle.Render("none"), "0", "0%", ""})
+	}
+
+	redirectRows := [][]string{}
+	for i := len(m.hits) - 1; i >= 0 && len(redirectRows) < 5; i-- {
+		hit := m.hits[i]
+		if hit.Redirect != "" {
+			redirectRows = append(redirectRows, []string{hit.Path, hit.Redirect})
+		}
+	}
+	if len(redirectRows) == 0 {
+		redirectRows = append(redirectRows, []string{mutedStyle.Render("none"), mutedStyle.Render("no redirects recorded")})
+	}
+
+	sourceCounts := map[string]int64{
+		"JS":    0,
+		"HTML":  0,
+		"API":   0,
+		"Other": 0,
+	}
+	for _, entry := range entries {
+		ev := entry.Event
+		switch ev.Type {
+		case engine.EventHarvestJSAnalysisComplete:
+			sourceCounts["JS"] += logEventMetadataInt64(ev.Metadata, "script_urls")
+		case engine.EventHarvestParseError:
+			msg := strings.ToLower(ev.Message)
+			switch {
+			case strings.Contains(msg, "html"):
+				sourceCounts["HTML"]++
+			case strings.Contains(msg, "openapi") || strings.Contains(msg, "graphql"):
+				sourceCounts["API"]++
+			default:
+				sourceCounts["Other"]++
+			}
+		case engine.EventHarvestDiscovery:
+			sourceCounts["Other"]++
+		}
+	}
+	sourceRows := [][]string{
+		{"JS", strconv.FormatInt(sourceCounts["JS"], 10)},
+		{"HTML", strconv.FormatInt(sourceCounts["HTML"], 10)},
+		{"API", strconv.FormatInt(sourceCounts["API"], 10)},
+		{"Other", strconv.FormatInt(sourceCounts["Other"], 10)},
+	}
+
+	parts := []string{
+		renderMarkdownTable("Recent Interesting Findings", []string{"Event"}, func() [][]string {
+			rows := make([][]string, 0, len(interesting))
+			for _, item := range interesting {
+				rows = append(rows, []string{item})
+			}
+			return rows
+		}()),
+		renderMarkdownTable("Content Type Distribution", []string{"Type", "Count", "Share", "Bar"}, contentRows),
+		renderMarkdownTable("Redirect Chains", []string{"From", "To"}, redirectRows),
+		renderMarkdownTable("Harvested by Source", []string{"Source", "Count"}, sourceRows),
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func (m *Model) renderNetworkDashboard() string {
+	proxyEvents := make([]string, 0, 5)
+	rateLimitEvents := make([]string, 0, 5)
+	entries := m.systemLogEntries()
+	for i := len(entries) - 1; i >= 0 && (len(proxyEvents) < 5 || len(rateLimitEvents) < 5); i-- {
+		ev := entries[i].Event
+		switch ev.Type {
+		case engine.EventProxyRotated:
+			if len(proxyEvents) < 5 {
+				proxyEvents = append(proxyEvents, entries[i].Rendered)
+			}
+		case engine.EventRateLimitHit:
+			if len(rateLimitEvents) < 5 {
+				rateLimitEvents = append(rateLimitEvents, entries[i].Rendered)
+			}
+		}
+	}
+	if len(proxyEvents) == 0 {
+		proxyEvents = append(proxyEvents, mutedStyle.Render("No proxy rotations recorded."))
+	}
+	if len(rateLimitEvents) == 0 {
+		rateLimitEvents = append(rateLimitEvents, mutedStyle.Render("No rate limiting events recorded."))
+	}
+
+	type durationAgg struct {
+		total time.Duration
+		count int64
+	}
+	buckets := map[string]*durationAgg{
+		"2xx":   &durationAgg{},
+		"3xx":   &durationAgg{},
+		"4xx":   &durationAgg{},
+		"5xx":   &durationAgg{},
+		"other": &durationAgg{},
+	}
+	var bytesIn, bytesOut int64
+	for _, hit := range m.hits {
+		label := statusCategoryLabel(hit.StatusCode)
+		bucket := buckets[label]
+		if bucket == nil {
+			bucket = buckets["other"]
+		}
+		if hit.Duration > 0 {
+			bucket.total += hit.Duration
+			bucket.count++
+		}
+		bytesIn += int64(len(hit.ResponseBytes))
+		if len(hit.RequestBytes) > 0 {
+			bytesOut += int64(len(hit.RequestBytes))
+		} else if hit.Request != "" {
+			bytesOut += int64(len(hit.Request))
+		}
+	}
+	durationRows := [][]string{}
+	for _, label := range []string{"2xx", "3xx", "4xx", "5xx", "other"} {
+		bucket := buckets[label]
+		avg := time.Duration(0)
+		if bucket.count > 0 {
+			avg = time.Duration(int64(bucket.total) / bucket.count)
+		}
+		durationRows = append(durationRows, []string{
+			label,
+			strconv.FormatInt(bucket.count, 10),
+			avg.Round(time.Millisecond).String(),
+		})
+	}
+	bandwidthRows := [][]string{
+		{"Bytes received", formatBytesEstimate(bytesIn)},
+		{"Bytes sent", formatBytesEstimate(bytesOut)},
+		{"Estimated total", formatBytesEstimate(bytesIn + bytesOut)},
+	}
+
+	proxyRows := [][]string{
+		{"Configured proxy", func() string {
+			m.Engine.Config.RLock()
+			defer m.Engine.Config.RUnlock()
+			if strings.TrimSpace(m.Engine.Config.ProxyOut) == "" {
+				return "no"
+			}
+			return "yes"
+		}()},
+		{"Rotations", strconv.FormatInt(m.totalProxyRotations, 10)},
+	}
+
+	parts := []string{
+		renderMarkdownTable("Network Intelligence", []string{"Signal", "Value"}, proxyRows),
+		fmt.Sprintf("%s %s", mutedStyle.Render("Proxy rotation trail"), highlightStyle.Render(strings.Join(proxyEvents, "\n"))),
+		fmt.Sprintf("%s %s", mutedStyle.Render("Rate limiting"), orangeStyle.Render(strings.Join(rateLimitEvents, "\n"))),
+		renderMarkdownTable("Average Response Time by Status Category", []string{"Category", "Samples", "Avg"}, durationRows),
+		renderMarkdownTable("Bandwidth Estimates", []string{"Metric", "Value"}, bandwidthRows),
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func (m *Model) renderTimelineDashboard() string {
+	critical := make([]engine.LogEvent, 0, 20)
+	for _, entry := range m.systemLogEntries() {
+		ev := entry.Event
+		if ev.Level == engine.LogLevelWarning || ev.Level == engine.LogLevelError {
+			critical = append(critical, ev)
+		}
+	}
+	if len(critical) > 20 {
+		critical = critical[len(critical)-20:]
+	}
+	lines := make([]string, 0, len(critical))
+	for _, ev := range critical {
+		lines = append(lines, formatLogEvent(ev, relativeScanTime(m.startTime, ev.Timestamp)))
+	}
+	if len(lines) == 0 {
+		lines = append(lines, mutedStyle.Render("No critical events yet."))
+	}
+	rows := make([][]string, 0, len(lines))
+	for _, line := range lines {
+		rows = append(rows, []string{line})
+	}
+	return renderMarkdownTable("Critical Event Timeline", []string{"Event"}, rows)
+}
+
+func (m *Model) exportMetricsSnapshot() (string, error) {
+	type snapshot struct {
+		ExportedAt               time.Time         `json:"exported_at"`
+		Target                   string            `json:"target"`
+		Tab                      string            `json:"tab"`
+		Range                    string            `json:"range"`
+		CurrentRPS               int64             `json:"current_rps"`
+		PeakRPS                  int64             `json:"peak_rps"`
+		AverageResponseTime      time.Duration     `json:"average_response_time"`
+		TotalErrors              int64             `json:"total_errors"`
+		TotalRetries             int64             `json:"total_retries"`
+		TotalProxyRotations      int64             `json:"total_proxy_rotations"`
+		ActiveWorkers            int64             `json:"active_workers"`
+		WorkerUtilizationHistory []float64         `json:"worker_utilization_history"`
+		ErrorRateHistory         []float64         `json:"error_rate_history"`
+		RPSHistory               []int64           `json:"rps_history"`
+		QueueDepthHistory        []int             `json:"queue_depth_history"`
+		RecentLogs               []engine.LogEvent `json:"recent_logs"`
+		RecentHits               []engine.Result   `json:"recent_hits"`
+	}
+
+	eng := m.Engine
+	target := ""
+	currentRPS := int64(0)
+	if eng != nil {
+		target = eng.BaseURL()
+		currentRPS = atomic.LoadInt64(&eng.CurrentRPS)
+	}
+	snap := snapshot{
+		ExportedAt:               time.Now(),
+		Target:                   target,
+		Tab:                      dashboardTabLabel(m.dashboardTab),
+		Range:                    dashboardRangeLabel(m.dashboardRangeIdx),
+		CurrentRPS:               currentRPS,
+		PeakRPS:                  m.peakRPS,
+		AverageResponseTime:      m.avgResponseTime,
+		TotalErrors:              atomic.LoadInt64(&m.totalErrors),
+		TotalRetries:             atomic.LoadInt64(&m.totalRetries),
+		TotalProxyRotations:      atomic.LoadInt64(&m.totalProxyRotations),
+		ActiveWorkers:            atomic.LoadInt64(&m.activeWorkers),
+		WorkerUtilizationHistory: sampleFloatHistory(m.workerUtilizationHistory, m.dashboardSampleLimit()),
+		ErrorRateHistory:         sampleFloatHistory(m.errorRateHistory, m.dashboardSampleLimit()),
+		RPSHistory:               sampleIntHistory(m.rpsHistoryFull, m.dashboardSampleLimit()),
+		QueueDepthHistory: func() []int {
+			limit := m.dashboardSampleLimit()
+			if limit <= 0 || len(m.queueDepthHistory) == 0 {
+				return nil
+			}
+			if len(m.queueDepthHistory) > limit {
+				return append([]int(nil), m.queueDepthHistory[len(m.queueDepthHistory)-limit:]...)
+			}
+			return append([]int(nil), m.queueDepthHistory...)
+		}(),
+		RecentLogs: func() []engine.LogEvent {
+			entries := m.systemLogEntries()
+			if len(entries) == 0 {
+				return nil
+			}
+			start := len(entries) - 50
+			if start < 0 {
+				start = 0
+			}
+			out := make([]engine.LogEvent, 0, len(entries)-start)
+			for _, entry := range entries[start:] {
+				out = append(out, entry.Event)
+			}
+			return out
+		}(),
+		RecentHits: func() []engine.Result {
+			if len(m.hits) == 0 {
+				return nil
+			}
+			start := len(m.hits) - 50
+			if start < 0 {
+				start = 0
+			}
+			return append([]engine.Result(nil), m.hits[start:]...)
+		}(),
+	}
+
+	filename := fmt.Sprintf("dirfuzz-metrics-%s.json", time.Now().Format("20060102-150405"))
+	file, err := os.Create(filename)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	enc := json.NewEncoder(file)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(snap); err != nil {
+		return "", err
+	}
+	return filename, nil
+}
+
+func logLevelEnabled(filters map[engine.LogLevel]bool, level engine.LogLevel) bool {
+	if len(filters) == 0 {
+		return true
+	}
+	enabled, ok := filters[level]
+	return !ok || enabled
+}
+
+func logFilterMask(filters map[engine.LogLevel]bool) int {
+	mask := 0
+	if logLevelEnabled(filters, engine.LogLevelDebug) {
+		mask |= 1 << 0
+	}
+	if logLevelEnabled(filters, engine.LogLevelInfo) {
+		mask |= 1 << 1
+	}
+	if logLevelEnabled(filters, engine.LogLevelWarning) {
+		mask |= 1 << 2
+	}
+	if logLevelEnabled(filters, engine.LogLevelError) {
+		mask |= 1 << 3
+	}
+	if logLevelEnabled(filters, engine.LogLevelSuccess) {
+		mask |= 1 << 4
+	}
+	return mask
+}
+
+func logCategoryIcon(category engine.LogCategory) string {
+	switch category {
+	case engine.LogCategorySystem:
+		return "🔧"
+	case engine.LogCategoryWorker:
+		return "⚙️"
+	case engine.LogCategoryNetwork:
+		return "🌐"
+	case engine.LogCategoryPlugin:
+		return "🧩"
+	case engine.LogCategoryDiscovery:
+		return "🔍"
+	case engine.LogCategoryFilter:
+		return "🧹"
+	default:
+		return "•"
+	}
+}
+
+func logCategoryStyle(category engine.LogCategory) lipgloss.Style {
+	switch category {
+	case engine.LogCategoryNetwork:
+		return lipgloss.NewStyle().Foreground(DraculaCyan).Bold(true)
+	case engine.LogCategoryDiscovery:
+		return lipgloss.NewStyle().Foreground(DraculaYellow).Bold(true)
+	case engine.LogCategoryFilter:
+		return lipgloss.NewStyle().Foreground(DraculaPurple).Bold(true)
+	case engine.LogCategoryWorker:
+		return lipgloss.NewStyle().Foreground(DraculaPink).Bold(true)
+	case engine.LogCategoryPlugin:
+		return lipgloss.NewStyle().Foreground(DraculaOrange).Bold(true)
+	default:
+		return mutedStyle
+	}
+}
+
+func logLevelStyle(level engine.LogLevel) lipgloss.Style {
+	switch level {
+	case engine.LogLevelError:
+		return errorStyle
+	case engine.LogLevelWarning:
+		return orangeStyle
+	case engine.LogLevelSuccess:
+		return statusStyle
+	case engine.LogLevelInfo:
+		return highlightStyle
+	case engine.LogLevelDebug:
+		return separatorStyle
+	default:
+		return mutedStyle
+	}
+}
+
+func (m *Model) logSearchActive(entry systemLogEntry) bool {
+	term := strings.TrimSpace(strings.ToLower(m.logSearchTerm))
+	if term == "" {
+		return true
+	}
+	return strings.Contains(entry.SearchText, term)
+}
+
+func (m *Model) visibleSystemLogEntries() []systemLogEntry {
+	entries := m.systemLogEntries()
+	visible := make([]systemLogEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !logLevelEnabled(m.logFilters, entry.Event.Level) {
+			continue
+		}
+		if !m.logSearchActive(entry) {
+			continue
+		}
+		visible = append(visible, entry)
+	}
+	return visible
+}
+
+func relativeScanTime(start time.Time, ts time.Time) string {
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	if start.IsZero() {
+		return "+0s"
+	}
+	if ts.Before(start) {
+		return "+0s"
+	}
+	return fmt.Sprintf("+%s", ts.Sub(start).Round(time.Millisecond))
+}
+
+func (m *Model) formatSystemLogEntry(entry systemLogEntry, selected bool) string {
+	category := logCategoryStyle(entry.Event.Category)
+	level := logLevelStyle(entry.Event.Level)
+	cursor := " "
+	if selected {
+		cursor = "▶"
+	}
+	expandMark := " "
+	if entry.HasDetail {
+		if m.logDetailsExpanded {
+			expandMark = "▼"
+		} else {
+			expandMark = "▶"
+		}
+	}
+	parts := []string{
+		mutedStyle.Render(entry.Relative),
+		category.Render(logCategoryIcon(entry.Event.Category) + " " + string(entry.Event.Category)),
+		level.Render(string(entry.Event.Level)),
+		pinkStyle.Render(string(entry.Event.Type)),
+	}
+	message := entry.Event.Message
+	if term := strings.TrimSpace(m.logSearchTerm); term != "" && strings.Contains(strings.ToLower(entry.SearchText), strings.ToLower(term)) {
+		message = highlightStyle.Bold(true).Render(entry.Event.Message)
+	}
+	parts = append(parts, message)
+	if entry.Path != "" {
+		parts = append(parts, mutedStyle.Render("↩ "+entry.Path))
+	}
+	line := strings.Join(parts, " ")
+	if m.errorPulseOn && (entry.Event.Level == engine.LogLevelError || entry.Event.Level == engine.LogLevelWarning) {
+		line = errorStyle.Bold(true).Render(line)
+	}
+	if selected {
+		line = selectedRowStyle.Width(m.logViewport.Width).Render(fmt.Sprintf("%s %s %s", cursor, expandMark, line))
+	} else {
+		line = fmt.Sprintf("%s %s %s", cursor, expandMark, line)
+	}
+	return line
+}
+
+func (m *Model) renderRelatedLogsSection(selected *engine.Result) string {
+	if selected == nil {
+		return ""
+	}
+	entries := m.systemLogEntries()
+	if len(entries) == 0 {
+		return ""
+	}
+	var related []string
+	for _, entry := range entries {
+		if !logLevelEnabled(m.logFilters, entry.Event.Level) {
+			continue
+		}
+		path := entry.Path
+		if path == "" {
+			if v, ok := entry.Event.Metadata["path"].(string); ok {
+				path = v
+			}
+		}
+		if path != selected.Path {
+			continue
+		}
+		if selected.StatusCode == 403 && entry.Event.Type != engine.EventWAFBypassAttempt && entry.Event.Type != engine.EventWAFBypassOutcome {
+			continue
+		}
+		related = append(related, m.formatSystemLogEntry(entry, false))
+	}
+	if len(related) == 0 {
+		return ""
+	}
+	title := fmt.Sprintf(" Related Logs for %s ", selected.Path)
+	if selected.StatusCode == 403 {
+		title = fmt.Sprintf(" WAF Context for %s ", selected.Path)
+	}
+	body := strings.Join(related, "\n")
+	return paneStyle.Width(max(20, m.width-2)).Render(
+		lipgloss.JoinVertical(lipgloss.Left,
+			renderPaneHeader(requestPaneHeaderStyle, max(10, m.width-4), title),
+			separatorStyle.Render(strings.Repeat("─", max(10, m.width-4))),
+			body,
+		),
+	)
+}
+
+func (m *Model) renderLogsPanel() string {
+	if m.logViewport.Width <= 0 || m.logViewport.Height <= 0 {
+		return ""
+	}
+
+	entries := m.visibleSystemLogEntries()
+	lines := make([]string, 0, len(entries))
+	highlighted := strings.TrimSpace(strings.ToLower(m.logSearchTerm))
+	for i, entry := range entries {
+		selected := i == m.logSelectedIndex
+		line := m.formatSystemLogEntry(entry, selected)
+		if highlighted != "" && strings.Contains(strings.ToLower(entry.SearchText), highlighted) {
+			line = highlightStyle.Render(line)
+		}
+		lines = append(lines, line)
+		if m.logDetailsExpanded && entry.HasDetail {
+			detailParts := []string{}
+			if entry.Path != "" {
+				detailParts = append(detailParts, mutedStyle.Render("    path="+entry.Path))
+			}
+			if len(entry.Event.Metadata) > 0 {
+				keys := make([]string, 0, len(entry.Event.Metadata))
+				for k := range entry.Event.Metadata {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				kv := make([]string, 0, len(keys))
+				for _, k := range keys {
+					kv = append(kv, fmt.Sprintf("%s=%v", k, entry.Event.Metadata[k]))
+				}
+				detailParts = append(detailParts, mutedStyle.Render("    "+strings.Join(kv, "  ")))
+			}
+			if len(detailParts) > 0 {
+				lines = append(lines, detailParts...)
+			}
+		}
+	}
+	if len(lines) == 0 {
+		lines = append(lines, mutedStyle.Render("No system logs match the current filters."))
+	}
+
+	if m.logViewport.Height <= 0 {
+		m.logViewport.Height = 1
+	}
+	maxOffset := max(0, len(lines)-m.logViewport.Height)
+	if m.logPanelAutoScroll || m.logPanelScrollOffset < 0 || m.logPanelScrollOffset > maxOffset {
+		m.logPanelScrollOffset = maxOffset
+		m.logPanelAutoScroll = true
+	}
+	if m.logSelectedIndex < 0 {
+		m.logSelectedIndex = 0
+	}
+	if len(entries) > 0 && m.logSelectedIndex >= len(entries) {
+		m.logSelectedIndex = len(entries) - 1
+	}
+	start := m.logPanelScrollOffset
+	if m.logSelectedIndex >= 0 && m.logSelectedIndex < len(entries) && len(lines) > 0 {
+		selectedLine := 0
+		for i := 0; i < m.logSelectedIndex && i < len(entries); i++ {
+			selectedLine++
+			if m.logDetailsExpanded && entries[i].HasDetail {
+				if entries[i].Path != "" {
+					selectedLine++
+				}
+				if len(entries[i].Event.Metadata) > 0 {
+					selectedLine++
+				}
+			}
+		}
+		if selectedLine < start {
+			start = selectedLine
+		}
+		if selectedLine >= start+m.logViewport.Height {
+			start = selectedLine - m.logViewport.Height + 1
+		}
+	}
+	if start > maxOffset {
+		start = maxOffset
+	}
+	m.logPanelScrollOffset = start
+	end := start + m.logViewport.Height
+	if end > len(lines) {
+		end = len(lines)
+	}
+	if start > end {
+		start = end
+	}
+	cacheKey := fmt.Sprintf("%d:%d:%d:%d:%d:%t:%s:%t", start, m.logViewport.Height, m.logViewport.Width, len(lines), logFilterMask(m.logFilters), m.state == StateLogsPanel, m.logSearchTerm, m.logDetailsExpanded)
+	if !m.logPanelDirty && m.logPanelCacheValid && m.logPanelCacheKey == cacheKey {
+		return m.logPanelCache
+	}
+	content := strings.Join(lines[start:end], "\n")
+	m.logViewport.SetContent(content)
+	headerLabel := fmt.Sprintf(" %s System Logs ", logCategoryIcon(engine.LogCategorySystem))
+	if m.logDetailsExpanded {
+		headerLabel += mutedStyle.Render(" [x collapse details]")
+	} else {
+		headerLabel += mutedStyle.Render(" [x expand details]")
+	}
+	if term := strings.TrimSpace(m.logSearchTerm); term != "" {
+		headerLabel += mutedStyle.Render(fmt.Sprintf(" [search: %s]", term))
+	}
+	panelStyle := paneStyle
+	if m.state == StateLogsPanel {
+		panelStyle = paneActiveStyle
+	}
+	if m.errorPulseOn {
+		panelStyle = panelStyle.BorderForeground(DraculaRed)
+	}
+	panelWidth := m.width - 2
+	if panelWidth < 20 {
+		panelWidth = 20
+	}
+	header := renderPaneHeader(requestPaneHeaderStyle, m.logViewport.Width, headerLabel)
+	rendered := panelStyle.Width(panelWidth).Height(m.logPanelHeight).Render(
+		lipgloss.JoinVertical(lipgloss.Top,
+			header,
+			separatorStyle.Render(strings.Repeat("─", m.logViewport.Width)),
+			m.logViewport.View(),
+		),
+	)
+	m.cacheLogPanel(rendered, cacheKey)
+	return rendered
+}
+
+func (m *Model) cacheLogPanel(content string, key string) {
+	m.logPanelCache = content
+	m.logPanelCacheKey = key
+	m.logPanelCacheValid = true
+	m.logPanelDirty = false
 }
 
 func (m *Model) toggleDashboardView() {
@@ -459,6 +1600,60 @@ func (m *Model) toggleDashboardView() {
 	}
 	m.state = StateDashboard
 	m.renderDashboardView()
+}
+
+func (m *Model) cycleMetricsView() {
+	switch m.state {
+	case StateList:
+		if m.showLogsPanel {
+			m.showLogsPanel = false
+			m.state = StateList
+			m.renderListView()
+			return
+		}
+		m.state = StateDashboard
+		m.renderDashboardView()
+	case StateDashboard:
+		m.showLogsPanel = true
+		m.previousState = StateList
+		m.state = StateLogsPanel
+		m.logPanelAutoScroll = true
+		m.logPanelScrollOffset = max(0, len(m.systemLogEntries())-m.logViewport.Height)
+		m.renderListView()
+	case StateLogsPanel:
+		m.showLogsPanel = false
+		m.state = StateList
+		m.renderListView()
+	default:
+		m.toggleDashboardView()
+	}
+}
+
+func (m *Model) toggleLogsPanel() {
+	m.showLogsPanel = !m.showLogsPanel
+	if m.showLogsPanel {
+		m.previousState = m.state
+		if m.state == StateList {
+			m.state = StateLogsPanel
+		}
+		m.logPanelAutoScroll = true
+		m.logPanelScrollOffset = max(0, len(m.systemLogEntries())-m.logViewport.Height)
+		m.renderLogsPanel()
+		return
+	}
+	if m.state == StateLogsPanel {
+		if m.previousState == StateLogsPanel || m.previousState == 0 {
+			m.state = StateList
+		} else {
+			m.state = m.previousState
+		}
+		switch m.state {
+		case StateList:
+			m.renderListView()
+		case StateDashboard:
+			m.renderDashboardView()
+		}
+	}
 }
 
 func renderSparkline(values []int64, width int) string {
@@ -670,11 +1865,30 @@ type ViewState int
 const (
 	StateList ViewState = iota
 	StateDashboard
+	StateLogsPanel
 	StateDetail
 	StateHexView
 	StateDiffView
 	StateCommand
 	StateRepeater
+)
+
+type DashboardTab int
+
+const (
+	DashboardTabPerformance DashboardTab = iota
+	DashboardTabErrors
+	DashboardTabDiscovery
+	DashboardTabNetwork
+	DashboardTabTimeline
+)
+
+type DashboardRange int
+
+const (
+	DashboardRange30s DashboardRange = iota
+	DashboardRange5m
+	DashboardRangeAll
 )
 
 // RepeaterResultMsg is the message returned after a repeater request.
@@ -693,17 +1907,51 @@ type RepeaterHistoryEntry struct {
 
 // Model is the BubbleTea model for the TUI.
 type Model struct {
-	Engine        *engine.Engine
-	resultsCh     <-chan engine.Result
-	viewport      viewport.Model
-	textInput     textinput.Model
-	logs          []string
-	logLineHits   []*engine.Result
-	hits          []engine.Result // Keep track of hits to view them later
-	rpsHistory    []int64
-	commandMode   bool
-	width, height int
-	ready         bool
+	Engine                   *engine.Engine
+	resultsCh                <-chan engine.Result
+	logEventsCh              <-chan engine.LogEvent
+	viewport                 viewport.Model
+	logViewport              viewport.Model
+	textInput                textinput.Model
+	logs                     []string
+	logLineHits              []*engine.Result
+	systemLogs               systemLogRingBuffer
+	logFilters               map[engine.LogLevel]bool
+	rpsHistoryFull           []int64
+	workerUtilizationHistory []float64
+	errorRateHistory         []float64
+	queueDepthHistory        []int
+	totalErrors              int64
+	totalRetries             int64
+	totalProxyRotations      int64
+	peakRPS                  int64
+	avgResponseTime          time.Duration
+	activeWorkers            int64
+	responseSamples          int64
+	lastMetricsTick          time.Time
+	lastErrorCount           int64
+	dashboardTab             DashboardTab
+	dashboardRangeIdx        int
+	dashboardDirty           bool
+	dashboardCache           string
+	dashboardCacheValid      bool
+	logPanelDirty            bool
+	logPanelAutoScroll       bool
+	logPanelScrollOffset     int
+	logEventsSinceRender     int
+	logPanelCache            string
+	logPanelCacheKey         string
+	logPanelCacheValid       bool
+	logSearchTerm            string
+	logDetailsExpanded       bool
+	logSelectedIndex         int
+	errorPulseOn             bool
+	errorPulseUntil          time.Time
+	hits                     []engine.Result // Keep track of hits to view them later
+	rpsHistory               []int64
+	commandMode              bool
+	width, height            int
+	ready                    bool
 
 	// View State
 	state ViewState
@@ -763,8 +2011,11 @@ type Model struct {
 	// State
 	quitting       bool
 	pendingTarget  string
+	previousState  ViewState
 	commandPulseOn bool
 	logsChanged    bool
+	showLogsPanel  bool
+	logPanelHeight int
 
 	// Status messages
 	statusMessage string
@@ -772,7 +2023,7 @@ type Model struct {
 }
 
 // NewModel initializes the TUI model.
-func NewModel(eng *engine.Engine, resultsCh <-chan engine.Result) Model {
+func NewModel(eng *engine.Engine, resultsCh <-chan engine.Result, logEventsCh <-chan engine.LogEvent) Model {
 	ti := textinput.New()
 	ti.Prompt = ""
 	ti.Placeholder = "Type ':' to enter command mode, 'q' to quit, 'Enter' on a hit to view details"
@@ -781,6 +2032,8 @@ func NewModel(eng *engine.Engine, resultsCh <-chan engine.Result) Model {
 
 	vp := viewport.New(80, 20)
 	vp.SetContent("")
+	logVp := viewport.New(80, 10)
+	logVp.SetContent("")
 
 	reqVp := viewport.New(40, 20)
 	resVp := viewport.New(40, 20)
@@ -802,7 +2055,9 @@ func NewModel(eng *engine.Engine, resultsCh <-chan engine.Result) Model {
 	m := Model{
 		Engine:            eng,
 		resultsCh:         resultsCh,
+		logEventsCh:       logEventsCh,
 		viewport:          vp,
+		logViewport:       logVp,
 		reqViewport:       reqVp,
 		resViewport:       resVp,
 		hexViewport:       hexVp,
@@ -812,18 +2067,40 @@ func NewModel(eng *engine.Engine, resultsCh <-chan engine.Result) Model {
 		textInput:         ti,
 		logs:              []string{},
 		logLineHits:       []*engine.Result{},
-		hits:              []engine.Result{},
-		rpsHistory:        []int64{},
-		cmdOutput:         []string{},
-		startTime:         time.Now(),
-		state:             StateList,
-		commandPulseOn:    true,
-		atBottom:          true,
-		repeaterInput:     ta,
-		repeaterRespVp:    repeaterVp,
-		repeaterFocusReq:  true,
-		repeaterLastRaw:   nil,
-		lastProgressPct:   -1,
+		systemLogs:        newSystemLogRingBuffer(maxLogEntries),
+		logFilters: map[engine.LogLevel]bool{
+			engine.LogLevelDebug:   true,
+			engine.LogLevelInfo:    true,
+			engine.LogLevelWarning: true,
+			engine.LogLevelError:   true,
+			engine.LogLevelSuccess: true,
+		},
+		rpsHistoryFull:           []int64{},
+		workerUtilizationHistory: []float64{},
+		errorRateHistory:         []float64{},
+		queueDepthHistory:        []int{},
+		hits:                     []engine.Result{},
+		rpsHistory:               []int64{},
+		cmdOutput:                []string{},
+		startTime:                time.Now(),
+		state:                    StateList,
+		commandPulseOn:           true,
+		atBottom:                 true,
+		showLogsPanel:            false,
+		logPanelHeight:           8,
+		logPanelAutoScroll:       true,
+		logSearchTerm:            "",
+		logDetailsExpanded:       false,
+		logSelectedIndex:         0,
+		errorPulseOn:             false,
+		dashboardTab:             DashboardTabPerformance,
+		dashboardRangeIdx:        int(DashboardRange30s),
+		dashboardDirty:           true,
+		repeaterInput:            ta,
+		repeaterRespVp:           repeaterVp,
+		repeaterFocusReq:         true,
+		repeaterLastRaw:          nil,
+		lastProgressPct:          -1,
 	}
 	m.initCommands()
 	return m
@@ -850,6 +2127,90 @@ func (m *Model) initCommands() {
 				return statusStyle.Render("[*] Dashboard opened")
 			}
 			return statusStyle.Render("[*] Dashboard closed")
+		}},
+		{Name: "logs", Description: "Search, filter, clear, or export log events", Args: "<filter|search|clear|export> ...", Handler: func(m *Model, args string) string {
+			parts := strings.Fields(strings.TrimSpace(args))
+			if len(parts) == 0 {
+				return errorStyle.Render("Usage: :logs <filter|search|clear|export> ...")
+			}
+			switch strings.ToLower(parts[0]) {
+			case "filter":
+				if len(parts) < 2 {
+					return errorStyle.Render("Usage: :logs filter <level|all|none>")
+				}
+				tokens := strings.Split(parts[1], ",")
+				changed := []string{}
+				for _, token := range tokens {
+					level := strings.ToLower(strings.TrimSpace(token))
+					switch level {
+					case "debug":
+						m.logFilters[engine.LogLevelDebug] = !m.logFilters[engine.LogLevelDebug]
+						changed = append(changed, "debug")
+					case "info":
+						m.logFilters[engine.LogLevelInfo] = !m.logFilters[engine.LogLevelInfo]
+						changed = append(changed, "info")
+					case "warning", "warn":
+						m.logFilters[engine.LogLevelWarning] = !m.logFilters[engine.LogLevelWarning]
+						changed = append(changed, "warning")
+					case "error":
+						m.logFilters[engine.LogLevelError] = !m.logFilters[engine.LogLevelError]
+						changed = append(changed, "error")
+					case "success":
+						m.logFilters[engine.LogLevelSuccess] = !m.logFilters[engine.LogLevelSuccess]
+						changed = append(changed, "success")
+					case "all":
+						m.logFilters[engine.LogLevelDebug] = true
+						m.logFilters[engine.LogLevelInfo] = true
+						m.logFilters[engine.LogLevelWarning] = true
+						m.logFilters[engine.LogLevelError] = true
+						m.logFilters[engine.LogLevelSuccess] = true
+						changed = append(changed, "all")
+					case "none":
+						m.logFilters[engine.LogLevelDebug] = false
+						m.logFilters[engine.LogLevelInfo] = false
+						m.logFilters[engine.LogLevelWarning] = false
+						m.logFilters[engine.LogLevelError] = false
+						m.logFilters[engine.LogLevelSuccess] = false
+						changed = append(changed, "none")
+					default:
+						return errorStyle.Render("Usage: :logs filter <debug|info|warning|error|success|all|none>")
+					}
+				}
+				m.logPanelDirty = true
+				m.dashboardDirty = true
+				m.renderLogsPanel()
+				return statusStyle.Render(fmt.Sprintf("[*] Logs filter updated: %s", strings.Join(changed, ", ")))
+			case "search":
+				term := strings.TrimSpace(strings.Join(parts[1:], " "))
+				m.logSearchTerm = term
+				m.logSelectedIndex = 0
+				m.logPanelAutoScroll = true
+				m.logPanelDirty = true
+				m.dashboardDirty = true
+				if !m.showLogsPanel {
+					m.toggleLogsPanel()
+				} else if m.state != StateLogsPanel {
+					m.previousState = m.state
+					m.state = StateLogsPanel
+					m.renderLogsPanel()
+				}
+				return statusStyle.Render(fmt.Sprintf("[*] Log search set to %q", term))
+			case "clear":
+				m.clearScanLogs()
+				m.renderLogsPanel()
+				return statusStyle.Render("[*] Log buffer cleared")
+			case "export":
+				if len(parts) < 2 {
+					return errorStyle.Render("Usage: :logs export <file>")
+				}
+				file := strings.TrimSpace(strings.Join(parts[1:], " "))
+				if err := m.exportLogsToFile(file); err != nil {
+					return errorStyle.Render(fmt.Sprintf("Log export failed: %v", err))
+				}
+				return statusStyle.Render(fmt.Sprintf("[*] Logs exported to %s", file))
+			default:
+				return errorStyle.Render("Usage: :logs <filter|search|clear|export> ...")
+			}
 		}},
 		{Name: "spider", Description: "Toggle dynamic HTML/JS scraping", Args: "", Handler: func(m *Model, args string) string {
 			m.Engine.Config.RLock()
@@ -1526,11 +2887,82 @@ func tickCmd() tea.Cmd {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(tickCmd(), m.listenForResults())
+	return tea.Batch(tickCmd(), m.listenForResults(), m.listenForLogEvents())
 }
 
 // ResultMsg wraps a result coming from the engine.
 type ResultMsg engine.Result
+
+// LogEventMsg wraps a log event coming from the engine.
+type LogEventMsg engine.LogEvent
+
+type systemLogEntry struct {
+	Event      engine.LogEvent
+	Rendered   string
+	Relative   string
+	SearchText string
+	HasDetail  bool
+	Path       string
+}
+
+type systemLogRingBuffer struct {
+	entries []systemLogEntry
+	start   int
+	size    int
+}
+
+func newSystemLogRingBuffer(capacity int) systemLogRingBuffer {
+	return systemLogRingBuffer{entries: make([]systemLogEntry, capacity)}
+}
+
+func (r *systemLogRingBuffer) reset() {
+	r.start = 0
+	r.size = 0
+	for i := range r.entries {
+		r.entries[i] = systemLogEntry{}
+	}
+}
+
+func (r *systemLogRingBuffer) append(entry systemLogEntry) {
+	if len(r.entries) == 0 {
+		return
+	}
+	if r.size < len(r.entries) {
+		idx := (r.start + r.size) % len(r.entries)
+		r.entries[idx] = entry
+		r.size++
+		return
+	}
+	r.entries[r.start] = entry
+	r.start = (r.start + 1) % len(r.entries)
+}
+
+func (r *systemLogRingBuffer) snapshot() []systemLogEntry {
+	if r.size == 0 || len(r.entries) == 0 {
+		return nil
+	}
+	out := make([]systemLogEntry, r.size)
+	for i := 0; i < r.size; i++ {
+		out[i] = r.entries[(r.start+i)%len(r.entries)]
+	}
+	return out
+}
+
+func (m *Model) systemLogEntries() []systemLogEntry {
+	return m.systemLogs.snapshot()
+}
+
+func (m *Model) systemLogEvents() []engine.LogEvent {
+	entries := m.systemLogEntries()
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]engine.LogEvent, len(entries))
+	for i, entry := range entries {
+		out[i] = entry.Event
+	}
+	return out
+}
 
 // listenForResults returns a command that reads from the Results channel.
 func (m Model) listenForResults() tea.Cmd {
@@ -1540,6 +2972,16 @@ func (m Model) listenForResults() tea.Cmd {
 			return nil
 		}
 		return ResultMsg(result)
+	}
+}
+
+func (m Model) listenForLogEvents() tea.Cmd {
+	return func() tea.Msg {
+		event, ok := <-m.logEventsCh
+		if !ok {
+			return nil
+		}
+		return LogEventMsg(event)
 	}
 }
 
@@ -1597,6 +3039,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.ready {
 			m.viewport = viewport.New(vpWidth, vpHeight)
 			m.viewport.SetContent(strings.Join(m.logs, "\n"))
+			m.logPanelHeight = int(float64(vpHeight) * 0.4)
+			if m.logPanelHeight < 6 {
+				m.logPanelHeight = 6
+			}
+			if m.logPanelHeight > vpHeight-6 {
+				m.logPanelHeight = vpHeight / 3
+			}
+			if m.logPanelHeight < 6 {
+				m.logPanelHeight = 6
+			}
+			m.logViewport = viewport.New(vpWidth-6, m.logPanelHeight-3)
+			m.logViewport.SetContent("")
 			m.cmdViewport = viewport.New(vpWidth, 12)
 			m.cmdViewport.SetContent(strings.Join(m.cmdOutput, "\n"))
 
@@ -1624,6 +3078,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.diffLeftViewport.Height = vpHeight - 2
 			m.diffRightViewport.Width = paneInnerWidth
 			m.diffRightViewport.Height = vpHeight - 2
+			m.logPanelHeight = int(float64(vpHeight) * 0.4)
+			if m.logPanelHeight < 6 {
+				m.logPanelHeight = 6
+			}
+			if m.logPanelHeight > vpHeight-6 {
+				m.logPanelHeight = vpHeight / 3
+			}
+			m.logViewport.Width = vpWidth - 6
+			if m.logViewport.Width < 20 {
+				m.logViewport.Width = 20
+			}
+			m.logViewport.Height = m.logPanelHeight - 3
+			if m.logViewport.Height < 3 {
+				m.logViewport.Height = 3
+			}
 		}
 		m.repeaterInput.SetWidth(paneInnerWidth)
 		m.repeaterInput.SetHeight(vpHeight - 4)
@@ -1631,6 +3100,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.repeaterRespVp.Height = vpHeight - 4
 		m.cmdViewport.Width = vpWidth
 		m.cmdViewport.Height = 12
+		m.logViewport.Width = vpWidth - 6
+		if m.logViewport.Width < 20 {
+			m.logViewport.Width = 20
+		}
+		m.logViewport.Height = m.logPanelHeight - 3
+		if m.logViewport.Height < 3 {
+			m.logViewport.Height = 3
+		}
 		m.textInput.Width = vpWidth - 7
 		m.footerBarStyle = lipgloss.NewStyle().Foreground(DraculaCyan).Bold(true).Width(m.width).PaddingLeft(2)
 		if m.state == StateHexView {
@@ -1645,28 +3122,96 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMessage = ""
 			m.statusExpiry = time.Time{}
 		}
+		if m.errorPulseOn && !m.errorPulseUntil.IsZero() && time.Now().After(m.errorPulseUntil) {
+			m.errorPulseOn = false
+			m.logPanelDirty = true
+		}
 		m.Engine.UpdateRPS()
+		now := time.Time(msg)
 		currentRPS := atomic.LoadInt64(&m.Engine.CurrentRPS)
+		if currentRPS > m.peakRPS {
+			m.peakRPS = currentRPS
+		}
 		m.rpsHistory = append(m.rpsHistory, currentRPS)
 		if len(m.rpsHistory) > 30 {
 			m.rpsHistory = m.rpsHistory[len(m.rpsHistory)-30:]
 		}
+		m.rpsHistoryFull = append(m.rpsHistoryFull, currentRPS)
+		if len(m.rpsHistoryFull) > 1000 {
+			m.rpsHistoryFull = m.rpsHistoryFull[len(m.rpsHistoryFull)-1000:]
+		}
+		m.queueDepthHistory = append(m.queueDepthHistory, m.Engine.QueueSize())
+		if len(m.queueDepthHistory) > 1000 {
+			m.queueDepthHistory = m.queueDepthHistory[len(m.queueDepthHistory)-1000:]
+		}
+		m.Engine.Config.RLock()
+		maxWorkers := m.Engine.Config.MaxWorkers
+		m.Engine.Config.RUnlock()
+		utilization := 0.0
+		if maxWorkers > 0 {
+			utilization = float64(atomic.LoadInt64(&m.activeWorkers)) / float64(maxWorkers)
+		}
+		m.workerUtilizationHistory = append(m.workerUtilizationHistory, utilization)
+		if len(m.workerUtilizationHistory) > 1000 {
+			m.workerUtilizationHistory = m.workerUtilizationHistory[len(m.workerUtilizationHistory)-1000:]
+		}
+		totalErrors := atomic.LoadInt64(&m.totalErrors)
+		if m.lastMetricsTick.IsZero() {
+			m.lastMetricsTick = now
+			m.lastErrorCount = totalErrors
+		}
+		elapsed := now.Sub(m.lastMetricsTick)
+		if elapsed <= 0 {
+			elapsed = time.Second
+		}
+		errorDelta := totalErrors - m.lastErrorCount
+		errorRate := 0.0
+		if elapsed > 0 {
+			errorRate = float64(errorDelta) / elapsed.Minutes()
+		}
+		m.errorRateHistory = append(m.errorRateHistory, errorRate)
+		if len(m.errorRateHistory) > 1000 {
+			m.errorRateHistory = m.errorRateHistory[len(m.errorRateHistory)-1000:]
+		}
+		m.lastMetricsTick = now
+		m.lastErrorCount = totalErrors
 		m.commandPulseOn = !m.commandPulseOn
+		activeState := m.state
+		if activeState == StateLogsPanel {
+			activeState = m.previousState
+			if activeState == StateLogsPanel || activeState == 0 {
+				activeState = StateList
+			}
+		}
 		if m.logsChanged {
-			if m.state == StateDashboard {
+			if activeState == StateDashboard {
 				m.renderDashboardView()
 			} else {
 				m.renderListView()
 			}
 			m.logsChanged = false
 		}
-		if m.state == StateDashboard {
+		if m.dashboardDirty && activeState == StateDashboard {
 			m.renderDashboardView()
+		}
+		if m.logPanelDirty && (m.showLogsPanel || m.state == StateLogsPanel) {
+			m.renderLogsPanel()
+			m.logPanelDirty = false
+			m.logEventsSinceRender = 0
 		}
 		cmds = append(cmds, tickCmd())
 
 	case ResultMsg:
 		result := engine.Result(msg)
+		if result.Duration > 0 {
+			m.responseSamples++
+			if m.responseSamples == 1 {
+				m.avgResponseTime = result.Duration
+			} else {
+				total := m.avgResponseTime*time.Duration(m.responseSamples-1) + result.Duration
+				m.avgResponseTime = total / time.Duration(m.responseSamples)
+			}
+		}
 		if result.IsAutoFilter {
 			msgStr := ""
 			if result.Headers != nil {
@@ -1680,7 +3225,41 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.appendLog(formatResult(result), &result)
 		}
+		m.dashboardDirty = true
 		cmds = append(cmds, m.listenForResults())
+
+	case LogEventMsg:
+		event := engine.LogEvent(msg)
+		m.appendSystemLog(event)
+		countedError := false
+		switch event.Type {
+		case engine.EventWorkerStarted:
+			m.activeWorkers++
+		case engine.EventWorkerStopped:
+			if m.activeWorkers > 0 {
+				m.activeWorkers--
+			}
+		case engine.EventProxyRotated:
+			m.totalProxyRotations++
+		case engine.EventRetryAttempt:
+			m.totalRetries++
+		case engine.EventRateLimitHit, engine.EventNetworkError, engine.EventHarvestParseError:
+			m.totalErrors++
+			countedError = true
+		}
+		if event.Level == engine.LogLevelError && !countedError {
+			m.totalErrors++
+			countedError = true
+		}
+		if event.Level == engine.LogLevelWarning && !countedError {
+			m.totalErrors++
+		}
+		if event.Level == engine.LogLevelError || event.Level == engine.LogLevelWarning {
+			m.errorPulseOn = true
+			m.errorPulseUntil = time.Now().Add(750 * time.Millisecond)
+			m.logPanelDirty = true
+		}
+		cmds = append(cmds, m.listenForLogEvents())
 
 	case RepeaterResultMsg:
 		m.repeaterSending = false
@@ -1860,11 +3439,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if m.state == StateLogsPanel {
+				if !m.jumpToSelectedLogResult() {
+					m.statusMessage = mutedStyle.Render("No linked result for this log entry.")
+					m.statusExpiry = time.Now().Add(2 * time.Second)
+				}
+				return m, nil
+			}
 			if m.state == StateDashboard {
 				return m, nil
 			}
 
 		case "up", "k":
+			if m.state == StateLogsPanel {
+				m.moveLogSelection(-1)
+				return m, nil
+			}
 			if m.commandMode && len(m.suggestions) > 0 {
 				m.selectedSugIdx--
 				if m.selectedSugIdx < 0 {
@@ -1911,6 +3501,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "down", "j":
+			if m.state == StateLogsPanel {
+				m.moveLogSelection(1)
+				return m, nil
+			}
 			if m.commandMode && len(m.suggestions) > 0 {
 				m.selectedSugIdx++
 				if m.selectedSugIdx >= len(m.suggestions) {
@@ -1959,6 +3553,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "pagedown":
+			if m.state == StateLogsPanel {
+				m.moveLogSelection(max(1, m.logViewport.Height))
+				return m, nil
+			}
 			if m.state == StateList {
 				m.selectedIndex += m.viewport.Height
 				if m.selectedIndex >= len(m.logs)-1 {
@@ -1987,6 +3585,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "pageup":
+			if m.state == StateLogsPanel {
+				m.moveLogSelection(-max(1, m.logViewport.Height))
+				return m, nil
+			}
 			if m.state == StateList {
 				m.atBottom = false
 				m.selectedIndex -= m.viewport.Height
@@ -2115,7 +3717,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "h":
-			if m.state == StateDetail {
+			if m.state == StateList || m.state == StateDetail {
 				if m.openHexView(HexViewRequest) {
 					return m, nil
 				}
@@ -2126,7 +3728,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusExpiry = time.Now().Add(3 * time.Second)
 			}
 		case "H":
-			if m.state == StateDetail {
+			if m.state == StateList || m.state == StateDetail {
 				if m.openHexView(HexViewResponse) {
 					return m, nil
 				}
@@ -2149,9 +3751,44 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "?":
 			output := m.commands[0].Handler(m, "")
 			m.appendCmd(output)
+		case "1", "2", "3", "4", "5":
+			if m.state == StateDashboard {
+				m.dashboardTab = DashboardTab(int(msg.String()[0] - '1'))
+				m.dashboardDirty = true
+				m.renderDashboardView()
+				return m, nil
+			}
+		case "f":
+			if m.state == StateDashboard {
+				m.cycleDashboardRange()
+				m.dashboardDirty = true
+				m.renderDashboardView()
+				return m, nil
+			}
+		case "e":
+			if m.state == StateDashboard {
+				path, err := m.exportMetricsSnapshot()
+				if err != nil {
+					m.statusMessage = errorStyle.Render(fmt.Sprintf("Metrics export failed: %v", err))
+				} else {
+					m.statusMessage = statusStyle.Render(fmt.Sprintf("Metrics exported to %s", path))
+				}
+				m.statusExpiry = time.Now().Add(3 * time.Second)
+				return m, nil
+			}
 		case "m":
-			m.toggleDashboardView()
+			m.cycleMetricsView()
 			return m, nil
+		case "L":
+			m.toggleLogsPanel()
+			return m, nil
+		case "x":
+			if m.state == StateLogsPanel {
+				m.logDetailsExpanded = !m.logDetailsExpanded
+				m.logPanelDirty = true
+				m.renderLogsPanel()
+				return m, nil
+			}
 		}
 	}
 
@@ -2317,11 +3954,108 @@ func (m *Model) updateSuggestions(val string) {
 func (m *Model) clearScanLogs() {
 	m.logs = []string{}
 	m.logLineHits = []*engine.Result{}
+	m.systemLogs.reset()
 	m.hits = []engine.Result{}
 	m.viewport.SetContent("")
+	m.logViewport.SetContent("")
 	m.selectedIndex = 0
 	m.listScrollIdx = 0
 	m.atBottom = true
+	m.logPanelScrollOffset = 0
+	m.logPanelAutoScroll = true
+	m.logPanelDirty = true
+	m.dashboardDirty = true
+	m.dashboardCacheValid = false
+	m.dashboardCache = ""
+	m.logPanelCacheValid = false
+	m.logPanelCache = ""
+	m.logPanelCacheKey = ""
+	m.logEventsSinceRender = 0
+	m.logSearchTerm = ""
+	m.logDetailsExpanded = false
+	m.logSelectedIndex = 0
+	m.logPanelAutoScroll = true
+	m.errorPulseOn = false
+	m.errorPulseUntil = time.Time{}
+}
+
+func (m *Model) moveLogSelection(delta int) {
+	entries := m.visibleSystemLogEntries()
+	if len(entries) == 0 {
+		m.logSelectedIndex = 0
+		m.logPanelScrollOffset = 0
+		return
+	}
+	m.logSelectedIndex += delta
+	if m.logSelectedIndex < 0 {
+		m.logSelectedIndex = 0
+	}
+	if m.logSelectedIndex >= len(entries) {
+		m.logSelectedIndex = len(entries) - 1
+	}
+	m.logPanelAutoScroll = false
+	m.logPanelDirty = true
+}
+
+func (m *Model) jumpToSelectedLogResult() bool {
+	entries := m.visibleSystemLogEntries()
+	if m.logSelectedIndex < 0 || m.logSelectedIndex >= len(entries) {
+		return false
+	}
+	entry := entries[m.logSelectedIndex]
+	path := entry.Path
+	if path == "" && entry.Event.Metadata != nil {
+		if v, ok := entry.Event.Metadata["path"].(string); ok {
+			path = v
+		}
+	}
+	if path == "" {
+		return false
+	}
+	for i := range m.logLineHits {
+		if m.logLineHits[i] != nil && m.logLineHits[i].Path == path {
+			m.selectedIndex = i
+			if m.selectedIndex < 0 {
+				m.selectedIndex = 0
+			}
+			if m.selectedIndex < m.listScrollIdx {
+				m.listScrollIdx = m.selectedIndex
+			}
+			if m.selectedIndex >= m.listScrollIdx+m.viewport.Height {
+				m.listScrollIdx = m.selectedIndex - m.viewport.Height + 1
+				if m.listScrollIdx < 0 {
+					m.listScrollIdx = 0
+				}
+			}
+			m.state = StateList
+			m.renderListView()
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) exportLogsToFile(path string) error {
+	entries := m.visibleSystemLogEntries()
+	var sb strings.Builder
+	for _, entry := range entries {
+		sb.WriteString(fmt.Sprintf("%s | %s | %s | %s | %s", entry.Relative, entry.Event.Level, entry.Event.Category, entry.Event.Type, entry.Event.Message))
+		if entry.Path != "" {
+			sb.WriteString(" | path=" + entry.Path)
+		}
+		if len(entry.Event.Metadata) > 0 {
+			keys := make([]string, 0, len(entry.Event.Metadata))
+			for k := range entry.Event.Metadata {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				sb.WriteString(fmt.Sprintf(" | %s=%v", k, entry.Event.Metadata[k]))
+			}
+		}
+		sb.WriteString("\n")
+	}
+	return os.WriteFile(path, []byte(sb.String()), 0o644)
 }
 
 func (m *Model) appendLog(text string, hit *engine.Result) {
@@ -2362,6 +4096,7 @@ func (m *Model) appendLog(text string, hit *engine.Result) {
 	}
 
 	m.logsChanged = true
+	m.dashboardDirty = true
 }
 
 func (m *Model) appendCmd(text string) {
@@ -2476,6 +4211,44 @@ func formatResult(r engine.Result) string {
 	))
 }
 
+func formatLogEvent(ev engine.LogEvent, relative string) string {
+	timestamp := ev.Timestamp
+	if timestamp.IsZero() {
+		timestamp = time.Now()
+	}
+
+	metaParts := make([]string, 0, len(ev.Metadata))
+	if len(ev.Metadata) > 0 {
+		keys := make([]string, 0, len(ev.Metadata))
+		for k := range ev.Metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			metaParts = append(metaParts, fmt.Sprintf("%s=%v", k, ev.Metadata[k]))
+		}
+	}
+
+	levelStyle := logLevelStyle(ev.Level)
+	categoryStyle := logCategoryStyle(ev.Category)
+	parts := []string{
+		mutedStyle.Render(timestamp.Format("15:04:05")),
+		mutedStyle.Render(relative),
+		levelStyle.Render(string(ev.Level)),
+		categoryStyle.Render(logCategoryIcon(ev.Category) + " " + string(ev.Category)),
+		pinkStyle.Render(string(ev.Type)),
+	}
+	message := ev.Message
+	if message == "" {
+		message = "(no message)"
+	}
+	parts = append(parts, message)
+	if len(metaParts) > 0 {
+		parts = append(parts, mutedStyle.Render("["+strings.Join(metaParts, " ")+"]"))
+	}
+	return strings.Join(parts, " ")
+}
+
 func (m *Model) View() string {
 	if m.quitting {
 		summary := renderEvasionSummary(m.Engine.EvasionSummaryRows())
@@ -2536,9 +4309,13 @@ func (m *Model) View() string {
 	}
 
 	tuiDropped := atomic.LoadInt64(&m.Engine.TUIDropped)
+	logDropped := m.Engine.LogEventsDropped.Load()
 	droppedStr := ""
 	if tuiDropped > 0 {
 		droppedStr = " " + errorStyle.Render(fmt.Sprintf("⚠ TUI-dropped:%d", tuiDropped))
+	}
+	if logDropped > 0 {
+		droppedStr += " " + orangeStyle.Render(fmt.Sprintf("⚠ Log-dropped:%d", logDropped))
 	}
 
 	statsLine := strings.Join([]string{
@@ -2614,28 +4391,96 @@ func (m *Model) View() string {
 	header := lipgloss.JoinVertical(lipgloss.Top, headerContent, sep)
 
 	var mainContent string
+	remainingHeight := m.height - lipgloss.Height(header) - 1
+	if remainingHeight < 1 {
+		remainingHeight = 1
+	}
 
-	if m.state == StateList {
+	activeState := m.state
+	if activeState == StateLogsPanel {
+		activeState = m.previousState
+		if activeState == StateLogsPanel || activeState == 0 {
+			activeState = StateList
+		}
+	}
+	logsVisible := (m.showLogsPanel || m.state == StateLogsPanel) && activeState != StateCommand
+	logPanelSeparator := separatorStyle.Render(strings.Repeat("─", m.width))
+	var logPanelRender string
+	var actualLogPanelHeight int
+	if logsVisible {
+		logPanelRender = m.renderLogsPanel()
+		if logPanelRender != "" {
+			actualLogPanelHeight = lipgloss.Height(logPanelRender) + 1
+		}
+	}
+
+	if activeState == StateList {
+		contentHeight := remainingHeight
+		contentHeight -= actualLogPanelHeight
+		if contentHeight < 5 {
+			contentHeight = 5
+		}
+		m.viewport.Height = contentHeight
 		mainContent = m.viewport.View()
-	} else if m.state == StateDashboard {
+	} else if activeState == StateDashboard {
+		contentHeight := remainingHeight
+		contentHeight -= actualLogPanelHeight
+		if contentHeight < 5 {
+			contentHeight = 5
+		}
+		m.viewport.Height = contentHeight
 		m.renderDashboardView()
 		mainContent = m.viewport.View()
-	} else if m.state == StateDetail {
-		headerHeight := 6
-		footerHeight := bottomBandHeight
-		vpHeight := m.height - headerHeight - footerHeight
+	} else if activeState == StateDetail {
+		vpHeight := remainingHeight
+		vpHeight -= actualLogPanelHeight
+		if vpHeight < 5 {
+			vpHeight = 5
+		}
+		relatedRender := ""
+		relatedHeight := 0
+		if m.selectedIndex >= 0 && m.selectedIndex < len(m.logLineHits) && m.logLineHits[m.selectedIndex] != nil {
+			relatedRender = m.renderRelatedLogsSection(m.logLineHits[m.selectedIndex])
+			if relatedRender != "" {
+				relatedHeight = lipgloss.Height(relatedRender) + 1
+				maxRelatedHeight := int(float64(vpHeight) * 0.4)
+				if maxRelatedHeight < 5 {
+					maxRelatedHeight = 5
+				}
+				if relatedHeight > maxRelatedHeight {
+					relatedRender = lipgloss.NewStyle().MaxHeight(maxRelatedHeight - 1).Render(relatedRender)
+					relatedHeight = maxRelatedHeight
+				}
+			}
+		}
+		paneHeight := vpHeight - relatedHeight
+		if paneHeight < 6 {
+			paneHeight = 6
+		}
 		paneOuterWidth := (m.width - 2) / 2
+		innerPaneHeight := paneHeight - 2
+		if innerPaneHeight < 4 {
+			innerPaneHeight = 4
+		}
 
 		reqHeader := renderPaneHeader(requestPaneHeaderStyle, m.reqViewport.Width, "Request")
 		resHeader := renderPaneHeader(responsePaneHeaderStyle, m.resViewport.Width, "Response")
 
-		reqPane := paneStyle.Width(paneOuterWidth - 2).Height(vpHeight).Render(
+		m.reqViewport.Height = innerPaneHeight - 1
+		m.resViewport.Height = innerPaneHeight - 1
+		if m.reqViewport.Height < 3 {
+			m.reqViewport.Height = 3
+		}
+		if m.resViewport.Height < 3 {
+			m.resViewport.Height = 3
+		}
+		reqPane := paneStyle.Width(paneOuterWidth - 2).Height(innerPaneHeight).Render(
 			lipgloss.JoinVertical(lipgloss.Top,
 				reqHeader,
 				m.reqViewport.View(),
 			),
 		)
-		resPane := paneStyle.Width(paneOuterWidth - 2).Height(vpHeight).Render(
+		resPane := paneStyle.Width(paneOuterWidth - 2).Height(innerPaneHeight).Render(
 			lipgloss.JoinVertical(lipgloss.Top,
 				resHeader,
 				m.resViewport.View(),
@@ -2643,10 +4488,16 @@ func (m *Model) View() string {
 		)
 		spacer := strings.Repeat(" ", m.width-(paneOuterWidth*2))
 		mainContent = lipgloss.JoinHorizontal(lipgloss.Top, reqPane, spacer, resPane)
-	} else if m.state == StateHexView {
-		headerHeight := 6
-		footerHeight := bottomBandHeight
-		vpHeight := m.height - headerHeight - footerHeight
+		if relatedRender != "" {
+			mainContent = lipgloss.JoinVertical(lipgloss.Left,
+				mainContent,
+				separatorStyle.Render(strings.Repeat("─", m.width)),
+				relatedRender,
+			)
+		}
+	} else if activeState == StateHexView {
+		vpHeight := remainingHeight
+		vpHeight -= actualLogPanelHeight
 		if vpHeight < 5 {
 			vpHeight = 5
 		}
@@ -2654,10 +4505,14 @@ func (m *Model) View() string {
 		if hexPaneWidth < 20 {
 			hexPaneWidth = 20
 		}
+		m.hexViewport.Height = vpHeight - 4
+		if m.hexViewport.Height < 3 {
+			m.hexViewport.Height = 3
+		}
 
 		hexHeader := renderPaneHeader(requestPaneHeaderStyle, m.hexViewport.Width, m.hexViewHeader())
 		hexSeparator := separatorStyle.Render(strings.Repeat("─", m.hexViewport.Width))
-		hexPane := paneStyle.Width(hexPaneWidth).Height(vpHeight).Render(
+		hexPane := paneStyle.Width(hexPaneWidth).Height(vpHeight - 2).Render(
 			lipgloss.JoinVertical(lipgloss.Top,
 				hexHeader,
 				hexSeparator,
@@ -2665,10 +4520,12 @@ func (m *Model) View() string {
 			),
 		)
 		mainContent = hexPane
-	} else if m.state == StateDiffView {
-		headerHeight := 6
-		footerHeight := bottomBandHeight
-		vpHeight := m.height - headerHeight - footerHeight
+	} else if activeState == StateDiffView {
+		vpHeight := remainingHeight
+		vpHeight -= actualLogPanelHeight
+		if vpHeight < 5 {
+			vpHeight = 5
+		}
 		paneOuterWidth := (m.width - 2) / 2
 		leftTitle := "Reference"
 		rightTitle := "Current"
@@ -2681,14 +4538,22 @@ func (m *Model) View() string {
 
 		leftHeader := renderPaneHeader(diffHeaderStyle, m.diffLeftViewport.Width, leftTitle)
 		rightHeader := renderPaneHeader(diffHeaderStyle, m.diffRightViewport.Width, rightTitle)
-		leftPane := paneStyle.Width(paneOuterWidth - 2).Height(vpHeight).Render(
+		m.diffLeftViewport.Height = vpHeight - 4
+		m.diffRightViewport.Height = vpHeight - 4
+		if m.diffLeftViewport.Height < 3 {
+			m.diffLeftViewport.Height = 3
+		}
+		if m.diffRightViewport.Height < 3 {
+			m.diffRightViewport.Height = 3
+		}
+		leftPane := paneStyle.Width(paneOuterWidth - 2).Height(vpHeight - 2).Render(
 			lipgloss.JoinVertical(lipgloss.Top,
 				leftHeader,
 				separatorStyle.Render(strings.Repeat("─", m.diffLeftViewport.Width)),
 				m.diffLeftViewport.View(),
 			),
 		)
-		rightPane := paneStyle.Width(paneOuterWidth - 2).Height(vpHeight).Render(
+		rightPane := paneStyle.Width(paneOuterWidth - 2).Height(vpHeight - 2).Render(
 			lipgloss.JoinVertical(lipgloss.Top,
 				rightHeader,
 				separatorStyle.Render(strings.Repeat("─", m.diffRightViewport.Width)),
@@ -2699,10 +4564,12 @@ func (m *Model) View() string {
 		mainContent = lipgloss.JoinHorizontal(lipgloss.Top, leftPane, spacer, rightPane)
 	} else if m.state == StateCommand {
 		mainContent = m.viewport.View()
-	} else if m.state == StateRepeater {
-		headerHeight := 6
-		footerHeight := bottomBandHeight
-		vpHeight := m.height - headerHeight - footerHeight
+	} else if activeState == StateRepeater {
+		vpHeight := remainingHeight
+		vpHeight -= actualLogPanelHeight
+		if vpHeight < 5 {
+			vpHeight = 5
+		}
 		paneOuterWidth := (m.width - 2) / 2
 
 		reqHeader := renderPaneHeader(requestPaneHeaderStyle, m.repeaterInput.Width(), "✏  Repeater")
@@ -2737,6 +4604,11 @@ func (m *Model) View() string {
 			}
 			resHeader = renderPaneHeader(responsePaneHeaderStyle, m.repeaterRespVp.Width, resHeaderText)
 		}
+		m.repeaterInput.SetHeight(vpHeight - 4)
+		m.repeaterRespVp.Height = vpHeight - 4
+		if m.repeaterRespVp.Height < 3 {
+			m.repeaterRespVp.Height = 3
+		}
 
 		leftStyle := paneStyle
 		rightStyle := paneStyle
@@ -2749,14 +4621,14 @@ func (m *Model) View() string {
 		separatorReq := separatorStyle.Render(strings.Repeat("─", m.repeaterInput.Width()))
 		separatorRes := separatorStyle.Render(strings.Repeat("─", m.repeaterRespVp.Width))
 
-		reqPane := leftStyle.Width(paneOuterWidth - 2).Height(vpHeight).Render(
+		reqPane := leftStyle.Width(paneOuterWidth - 2).Height(vpHeight - 2).Render(
 			lipgloss.JoinVertical(lipgloss.Top,
 				reqHeader,
 				separatorReq,
 				m.repeaterInput.View(),
 			),
 		)
-		resPane := rightStyle.Width(paneOuterWidth - 2).Height(vpHeight).Render(
+		resPane := rightStyle.Width(paneOuterWidth - 2).Height(vpHeight - 2).Render(
 			lipgloss.JoinVertical(lipgloss.Top,
 				resHeader,
 				separatorRes,
@@ -2772,18 +4644,20 @@ func (m *Model) View() string {
 	if m.statusMessage != "" {
 		footerBody = m.statusMessage
 	} else {
-		if m.state == StateList {
-			footerBody = m.footerBarStyle.Render("Enter: details | m: metrics | R: save ref | d: diff | h/H: hex | r: repeater | ':' commands | q: quit")
+		if m.state == StateLogsPanel {
+			footerBody = m.footerBarStyle.Render("Enter: jump | x: details | L: logs | m: cycle view | Esc/q: back | Up/Down/PgUp/PgDn: navigate")
+		} else if m.state == StateList {
+			footerBody = m.footerBarStyle.Render("Enter: details | L: logs | m: cycle view | R: save ref | d: diff | h/H: hex | r: repeater | ':' commands | q: quit")
 		} else if m.state == StateDashboard {
-			footerBody = m.footerBarStyle.Render("m/q/Esc: back to scan list | Up/Down/PgUp/PgDn: scroll metrics")
+			footerBody = m.footerBarStyle.Render("1-5: tabs | f: range | e: export | L: logs | m/q/Esc: back | Up/Down/PgUp/PgDn: scroll")
 		} else if m.state == StateDetail {
-			footerBody = m.footerBarStyle.Render("R: save ref | d: diff | h/H: hex | Esc/q: back | Up/Down to scroll")
+			footerBody = m.footerBarStyle.Render("R: save ref | d: diff | h/H: hex | L: logs | x: related logs | Esc/q: back | Up/Down to scroll")
 		} else if m.state == StateHexView {
-			footerBody = m.footerBarStyle.Render("R: save ref | d: diff | D: replay diff | Tab: switch request/response | Esc/q: back")
+			footerBody = m.footerBarStyle.Render("R: save ref | d: diff | D: replay diff | L: logs | Tab: switch request/response | Esc/q: back")
 		} else if m.state == StateDiffView {
-			footerBody = m.footerBarStyle.Render("Esc/q: back | Up/Down: scroll | PgUp/PgDn: page")
+			footerBody = m.footerBarStyle.Render("L: logs | Esc/q: back | Up/Down: scroll | PgUp/PgDn: page")
 		} else if m.state == StateRepeater {
-			footerBody = m.footerBarStyle.Render("R: save ref | D: diff replay | Tab: focus | Ctrl+R: send | Ctrl+P/N: history | Esc/q: back")
+			footerBody = m.footerBarStyle.Render("R: save ref | D: diff replay | L: logs | Tab: focus | Ctrl+R: send | Ctrl+P/N: history | Esc/q: back")
 		} else {
 			footerBody = m.footerBarStyle.Render("Press ':' for commands | 'p' to pause | 'q' to quit | 'r' for repeater")
 		}
@@ -2832,11 +4706,21 @@ func (m *Model) View() string {
 	// Footer (keep minimal - command panel will overlay the bottom of main content)
 	footer := footerBody
 
-	remainingHeight := m.height - lipgloss.Height(header) - 1
-	if remainingHeight < 1 {
-		remainingHeight = 1
+	bodyContent := mainContent
+
+	if logsVisible && logPanelRender != "" {
+		bodyContent = lipgloss.JoinVertical(lipgloss.Top,
+			mainContent,
+			logPanelSeparator,
+			logPanelRender,
+		)
 	}
-	paddedContent := lipgloss.NewStyle().Height(remainingHeight).Render(mainContent)
+
+	paddedContent := lipgloss.NewStyle().
+		Width(m.width).
+		Height(remainingHeight).
+		AlignVertical(lipgloss.Top).
+		Render(bodyContent)
 
 	// If command panel is active, overlay it by replacing the last `bottomBandHeight` lines
 	if m.state == StateCommand {

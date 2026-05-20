@@ -8,7 +8,7 @@ import (
 
 func TestCommandConfigChangesRefreshSnapshot(t *testing.T) {
 	eng := engine.NewEngine(1, 1000, 0.01)
-	model := NewModel(eng, make(chan engine.Result))
+	model := NewModel(eng, make(chan engine.Result), make(chan engine.LogEvent))
 
 	runCommand := func(name, args string) {
 		t.Helper()
