@@ -5,8 +5,14 @@
       "env": {
         "DIRFUZZ_WORDLIST_DIR": "/absolute/path/to/DirFuzz/wordlists",
         "DIRFUZZ_SCOPE_DIR": "/absolute/path/to/h1-scope-watcher/output",
+        "DIRFUZZ_OUTPUT_DIR": "/absolute/path/to/DirFuzz/output",
         "DIRFUZZ_MAX_THREADS": "15",
-        "DIRFUZZ_MAX_RESULTS": "200"
+        "DIRFUZZ_MAX_RESULTS": "200",
+        "DIRFUZZ_MAX_CONCURRENT_SCANS": "5",
+        "DIRFUZZ_SCAN_RATE_LIMIT": "20",
+        "DIRFUZZ_TOOL_RATE_LIMIT": "60",
+        "DIRFUZZ_RATE_LIMIT_WINDOW_SECONDS": "600",
+        "DIRFUZZ_AUDIT_LOG": "/absolute/path/to/DirFuzz/output/dirfuzz-audit.jsonl"
       }
     }
   }

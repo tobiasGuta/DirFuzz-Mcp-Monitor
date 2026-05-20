@@ -227,6 +227,13 @@ type Job struct {
 }
 
 // Result holds the details of a successful fuzzing hit.
+//
+// URL and Path intentionally overlap:
+//   - URL is the fully qualified URL when the engine has a concrete target.
+//   - Path is the discovered relative path or fallback identifier.
+//
+// Callers that need a stable absolute target should prefer URL when present and
+// fall back to Path only for scans that were not started with SetTarget.
 type Result struct {
 	Path             string            `json:"path"`
 	Method           string            `json:"method,omitempty"`
@@ -391,6 +398,13 @@ func (sbf *shardedBloomFilter) unmarshalBinary(data []byte) error {
 // ─── Engine ───────────────────────────────────────────────────────────────────
 
 // Engine represents the core memory-queue system for the brute-forcer.
+//
+// Concurrency contract:
+//   - Stats and EvasionSummaryRows are safe to call from any goroutine.
+//   - Results and LogEvents are owned by the engine and may be read concurrently;
+//     only Shutdown closes them.
+//   - Start, KickoffScanner, and Shutdown coordinate internal goroutines and may
+//     be invoked by the MCP/CLI orchestration layer without external locking.
 type Engine struct {
 	RunID         int64
 	jobs          chan Job
@@ -423,8 +437,13 @@ type Engine struct {
 	currentBurst int
 
 	// Progress tracking
-	TotalLines     int64
-	ProcessedLines int64
+	TotalLines         int64
+	ProcessedLines     int64
+	requestsDispatched atomic.Int64
+	resultsCollected   atomic.Int64
+	startedAtUnix      atomic.Int64
+	isRunning          atomic.Bool
+	activeWorkers      atomic.Int64
 
 	// Transform plugin
 	transformPlugin *PluginRequestTransformer
@@ -464,6 +483,9 @@ type Engine struct {
 	SimhashThreshold    int
 	SimhashClusterLimit int
 	EvasionScoreboard   *EvasionScoreboard
+	wafStateMu          sync.RWMutex
+	wafDetected         bool
+	wafVendorGuess      string
 
 	// HTTP/2 client path.
 	H2Client    *http.Client
@@ -1457,6 +1479,9 @@ func (e *Engine) drainJobs() {
 }
 
 // KickoffScanner starts the wordlist scanner.
+//
+// It is safe to call after Start from a coordinating goroutine; the scanner
+// goroutine itself is owned by the engine and is drained by Shutdown.
 func (e *Engine) KickoffScanner(path string, startLine int64) {
 	e.AddScanner()
 	sc := e.scannerCtx.Load()
@@ -1957,11 +1982,27 @@ func (e *Engine) checkRecursiveWildcard(dirPath string) bool {
 
 func (e *Engine) QueueSize() int { return len(e.jobs) }
 
+// NumWorkers returns the configured worker count for the engine.
+func (e *Engine) NumWorkers() int {
+	e.workerLock.Lock()
+	defer e.workerLock.Unlock()
+	return e.numWorkers
+}
+
+// Start launches the configured worker pool.
+//
+// Call Start once per engine instance before KickoffScanner. The method is
+// concurrency-safe with Shutdown, but callers should not invoke it repeatedly
+// on the same engine because it would spawn duplicate workers.
 func (e *Engine) Start() {
 	e.workerLock.Lock()
 	defer e.workerLock.Unlock()
+	now := time.Now().UTC().UnixNano()
+	e.startedAtUnix.CompareAndSwap(0, now)
+	e.isRunning.Store(true)
 	for i := 0; i < e.numWorkers; i++ {
 		e.wg.Add(1)
+		e.activeWorkers.Add(1)
 		e.emitLogEvent(LogLevelInfo, LogCategoryWorker, EventWorkerStarted, fmt.Sprintf("worker %d started", i), map[string]interface{}{"worker_id": i})
 		go e.worker(i)
 	}
@@ -1984,6 +2025,7 @@ func (e *Engine) SetWorkerCount(n int) {
 		diff := n - e.numWorkers
 		for i := 0; i < diff; i++ {
 			e.wg.Add(1)
+			e.activeWorkers.Add(1)
 			workerID := e.numWorkers + i
 			e.emitLogEvent(LogLevelInfo, LogCategoryWorker, EventWorkerStarted, fmt.Sprintf("worker %d started", workerID), map[string]interface{}{"worker_id": workerID, "new_size": n})
 			go e.worker(workerID)
@@ -2274,6 +2316,7 @@ func (e *Engine) executeH2Request(ctx context.Context, targetURL string, rawRequ
 	if err != nil {
 		return nil, err
 	}
+	e.requestsDispatched.Add(1)
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -2620,6 +2663,7 @@ func (e *Engine) handleResultWithContext(ctx context.Context, res Result) bool {
 
 	select {
 	case e.Results <- res:
+		e.resultsCollected.Add(1)
 		return false
 	case <-ctx.Done():
 		return true
@@ -2642,6 +2686,7 @@ func (e *Engine) handleResultNonBlocking(res Result) {
 
 	select {
 	case e.Results <- res:
+		e.resultsCollected.Add(1)
 	default:
 		atomic.AddInt64(&e.TUIDropped, 1)
 	}
@@ -2665,6 +2710,7 @@ func verbTamperHeaders(method string) map[string]string {
 func (e *Engine) worker(id int) {
 	defer func() {
 		e.emitLogEvent(LogLevelInfo, LogCategoryWorker, EventWorkerStopped, fmt.Sprintf("worker %d stopped", id), map[string]interface{}{"worker_id": id})
+		e.activeWorkers.Add(-1)
 		e.wg.Done()
 	}()
 
@@ -2933,7 +2979,7 @@ func (e *Engine) worker(id int) {
 			var err error
 			var successfulMethod string
 			var rawRequest []byte
-			var authFinding *authMatrixFinding
+			var authFinding *AuthMatrixFinding
 			var bodyContent string
 			var timingMedian time.Duration
 			var timingOracleHit bool
@@ -3110,6 +3156,7 @@ func (e *Engine) worker(id int) {
 					if wafRes.Detected {
 						detectedWAFVendor = wafRes.Vendor
 					}
+					e.setWAFState(wafRes.Detected, detectedWAFVendor)
 
 					evasionLimit := snap.EvasionLimit
 					if evasionLimit < 1 {
@@ -3225,6 +3272,7 @@ func (e *Engine) worker(id int) {
 						Headers:      map[string]string{"Msg": fmt.Sprintf("Auto-filtered repetitive size: %d", bodySize)},
 						IsAutoFilter: true,
 					}:
+						e.resultsCollected.Add(1)
 					default:
 					}
 				}
@@ -3357,16 +3405,16 @@ func (e *Engine) worker(id int) {
 				if result.Headers == nil {
 					result.Headers = make(map[string]string)
 				}
-				result.Labels = append(result.Labels, authFinding.labels...)
-				if authFinding.confidence != "" {
+				result.Labels = append(result.Labels, authFinding.Labels...)
+				if authFinding.Confidence != "" {
 					if result.Confidence == "" {
-						result.Confidence = authFinding.confidence
+						result.Confidence = authFinding.Confidence
 					} else {
-						result.Confidence = result.Confidence + ";" + authFinding.confidence
+						result.Confidence = result.Confidence + ";" + authFinding.Confidence
 					}
 				}
-				if authFinding.summary != "" {
-					result.Headers["Auth-Matrix"] = authFinding.summary
+				if authFinding.Summary != "" {
+					result.Headers["Auth-Matrix"] = authFinding.Summary
 				}
 			}
 
@@ -3620,9 +3668,12 @@ func (e *Engine) Wait() {
 	e.activeJobs.Wait()
 }
 
-// Shutdown requests a graceful stop and closes the Results channel.
+// Shutdown requests a graceful stop and closes the result/log channels.
+//
+// It is safe to call multiple times; only the first call performs teardown.
 func (e *Engine) Shutdown() {
 	e.shutdownOnce.Do(func() {
+		e.isRunning.Store(false)
 		// Signal scanners to stop producing new jobs.
 		if sc := e.scannerCtx.Load(); sc != nil && sc.cancel != nil {
 			sc.cancel()

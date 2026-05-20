@@ -1,11 +1,14 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"math/rand/v2"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 const evasionRankingFloor = 5
@@ -44,7 +47,7 @@ func (s *EvasionScoreboard) Record(technique string, bypassed bool) {
 	}
 }
 
-func (s *EvasionScoreboard) snapshot() map[string]EvasionScoreboardRow {
+func (s *EvasionScoreboard) Snapshot() map[string]EvasionScoreboardRow {
 	out := make(map[string]EvasionScoreboardRow)
 	if s == nil {
 		return out
@@ -76,7 +79,7 @@ func (s *EvasionScoreboard) snapshot() map[string]EvasionScoreboardRow {
 }
 
 func (s *EvasionScoreboard) Summary() []EvasionScoreboardRow {
-	rows := s.snapshot()
+	rows := s.Snapshot()
 	if len(rows) == 0 {
 		return nil
 	}
@@ -96,13 +99,30 @@ func (s *EvasionScoreboard) Summary() []EvasionScoreboardRow {
 	return out
 }
 
+// TopTechniques returns up to n techniques sorted by highest bypass rate.
+func (s *EvasionScoreboard) TopTechniques(n int) []EvasionScoreboardRow {
+	if s == nil || n <= 0 {
+		return nil
+	}
+	rows := s.Summary()
+	if len(rows) == 0 {
+		return nil
+	}
+	if n > len(rows) {
+		n = len(rows)
+	}
+	out := make([]EvasionScoreboardRow, n)
+	copy(out, rows[:n])
+	return out
+}
+
 func (s *EvasionScoreboard) RankedTechniques(vendor string) []EvasionTechnique {
 	base := EvasionStrategiesFor(vendor)
 	if len(base) == 0 || s == nil {
 		return base
 	}
 
-	rows := s.snapshot()
+	rows := s.Snapshot()
 	totalAttempts := 0
 	for _, row := range rows {
 		totalAttempts += row.Attempts
@@ -190,6 +210,160 @@ func (e *Engine) EvasionSummaryRows() []EvasionScoreboardRow {
 		return nil
 	}
 	return e.EvasionScoreboard.Summary()
+}
+
+func (e *Engine) setWAFState(detected bool, vendor string) {
+	if e == nil {
+		return
+	}
+	e.wafStateMu.Lock()
+	e.wafDetected = detected
+	e.wafVendorGuess = strings.TrimSpace(vendor)
+	e.wafStateMu.Unlock()
+}
+
+func (e *Engine) wafState() (bool, string) {
+	if e == nil {
+		return false, ""
+	}
+	e.wafStateMu.RLock()
+	defer e.wafStateMu.RUnlock()
+	return e.wafDetected, e.wafVendorGuess
+}
+
+type WAFProbeAttempt struct {
+	Technique   string   `json:"technique"`
+	Path        string   `json:"path"`
+	StatusCode  int      `json:"status_code"`
+	SizeBytes   int      `json:"size_bytes"`
+	ContentType string   `json:"content_type,omitempty"`
+	Bypassed    bool     `json:"bypassed"`
+	Labels      []string `json:"labels,omitempty"`
+}
+
+type WAFProbeReport struct {
+	Target             string                 `json:"target"`
+	Path               string                 `json:"path"`
+	Method             string                 `json:"method"`
+	Vendor             string                 `json:"vendor"`
+	Detected           bool                   `json:"detected"`
+	Confidence         string                 `json:"confidence,omitempty"`
+	Evidence           []string               `json:"evidence,omitempty"`
+	BaselineStatusCode int                    `json:"baseline_status_code"`
+	BaselineSizeBytes  int                    `json:"baseline_size_bytes"`
+	Attempts           []WAFProbeAttempt      `json:"attempts"`
+	Scoreboard         []EvasionScoreboardRow `json:"scoreboard,omitempty"`
+}
+
+func (e *Engine) ProbeWAF(ctx context.Context, targetURL, rawPath, method string, headers map[string]string, timeout time.Duration, proxyAddr string) (WAFProbeReport, error) {
+	report := WAFProbeReport{
+		Target: targetURL,
+		Path:   rawPath,
+		Method: method,
+	}
+	if method == "" {
+		method = "GET"
+		report.Method = method
+	}
+	if e == nil {
+		return report, fmt.Errorf("engine is nil")
+	}
+	if targetURL == "" {
+		return report, fmt.Errorf("targetURL is required")
+	}
+
+	if strings.HasPrefix(rawPath, "http://") || strings.HasPrefix(rawPath, "https://") {
+		targetURL = rawPath
+	}
+	parsed, err := url.Parse(targetURL)
+	if err != nil {
+		return report, err
+	}
+	reqPath := rawPath
+	if strings.HasPrefix(reqPath, "http://") || strings.HasPrefix(reqPath, "https://") {
+		parsedPath, err := url.Parse(reqPath)
+		if err != nil {
+			return report, err
+		}
+		if parsedPath.Path != "" {
+			reqPath = parsedPath.Path
+		}
+		if parsedPath.RawQuery != "" {
+			reqPath += "?" + parsedPath.RawQuery
+		}
+	}
+	if reqPath == "" {
+		reqPath = "/"
+	}
+	if !strings.HasPrefix(reqPath, "/") {
+		reqPath = "/" + reqPath
+	}
+
+	snap := e.configSnap.Load()
+	ua := "DirFuzz/2.0"
+	headersTemplate := ""
+	if snap != nil {
+		if snap.UserAgent != "" {
+			ua = snap.UserAgent
+		}
+		headersTemplate = snap.HeadersTemplate
+	}
+	if timeout <= 0 {
+		timeout = DefaultHTTPTimeout
+	}
+
+	baseHeaders := cloneHeadersMap(headers)
+	basePath := reqPath
+	rawRequest := buildRequest(method, basePath, parsed.Host, ua, headersTemplate, "")
+	resp, err := e.executeRequestWithRetry(ctx, parsed.String(), rawRequest, timeout, proxyAddr)
+	if err != nil {
+		return report, err
+	}
+
+	report.BaselineStatusCode = resp.StatusCode
+	report.BaselineSizeBytes = len(resp.Body)
+	waf := FingerprintWAF(resp.Body, resp.Headers, resp.StatusCode, int64(resp.Duration/time.Millisecond))
+	report.Vendor = waf.Vendor
+	report.Detected = waf.Detected
+	report.Confidence = waf.Confidence
+	report.Evidence = append([]string(nil), waf.Evidence...)
+	e.setWAFState(waf.Detected, waf.Vendor)
+
+	techniques := EvasionStrategiesFor(report.Vendor)
+	if len(techniques) == 0 {
+		techniques = EvasionStrategiesFor("")
+	}
+
+	for _, tech := range techniques {
+		modPath, modHeaders := tech.ModifyRequest(reqPath, baseHeaders, method)
+		if modPath == "" {
+			modPath = reqPath
+		}
+		if modHeaders == nil {
+			modHeaders = cloneHeadersMap(baseHeaders)
+		}
+		rawReq := buildRequest(method, modPath, parsed.Host, ua, renderHeaderBlock(modHeaders), "")
+		attemptResp, attemptErr := e.executeRequestWithRetry(ctx, parsed.String(), rawReq, timeout, proxyAddr)
+		attempt := WAFProbeAttempt{
+			Technique: tech.Name,
+			Path:      modPath,
+		}
+		if attemptErr != nil || attemptResp == nil {
+			attempt.Labels = []string{"error"}
+			report.Attempts = append(report.Attempts, attempt)
+			continue
+		}
+		attempt.StatusCode = attemptResp.StatusCode
+		attempt.SizeBytes = len(attemptResp.Body)
+		attempt.ContentType = responseContentType(attemptResp)
+		attempt.Bypassed = attemptResp.StatusCode != report.BaselineStatusCode && attemptResp.StatusCode != 403
+		if e.EvasionScoreboard != nil {
+			e.EvasionScoreboard.Record(tech.Name, attempt.Bypassed)
+		}
+		report.Attempts = append(report.Attempts, attempt)
+	}
+	report.Scoreboard = e.EvasionSummaryRows()
+	return report, nil
 }
 
 // WAFResult holds the result of WAF fingerprinting.

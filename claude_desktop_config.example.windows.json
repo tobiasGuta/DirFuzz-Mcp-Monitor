@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "dirfuzz": {
+      "command": "D:\\projects\\DirFuzzV3\\dirfuzz-mcp.exe",
+      "env": {
+        "DIRFUZZ_WORDLIST_DIR": "D:\\projects\\DirFuzzV3\\wordlists",
+        "DIRFUZZ_SCOPE_DIR": "D:\\projects\\H1-Scope-Watcher\\definitions",
+        "DIRFUZZ_OUTPUT_DIR": "D:\\projects\\DirFuzzV3\\results",
+        "DIRFUZZ_MAX_RESULTS": "200"
+      }
+    }
+  }
+}

@@ -220,6 +220,7 @@ func (e *Engine) executeRequestOnce(ctx context.Context, targetURL string, rawRe
 	if h2Mode && e.H2Client != nil {
 		return e.executeH2RequestWithRetry(ctx, targetURL, rawRequest, timeout)
 	}
+	e.requestsDispatched.Add(1)
 	return httpclient.SendRawRequestWithContext(ctx, targetURL, rawRequest, timeout, proxyAddr, insecure)
 }
 

@@ -44,6 +44,7 @@ func parseFlags() cliConfig {
 	follow := flag.Bool("follow", false, "Follow HTTP redirects")
 	maxRedirects := flag.Int("max-redirects", engine.DefaultMaxRedirects, "Maximum redirects to follow")
 	timeout := flag.Duration("timeout", engine.DefaultHTTPTimeout, "Per-request timeout  (e.g. 5s)")
+	maxDuration := flag.Duration("max-duration", engine.DefaultMaxScanDuration, "Maximum total scan duration before shutdown (e.g. 60s)")
 	insecure := flag.Bool("k", false, "Skip TLS certificate verification")
 
 	// ── Matching / filtering ─────────────────────────────────────────────────
@@ -174,9 +175,10 @@ func parseFlags() cliConfig {
 		Wordlist: *wordlist,
 		Profile:  *profile,
 
-		Threads: *threads,
-		Delay:   *delay,
-		RPS:     *rps,
+		Threads:     *threads,
+		Delay:       *delay,
+		RPS:         *rps,
+		MaxDuration: *maxDuration,
 
 		UserAgent:    *ua,
 		Headers:      []string(headers),

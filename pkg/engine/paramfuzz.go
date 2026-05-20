@@ -25,16 +25,39 @@ type paramBaseline struct {
 	hash       uint64
 }
 
-type paramHit struct {
-	params      []string
-	probeURL    string
-	statusCode  int
-	size        int
-	words       int
-	lines       int
-	contentType string
-	duration    time.Duration
-	headers     map[string]string
+// ParamHit captures a hidden-parameter discovery result.
+type ParamHit struct {
+	Params      []string          `json:"params"`
+	ProbeURL    string            `json:"probe_url"`
+	StatusCode  int               `json:"status_code"`
+	Size        int               `json:"size"`
+	Words       int               `json:"words"`
+	Lines       int               `json:"lines"`
+	ContentType string            `json:"content_type,omitempty"`
+	Duration    time.Duration     `json:"duration,omitempty"`
+	Headers     map[string]string `json:"headers,omitempty"`
+}
+
+type ParamProbeFinding struct {
+	Params      []string          `json:"params"`
+	ProbeURL    string            `json:"probe_url"`
+	StatusCode  int               `json:"status_code"`
+	SizeBytes   int               `json:"size_bytes"`
+	Words       int               `json:"words"`
+	Lines       int               `json:"lines"`
+	ContentType string            `json:"content_type,omitempty"`
+	DurationMS  int64             `json:"duration_ms"`
+	Headers     map[string]string `json:"headers,omitempty"`
+}
+
+type ParamProbeReport struct {
+	Target             string              `json:"target"`
+	Path               string              `json:"path"`
+	Method             string              `json:"method"`
+	BaselineStatusCode int                 `json:"baseline_status_code"`
+	BaselineSizeBytes  int                 `json:"baseline_size_bytes"`
+	BaselineHash       uint64              `json:"baseline_hash"`
+	Findings           []ParamProbeFinding `json:"findings"`
 }
 
 const paramChunkSize = 50
@@ -224,15 +247,80 @@ func (e *Engine) runParamTask(task ParamTask) {
 		return
 	}
 
+	ctx := context.Background()
+	if sc := e.scannerCtx.Load(); sc != nil && sc.ctx != nil {
+		ctx = sc.ctx
+	}
+
+	hits, err := e.FuzzParams(ctx, task, nil)
+	if err != nil || len(hits) == 0 {
+		return
+	}
+
+	if len(hits) == 0 {
+		return
+	}
+
+	for _, hit := range hits {
+		if len(hit.Params) == 0 {
+			continue
+		}
+		msg := fmt.Sprintf("hidden parameters discovered: %s", strings.Join(hit.Params, ","))
+		res := Result{
+			Path:             hit.ProbeURL,
+			Method:           "GET",
+			StatusCode:       hit.StatusCode,
+			Size:             hit.Size,
+			Words:            hit.Words,
+			Lines:            hit.Lines,
+			ContentType:      hit.ContentType,
+			Duration:         hit.Duration,
+			URL:              hit.ProbeURL,
+			Headers:          map[string]string{"Msg": msg},
+			Labels:           []string{"PARAM-FUZZ"},
+			DiscoveredParams: append([]string(nil), hit.Params...),
+		}
+		if len(hit.Params) == 1 {
+			res.Confidence = "single-param"
+		} else {
+			res.Confidence = fmt.Sprintf("%d params", len(hit.Params))
+		}
+		if len(hit.Headers) > 0 {
+			res.Headers = hit.Headers
+			res.Headers["Msg"] = msg
+		}
+		e.handleResultNonBlocking(res)
+	}
+}
+
+// FuzzParams runs hidden-parameter discovery against task.URL using either a
+// caller-provided wordlist or the built-in defaults.
+func (e *Engine) FuzzParams(ctx context.Context, task ParamTask, customWordlist []string) ([]ParamHit, error) {
+	if e == nil {
+		return nil, fmt.Errorf("engine is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if task.URL == "" {
+		return nil, fmt.Errorf("task.URL is required")
+	}
+	if task.Method == "" {
+		task.Method = "GET"
+	}
+
 	snap := e.configSnap.Load()
 	if snap == nil {
 		e.buildAndStoreConfigSnapshot()
 		snap = e.configSnap.Load()
 	}
 
-	candidates := uniqueStrings(defaultParamWordlist)
+	candidates := uniqueStrings(customWordlist)
 	if len(candidates) == 0 {
-		return
+		candidates = uniqueStrings(defaultParamWordlist)
+	}
+	if len(candidates) == 0 {
+		return nil, nil
 	}
 
 	baseline := paramBaseline{
@@ -240,47 +328,49 @@ func (e *Engine) runParamTask(task ParamTask) {
 		size:       task.BaselineSize,
 		hash:       task.BaselineHash,
 	}
-
-	ctx := context.Background()
-	if sc := e.scannerCtx.Load(); sc != nil && sc.ctx != nil {
-		ctx = sc.ctx
+	if baseline.statusCode == 0 && baseline.size == 0 && baseline.hash == 0 {
+		parsed, err := url.Parse(task.URL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid param fuzz target URL: %w", err)
+		}
+		reqPath := parsed.EscapedPath()
+		if reqPath == "" {
+			reqPath = "/"
+		}
+		if parsed.RawQuery != "" {
+			reqPath += "?" + parsed.RawQuery
+		}
+		ua := "DirFuzz/2.0"
+		headersTemplate := ""
+		timeout := DefaultHTTPTimeout
+		proxyOut := ""
+		if snap != nil {
+			if snap.UserAgent != "" {
+				ua = snap.UserAgent
+			}
+			headersTemplate = snap.HeadersTemplate
+			if snap.Timeout > 0 {
+				timeout = snap.Timeout
+			}
+			proxyOut = snap.ProxyOut
+		}
+		rawReq := buildRequest(task.Method, reqPath, parsed.Host, ua, headersTemplate, "")
+		resp, err := e.executeRequestWithRetry(ctx, parsed.String(), rawReq, timeout, proxyOut)
+		if err != nil || resp == nil {
+			return nil, err
+		}
+		bodySize, _, _, _, bodyHash := computeResponseMetrics(resp, task.Method)
+		baseline = paramBaseline{
+			statusCode: resp.StatusCode,
+			size:       bodySize,
+			hash:       bodyHash,
+		}
+		task.BaselineStatusCode = resp.StatusCode
+		task.BaselineSize = bodySize
+		task.BaselineHash = bodyHash
 	}
 
-	hits := e.discoverParamHits(ctx, task, candidates, baseline, snap)
-	if len(hits) == 0 {
-		return
-	}
-
-	for _, hit := range hits {
-		if len(hit.params) == 0 {
-			continue
-		}
-		msg := fmt.Sprintf("hidden parameters discovered: %s", strings.Join(hit.params, ","))
-		res := Result{
-			Path:             hit.probeURL,
-			Method:           "GET",
-			StatusCode:       hit.statusCode,
-			Size:             hit.size,
-			Words:            hit.words,
-			Lines:            hit.lines,
-			ContentType:      hit.contentType,
-			Duration:         hit.duration,
-			URL:              hit.probeURL,
-			Headers:          map[string]string{"Msg": msg},
-			Labels:           []string{"PARAM-FUZZ"},
-			DiscoveredParams: append([]string(nil), hit.params...),
-		}
-		if len(hit.params) == 1 {
-			res.Confidence = "single-param"
-		} else {
-			res.Confidence = fmt.Sprintf("%d params", len(hit.params))
-		}
-		if len(hit.headers) > 0 {
-			res.Headers = hit.headers
-			res.Headers["Msg"] = msg
-		}
-		e.handleResultNonBlocking(res)
-	}
+	return e.discoverParamHits(ctx, task, candidates, baseline, snap), nil
 }
 
 func (e *Engine) discoverParamHits(
@@ -289,12 +379,12 @@ func (e *Engine) discoverParamHits(
 	candidates []string,
 	baseline paramBaseline,
 	snap *configSnapshot,
-) []paramHit {
+) []ParamHit {
 	if len(candidates) == 0 {
 		return nil
 	}
 	if len(candidates) > paramChunkSize {
-		var hits []paramHit
+		var hits []ParamHit
 		for start := 0; start < len(candidates); start += paramChunkSize {
 			end := start + paramChunkSize
 			if end > len(candidates) {
@@ -311,8 +401,8 @@ func (e *Engine) discoverParamHits(
 	}
 
 	if len(candidates) == 1 {
-		hit.params = append([]string(nil), candidates...)
-		return []paramHit{hit}
+		hit.Params = append([]string(nil), candidates...)
+		return []ParamHit{hit}
 	}
 
 	mid := len(candidates) / 2
@@ -327,14 +417,14 @@ func (e *Engine) probeParamSubset(
 	params []string,
 	baseline paramBaseline,
 	snap *configSnapshot,
-) (paramHit, bool, error) {
+) (ParamHit, bool, error) {
 	if len(params) == 0 {
-		return paramHit{}, false, nil
+		return ParamHit{}, false, nil
 	}
 
 	probeURL, rawReq, err := buildParamProbeRequest(task.URL, params, snap)
 	if err != nil {
-		return paramHit{}, false, err
+		return ParamHit{}, false, err
 	}
 
 	timeout := DefaultHTTPTimeout
@@ -348,24 +438,24 @@ func (e *Engine) probeParamSubset(
 
 	resp, err := e.executeRequestWithRetry(ctx, probeURL, rawReq, timeout, proxyOut)
 	if err != nil || resp == nil {
-		return paramHit{}, false, err
+		return ParamHit{}, false, err
 	}
 
 	bodySize, wordCount, lineCount, contentType, bodyHash := computeResponseMetrics(resp, "GET")
 	if !responseDiffersFromBaseline(baseline, resp.StatusCode, bodySize, bodyHash) {
-		return paramHit{}, false, nil
+		return ParamHit{}, false, nil
 	}
 
-	return paramHit{
-		params:      append([]string(nil), params...),
-		probeURL:    probeURL,
-		statusCode:  resp.StatusCode,
-		size:        bodySize,
-		words:       wordCount,
-		lines:       lineCount,
-		contentType: contentType,
-		duration:    resp.Duration,
-		headers:     captureParamHeaders(resp.Headers),
+	return ParamHit{
+		Params:      append([]string(nil), params...),
+		ProbeURL:    probeURL,
+		StatusCode:  resp.StatusCode,
+		Size:        bodySize,
+		Words:       wordCount,
+		Lines:       lineCount,
+		ContentType: contentType,
+		Duration:    resp.Duration,
+		Headers:     captureParamHeaders(resp.Headers),
 	}, true, nil
 }
 
@@ -444,6 +534,111 @@ func captureParamHeaders(rawHeaders string) map[string]string {
 		return nil
 	}
 	return headers
+}
+
+func (e *Engine) ProbeHiddenParams(ctx context.Context, targetURL, rawPath, method string, headers map[string]string) (ParamProbeReport, error) {
+	report := ParamProbeReport{Target: targetURL, Path: rawPath, Method: method}
+	if e == nil {
+		return report, fmt.Errorf("engine is nil")
+	}
+	if targetURL == "" {
+		return report, fmt.Errorf("targetURL is required")
+	}
+	if method == "" {
+		method = "GET"
+		report.Method = method
+	}
+
+	taskURL := targetURL
+	if rawPath != "" {
+		if strings.HasPrefix(rawPath, "http://") || strings.HasPrefix(rawPath, "https://") {
+			taskURL = rawPath
+		} else {
+			taskURL = strings.TrimRight(targetURL, "/") + "/" + strings.TrimLeft(rawPath, "/")
+		}
+	}
+	snap := e.configSnap.Load()
+	if snap == nil {
+		e.buildAndStoreConfigSnapshot()
+		snap = e.configSnap.Load()
+	}
+
+	parsed, err := url.Parse(taskURL)
+	if err != nil {
+		return report, err
+	}
+	if strings.HasPrefix(rawPath, "http://") || strings.HasPrefix(rawPath, "https://") {
+		if parsed.Path != "" {
+			report.Path = parsed.Path
+		}
+		if parsed.RawQuery != "" {
+			report.Path += "?" + parsed.RawQuery
+		}
+	}
+	ua := "DirFuzz/2.0"
+	headersTemplate := ""
+	timeout := DefaultHTTPTimeout
+	proxyOut := ""
+	if snap != nil {
+		if snap.UserAgent != "" {
+			ua = snap.UserAgent
+		}
+		headersTemplate = snap.HeadersTemplate
+		if snap.Timeout > 0 {
+			timeout = snap.Timeout
+		}
+		proxyOut = snap.ProxyOut
+	}
+	if len(headers) > 0 {
+		headersTemplate += renderHeaderBlock(headers)
+	}
+
+	reqPath := parsed.EscapedPath()
+	if reqPath == "" {
+		reqPath = "/"
+	}
+	if parsed.RawQuery != "" {
+		reqPath += "?" + parsed.RawQuery
+	}
+
+	rawReq := buildRequest(method, reqPath, parsed.Host, ua, headersTemplate, "")
+	resp, err := e.executeRequestWithRetry(ctx, parsed.String(), rawReq, timeout, proxyOut)
+	if err != nil || resp == nil {
+		return report, err
+	}
+	bodySize, _, _, _, bodyHash := computeResponseMetrics(resp, method)
+	report.BaselineStatusCode = resp.StatusCode
+	report.BaselineSizeBytes = bodySize
+	report.BaselineHash = bodyHash
+
+	task := ParamTask{
+		URL:                parsed.String(),
+		Method:             method,
+		BaselineHash:       bodyHash,
+		BaselineStatusCode: resp.StatusCode,
+		BaselineSize:       bodySize,
+	}
+	baseline := paramBaseline{
+		statusCode: resp.StatusCode,
+		size:       bodySize,
+		hash:       bodyHash,
+	}
+	candidates := uniqueStrings(defaultParamWordlist)
+	hits := e.discoverParamHits(ctx, task, candidates, baseline, snap)
+	for _, hit := range hits {
+		report.Findings = append(report.Findings, ParamProbeFinding{
+			Params:      append([]string(nil), hit.Params...),
+			ProbeURL:    hit.ProbeURL,
+			StatusCode:  hit.StatusCode,
+			SizeBytes:   hit.Size,
+			Words:       hit.Words,
+			Lines:       hit.Lines,
+			ContentType: hit.ContentType,
+			DurationMS:  hit.Duration.Milliseconds(),
+			Headers:     hit.Headers,
+		})
+	}
+	return report, nil
 }
 
 func uniqueStrings(values []string) []string {

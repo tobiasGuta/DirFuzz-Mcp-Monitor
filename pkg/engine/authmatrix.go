@@ -26,11 +26,36 @@ type authMatrixRoleResponse struct {
 	err        error
 }
 
-type authMatrixFinding struct {
-	labels     []string
-	confidence string
-	summary    string
-	role       string
+// AuthMatrixFinding captures an authorization mismatch discovered during
+// replay across roles.
+type AuthMatrixFinding struct {
+	Labels     []string `json:"labels,omitempty"`
+	Confidence string   `json:"confidence,omitempty"`
+	Summary    string   `json:"summary,omitempty"`
+	Role       string   `json:"role,omitempty"`
+}
+
+type AuthReplayResponse struct {
+	Role        string `json:"role"`
+	Level       int    `json:"level"`
+	StatusCode  int    `json:"status_code"`
+	SizeBytes   int    `json:"size_bytes"`
+	ContentType string `json:"content_type,omitempty"`
+	DurationMS  int64  `json:"duration_ms"`
+	Error       string `json:"error,omitempty"`
+}
+
+type AuthPathReport struct {
+	Path         string               `json:"path"`
+	Method       string               `json:"method"`
+	SelectedRole string               `json:"selected_role,omitempty"`
+	Finding      *AuthMatrixFinding   `json:"finding,omitempty"`
+	Responses    []AuthReplayResponse `json:"responses"`
+}
+
+type AuthMatrixReport struct {
+	Target string           `json:"target"`
+	Paths  []AuthPathReport `json:"paths"`
 }
 
 func (e *Engine) executeAuthMatrixRequests(
@@ -40,7 +65,7 @@ func (e *Engine) executeAuthMatrixRequests(
 	timeout time.Duration,
 	proxyAddr string,
 	authMatrix map[string][]string,
-) (*httpclient.RawResponse, []byte, string, *authMatrixFinding, error) {
+) (*httpclient.RawResponse, []byte, string, *AuthMatrixFinding, error) {
 	roles := normalizeAuthRoles(authMatrix)
 	if len(roles) == 0 {
 		return nil, nil, "", nil, nil
@@ -166,7 +191,7 @@ func renderHeaderBlock(headers map[string]string) string {
 	return b.String()
 }
 
-func evaluateAuthMatrixResponses(path string, responses []authMatrixRoleResponse) (authMatrixRoleResponse, *authMatrixFinding) {
+func evaluateAuthMatrixResponses(path string, responses []authMatrixRoleResponse) (authMatrixRoleResponse, *AuthMatrixFinding) {
 	sort.SliceStable(responses, func(i, j int) bool {
 		if responses[i].level != responses[j].level {
 			return responses[i].level < responses[j].level
@@ -195,20 +220,20 @@ func evaluateAuthMatrixResponses(path string, responses []authMatrixRoleResponse
 	if userRole.resp != nil && adminRole.resp != nil {
 		if userRole.resp.StatusCode == 403 && adminRole.resp.StatusCode == 200 {
 			selected = *adminRole
-			return selected, &authMatrixFinding{
-				labels:     []string{"AUTH-MATRIX", "BAC", "PRIVILEGE-ESCALATION"},
-				confidence: fmt.Sprintf("%s=403;%s=200", userRole.role, adminRole.role),
-				summary:    summary,
-				role:       adminRole.role,
+			return selected, &AuthMatrixFinding{
+				Labels:     []string{"AUTH-MATRIX", "BAC", "PRIVILEGE-ESCALATION"},
+				Confidence: fmt.Sprintf("%s=403;%s=200", userRole.role, adminRole.role),
+				Summary:    summary,
+				Role:       adminRole.role,
 			}
 		}
 		if adminishPath && sameAuthResponse(userRole.resp, adminRole.resp) {
 			selected = *adminRole
-			return selected, &authMatrixFinding{
-				labels:     []string{"AUTH-MATRIX", "IDOR", "BAC"},
-				confidence: fmt.Sprintf("simhash-match:%s=%s", userRole.role, adminRole.role),
-				summary:    summary,
-				role:       adminRole.role,
+			return selected, &AuthMatrixFinding{
+				Labels:     []string{"AUTH-MATRIX", "IDOR", "BAC"},
+				Confidence: fmt.Sprintf("simhash-match:%s=%s", userRole.role, adminRole.role),
+				Summary:    summary,
+				Role:       adminRole.role,
 			}
 		}
 	}
@@ -276,4 +301,159 @@ func isAdminishPath(path string) bool {
 		}
 	}
 	return false
+}
+
+func responseContentType(resp *httpclient.RawResponse) string {
+	if resp == nil {
+		return ""
+	}
+	if resp.HeaderMap != nil {
+		if v := strings.TrimSpace(resp.HeaderMap["Content-Type"]); v != "" {
+			return v
+		}
+	}
+	headers := strings.ReplaceAll(strings.ReplaceAll(resp.Headers, "\r\n", "\n"), "\r", "\n")
+	for _, line := range strings.Split(headers, "\n") {
+		if idx := strings.Index(line, ":"); idx != -1 && strings.EqualFold(strings.TrimSpace(line[:idx]), "Content-Type") {
+			return strings.TrimSpace(line[idx+1:])
+		}
+	}
+	return ""
+}
+
+func (e *Engine) testAuthMatrixReport(ctx context.Context, targetURL string, paths []string, authMatrix map[string][]string, baseHeaders map[string]string, timeout time.Duration, proxyAddr string) (AuthMatrixReport, error) {
+	report := AuthMatrixReport{Target: targetURL}
+	if e == nil {
+		return report, fmt.Errorf("engine is nil")
+	}
+	if targetURL == "" {
+		return report, fmt.Errorf("targetURL is required")
+	}
+	roles := normalizeAuthRoles(authMatrix)
+	if len(roles) == 0 {
+		return report, fmt.Errorf("auth_matrix is empty")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if timeout <= 0 {
+		timeout = DefaultHTTPTimeout
+	}
+
+	snap := e.configSnap.Load()
+	ua := "DirFuzz/2.0"
+	headersTemplate := ""
+	if snap != nil {
+		if snap.UserAgent != "" {
+			ua = snap.UserAgent
+		}
+		headersTemplate = snap.HeadersTemplate
+	}
+	if len(baseHeaders) > 0 {
+		headersTemplate += renderHeaderBlock(baseHeaders)
+	}
+
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		parsedTargetURL := targetURL
+		if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+			parsedTargetURL = path
+		}
+		parsedTarget, err := url.Parse(parsedTargetURL)
+		if err != nil {
+			return report, err
+		}
+		reqPath := path
+		if strings.HasPrefix(reqPath, "http://") || strings.HasPrefix(reqPath, "https://") {
+			reqPath = parsedTarget.Path
+			if reqPath == "" {
+				reqPath = "/"
+			}
+			if parsedTarget.RawQuery != "" {
+				reqPath += "?" + parsedTarget.RawQuery
+			}
+		} else {
+			if !strings.HasPrefix(reqPath, "/") {
+				reqPath = "/" + reqPath
+			}
+			if parsedTarget.Path != "" && parsedTarget.Path != "/" {
+				reqPath = strings.TrimRight(parsedTarget.Path, "/") + reqPath
+			}
+		}
+
+		responses := make([]authMatrixRoleResponse, len(roles))
+		var wg sync.WaitGroup
+		for i, role := range roles {
+			wg.Add(1)
+			go func(i int, role authMatrixRole) {
+				defer wg.Done()
+				roleHeaders := mergeAuthHeaders(baseHeaders, role.headers)
+				rawReq := buildRequest("GET", reqPath, parsedTarget.Host, ua, headersTemplate+renderHeaderBlock(roleHeaders), "")
+				resp, err := e.executeRequestWithRetry(ctx, parsedTarget.String(), rawReq, timeout, proxyAddr)
+				responses[i] = authMatrixRoleResponse{
+					role:       role.role,
+					level:      role.level,
+					rawRequest: rawReq,
+					resp:       resp,
+					err:        err,
+				}
+			}(i, role)
+		}
+		wg.Wait()
+
+		selected, finding := evaluateAuthMatrixResponses(reqPath, responses)
+		pathReport := AuthPathReport{
+			Path:         reqPath,
+			Method:       "GET",
+			SelectedRole: selected.role,
+			Responses:    make([]AuthReplayResponse, 0, len(responses)),
+		}
+		for _, res := range responses {
+			item := AuthReplayResponse{
+				Role:  res.role,
+				Level: res.level,
+			}
+			if res.err != nil {
+				item.Error = res.err.Error()
+			} else if res.resp != nil {
+				item.StatusCode = res.resp.StatusCode
+				item.SizeBytes = len(res.resp.Body)
+				item.ContentType = responseContentType(res.resp)
+				item.DurationMS = res.resp.Duration.Milliseconds()
+			}
+			pathReport.Responses = append(pathReport.Responses, item)
+		}
+		if finding != nil {
+			pathReport.Finding = finding
+		}
+		report.Paths = append(report.Paths, pathReport)
+	}
+	return report, nil
+}
+
+// TestAuthMatrix replays the provided paths under each auth role and returns
+// only the discovered findings. The engine must already have a configured
+// target via SetTarget so relative paths can be resolved consistently.
+func (e *Engine) TestAuthMatrix(ctx context.Context, paths []string, roles map[string][]string) ([]AuthMatrixFinding, error) {
+	if e == nil {
+		return nil, fmt.Errorf("engine is nil")
+	}
+	baseURL := e.BaseURL()
+	if baseURL == "" {
+		return nil, fmt.Errorf("engine target is not configured")
+	}
+	report, err := e.testAuthMatrixReport(ctx, baseURL, paths, roles, nil, 0, "")
+	if err != nil {
+		return nil, err
+	}
+	findings := make([]AuthMatrixFinding, 0, len(report.Paths))
+	for _, pathReport := range report.Paths {
+		if pathReport.Finding != nil {
+			findings = append(findings, *pathReport.Finding)
+		}
+	}
+	return findings, nil
 }

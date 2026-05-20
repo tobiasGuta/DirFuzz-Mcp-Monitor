@@ -1,5 +1,6 @@
 # DirFuzz Configuration File Example
 # Save as dirfuzz.yaml and use with: dirfuzz -config dirfuzz.yaml
+# This file is for the CLI binary only. The MCP server (dirfuzz-mcp) is configured exclusively via environment variables.
 
 # Target configuration
 target: "https://example.com"

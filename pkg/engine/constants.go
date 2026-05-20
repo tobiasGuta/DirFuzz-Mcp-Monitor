@@ -32,9 +32,10 @@ const (
 
 // ─── HTTP Client ─────────────────────────────────────────────────────────────
 const (
-	DefaultHTTPTimeout = 5 * time.Second
-	DefaultConnTimeout = 3 * time.Second
-	DefaultReadTimeout = 5 * time.Second
+	DefaultHTTPTimeout     = 5 * time.Second
+	DefaultConnTimeout     = 3 * time.Second
+	DefaultReadTimeout     = 5 * time.Second
+	DefaultMaxScanDuration = 60 * time.Second
 )
 
 // ─── Worker Pool ─────────────────────────────────────────────────────────────

@@ -146,11 +146,11 @@ func TestExecuteAuthMatrixRequestsDetectsPrivilegeEscalation(t *testing.T) {
 	if finding == nil {
 		t.Fatal("expected auth-matrix finding")
 	}
-	if !strings.Contains(strings.Join(finding.labels, ","), "BAC") {
-		t.Fatalf("finding labels = %v, want BAC label", finding.labels)
+	if !strings.Contains(strings.Join(finding.Labels, ","), "BAC") {
+		t.Fatalf("finding labels = %v, want BAC label", finding.Labels)
 	}
-	if !strings.Contains(finding.confidence, "user=403") {
-		t.Fatalf("finding confidence = %q, want user=403", finding.confidence)
+	if !strings.Contains(finding.Confidence, "user=403") {
+		t.Fatalf("finding confidence = %q, want user=403", finding.Confidence)
 	}
 }
 
@@ -192,7 +192,7 @@ func TestDiscoverParamHitsBisectsHiddenParameters(t *testing.T) {
 	if len(hits) != 2 {
 		t.Fatalf("discoverParamHits() returned %d hits, want 2", len(hits))
 	}
-	got := []string{hits[0].params[0], hits[1].params[0]}
+	got := []string{hits[0].Params[0], hits[1].Params[0]}
 	want := []string{"debug", "preview"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("discoverParamHits() params = %v, want %v", got, want)

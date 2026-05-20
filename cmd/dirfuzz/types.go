@@ -22,9 +22,10 @@ type cliConfig struct {
 	Profile  string
 
 	// ── Workers / throttle ────────────────────────────────────────────────────
-	Threads int
-	Delay   time.Duration
-	RPS     int
+	Threads     int
+	Delay       time.Duration
+	RPS         int
+	MaxDuration time.Duration
 
 	// ── HTTP behaviour ───────────────────────────────────────────────────────
 	UserAgent    string

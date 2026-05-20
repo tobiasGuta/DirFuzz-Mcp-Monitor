@@ -296,6 +296,10 @@ func run(cfg cliConfig) error {
 	// ── 14. Start engine ──────────────────────────────────────────────────────
 	eng.Start()
 	eng.KickoffScanner(wordlistPath, startLine)
+	if cfg.MaxDuration > 0 {
+		timeoutTimer := time.AfterFunc(cfg.MaxDuration, eng.Shutdown)
+		defer timeoutTimer.Stop()
+	}
 
 	// ── 15. Display mode ──────────────────────────────────────────────────────
 	if cfg.NoTUI {

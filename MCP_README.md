@@ -1,52 +1,370 @@
 # DirFuzz MCP Server
 
-DirFuzz features an embedded **MCP (Model Context Protocol)** server binary (`cmd/mcp`). This server abstracts and exposes two secured tools (`dirfuzz_scan` & `dirfuzz_list_wordlists`) empowering AI assistants (Claude, Copilot) to conduct dynamic directory fuzzing directly from conversational prompts.
+DirFuzz features an embedded **MCP (Model Context Protocol)** server binary (`cmd/mcp`). This server exposes two read-only resources, `dirfuzz://wordlists` and `dirfuzz://scope`, three workflow prompts, and ten tools (`dirfuzz_scan`, `dirfuzz_scan_status`, `dirfuzz_cancel`, `dirfuzz_list_scope`, `dirfuzz_waf_probe`, `dirfuzz_param_fuzz`, `dirfuzz_auth_test`, `dirfuzz_analyze`, `dirfuzz_build_scan`, and `dirfuzz_expand`) so AI assistants (Claude, Copilot) can plan scans with live context before they act.
 
 The MCP server wraps DirFuzz's high-performance engine in an iron-clad vulnerability sandboxing model, strictly validating target definitions and restricting AI path traversal capabilities to secure your environment.
 
 ---
 
-## What makes it Safe?
-To operate with AI systems without causing unintended exploitation risks, the server deploys specific limits:
-- **H1-Style Scope Validation**: All requests submitted to the `dirfuzz_scan` tool must comply with the live validation scopes (read dynamically from JSON definitions spanning `DIRFUZZ_SCOPE_DIR`). Out-of-bounds target coordinates are immediately denied.
-- **SSRF & Network Enforcement**: Limits scanning private/internal IP structures. Internal DNS rebinding protections execute preemptively.
-- **Wordlist Sandboxing**: The `wordlist` properties strictly forbid path traversals (`../`). AI agents can only reference filename nodes available safely within `DIRFUZZ_WORDLIST_DIR`.
-- **Credential Protection mechanisms**: Raw HTTP bodies and configuration headers are truncated or omitted completely (`--save-raw` is disabled internally) to prevent credential exfiltration passing into the AI inference context space.
+## Security Model
+
+The MCP layer is built for authorized use only and applies layered guardrails:
+- **Scope enforcement**: `dirfuzz_scan` reloads the live scope files from `DIRFUZZ_SCOPE_DIR` and blocks any target that does not match an in-scope asset.
+- **Path traversal prevention**: wordlist, results, and scope file paths are resolved inside their allowed directories before any file is read.
+- **Rate limiting**: each tool call is checked against a sliding-window limiter, and scan concurrency is capped by the MCP registry.
+- **Audit logging**: every tool invocation is appended to a JSONL audit log at `DIRFUZZ_AUDIT_LOG` with bearer tokens redacted from header-like arguments.
+- **Output bounding**: scan results are capped by `DIRFUZZ_MAX_RESULTS`, and large follow-on operations are exposed as separate tools so agents can make smaller, deliberate steps.
 
 ---
 
-## Output Restrictions & Bounds
+## Resources
 
-The MCP server responds with a clear ASCII-formatted markdown table summary mapped against hit statuses. By clamping configurations through the `DIRFUZZ_MAX_RESULTS` environment variable, payloads are strictly throttled against LLM memory bounds. If the limits are hit, the tool automatically suggests narrowing search dimensions or re-evaluating wordlist scopes.
+### `dirfuzz://wordlists`
 
-Furthermore, filesystem access permissions remain limited specifically to artifacts housed under `DIRFUZZ_OUTPUT_DIR`.
+Read-only JSON inventory of the `.txt` files in `DIRFUZZ_WORDLIST_DIR`, including line counts and a short semantic description for each entry.
+
+### `dirfuzz://scope`
+
+Read-only JSON snapshot of the currently loaded H1-Scope-Watcher assets, grouped by source file and annotated with summary counts.
 
 ---
 
-## MCP Tools Exposed
+## Prompts
+
+### `recon_workflow`
+
+Structured multi-step planning prompt for a target domain. It walks through scope review, wordlist selection, initial scanning, expansion, and analysis.
+
+### `403_bypass_workflow`
+
+Structured prompt for blocked paths that need a focused retry plan and follow-up analysis.
+
+### `api_surface_mapping`
+
+Structured prompt for REST or JSON API targets that emphasizes API-prefix discovery, expansion, and analysis.
+
+---
+
+## MCP Tools
 
 ### `dirfuzz_scan`
 
-Runs a highly concurrent directory fuzzing scan using DirFuzz's core Engine capabilities.
+Run a directory-fuzzing scan against a scoped target and write the structured results to `DIRFUZZ_OUTPUT_DIR`.
 
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `target` | string | ✓ | Destination boundary URL (must pass scope checks) |
-| `wordlist` | string | | Filename reference contained inside `DIRFUZZ_WORDLIST_DIR` |
-| `threads` | number | | Configurable worker threads. Base: 10 |
-| `match_codes` | string | | Target response indicators (e.g. `200,204,301,403`) |
-| `extensions` | string | | Configurable lookup permutations (`php,html,js`) |
-| `recursive` | boolean | | Expand scans traversing deeper directories dynamically |
-| `max_depth` | number | | Recursion depth threshold boundaries |
-| `timeout_seconds` | number | | Request connection timeout |
-| `match_regex` | string | | Enforce hits strictly upon body regex matching |
-| `filter_regex` | string | | Exclude false positives automatically matching regex bounds |
-| `insecure` | boolean | | Bypasses TLS cert validation definitions |
-| `max_results` | number | | Force override bounding of maximum hits parsed in context |
+Parameters:
+- `target` `string` required: full target URL to fuzz.
+- `wordlist` `string` required: wordlist filename from `DIRFUZZ_WORDLIST_DIR`.
+- `extensions` `string` optional: comma-separated extensions to append to every path.
+- `match_codes` `string` optional: comma-separated HTTP status codes to keep.
+- `methods` `string` optional: comma-separated HTTP methods to try.
+- `body` `string` optional: request body with `{PAYLOAD}` substitution.
+- `headers` `string[]` optional: extra headers as `Key: Value` strings.
+- `rps` `number` optional: global requests-per-second cap.
+- `timeout_seconds` `number` optional: per-request timeout in seconds.
+- `max_duration_seconds` `number` optional: maximum scan runtime in seconds.
 
-### `dirfuzz_list_wordlists`
+### `dirfuzz_scan_status`
 
-Automatically inspects and formats a flat response hierarchy displaying available `.txt` wordlist records situated in the server bounds. Extensively used by AI to recognize dictionary structures dynamically without user probing.
+Return a live status snapshot for a running or completed scan.
+
+Parameters:
+- `scan_id` `string` required: scan identifier returned by `dirfuzz_scan`.
+
+### `dirfuzz_cancel`
+
+Cancel a running scan.
+
+Parameters:
+- `scan_id` `string` required: scan identifier returned by `dirfuzz_scan`.
+
+### `dirfuzz_list_scope`
+
+Return the fully parsed current scope as structured JSON.
+
+Parameters:
+- none.
+
+### `dirfuzz_waf_probe`
+
+Probe a discovered path with WAF evasion techniques and return the evasion scoreboard.
+
+Parameters:
+- `scan_id` `string` required: scan identifier returned by `dirfuzz_scan`.
+- `path` `string` required: discovered path or full URL to probe.
+- `method` `string` optional: HTTP method for probing.
+- `headers` `string[]` optional: extra headers as `Key: Value` strings.
+
+### `dirfuzz_param_fuzz`
+
+Discover hidden GET/POST parameters on a discovered endpoint.
+
+Parameters:
+- `scan_id` `string` required: scan identifier returned by `dirfuzz_scan`.
+- `path` `string` required: discovered endpoint path or full URL.
+- `method` `string` optional: HTTP method for the baseline request.
+- `wordlist` `string[]` optional: custom parameter names to probe instead of the built-in list.
+- `headers` `string[]` optional: extra headers as `Key: Value` strings.
+
+### `dirfuzz_auth_test`
+
+Replay discovered paths across multiple auth token sets to detect access-control mismatches.
+
+Parameters:
+- `scan_id` `string` required: scan identifier returned by `dirfuzz_scan`.
+- `paths` `string[]` required: discovered paths or full URLs to test.
+- `auth_matrix_json` `string` required: JSON object mapping auth roles to arrays of header strings.
+- `headers` `string[]` optional: extra headers as `Key: Value` strings.
+
+### `dirfuzz_analyze`
+
+Analyze a JSONL results file or `scan_id` and classify findings by severity.
+
+Parameters:
+- `results_file` `string` optional: path to a JSONL results file in `DIRFUZZ_OUTPUT_DIR`.
+- `scan_id` `string` optional: scan identifier returned by `dirfuzz_scan`.
+- `target` `string` optional: target URL used for context in the response.
+
+### `dirfuzz_build_scan`
+
+Translate a natural-language scan goal into recommended DirFuzz parameters.
+
+Parameters:
+- `description` `string` required: natural-language scan goal.
+- `target` `string` required: full target URL.
+
+### `dirfuzz_expand`
+
+Recursively expand high-value hits with focused sub-scans.
+
+Parameters:
+- `base_target` `string` required: original base URL.
+- `hits_jsonl` `string` required: JSONL results file to expand from.
+- `max_depth` `number` optional: maximum expansion depth.
+- `max_targets` `number` optional: maximum sub-paths to expand.
+- `wordlist` `string` optional: wordlist path for sub-scans.
+
+---
+
+## Return Values
+
+### `dirfuzz_scan`
+
+Returns a JSON object with this shape:
+```json
+{
+  "target": "https://example.com",
+  "scan_id": "uuid",
+  "started_at": "2026-05-20T12:34:56.000000000Z",
+  "duration_ms": 1234,
+  "total_hits": 12,
+  "capped": false,
+  "results_file": "scan-uuid.jsonl",
+  "scope_warnings": [],
+  "results": [
+    {
+      "url": "https://example.com/admin",
+      "status_code": 200,
+      "method": "GET",
+      "size_bytes": 1234,
+      "content_type": "text/html; charset=utf-8",
+      "severity": "high",
+      "labels": ["status_200"]
+    }
+  ]
+}
+```
+
+### `dirfuzz_scan_status`
+
+Returns a JSON object with this shape:
+```json
+{
+  "scan_id": "uuid",
+  "target": "https://example.com",
+  "started_at": "2026-05-20T12:34:56.000000000Z",
+  "elapsed_ms": 1234,
+  "requests_dispatched": 42,
+  "results_collected": 12,
+  "current_worker_count": 15,
+  "current_rps": 8,
+  "running": true,
+  "canceled": false,
+  "capped": false,
+  "results_file": "scan-uuid.jsonl",
+  "results_path": "/abs/path/to/output/scan-uuid.jsonl",
+  "queue_depth": 18,
+  "waf_detected": true,
+  "waf_vendor_guess": "cloudflare",
+  "waf_evasion_scoreboard": []
+}
+```
+
+### `dirfuzz_cancel`
+
+Returns a JSON object with this shape:
+```json
+{
+  "scan_id": "uuid",
+  "canceled": true,
+  "message": "cancel signal sent"
+}
+```
+
+### `dirfuzz_list_scope`
+
+Returns a JSON object with this shape:
+```json
+{
+  "generated_at": "2026-05-20T12:34:56Z",
+  "directory": "/abs/path/to/scope",
+  "total_files": 3,
+  "total_assets": 42,
+  "warnings": [],
+  "files": [
+    {
+      "file": "program.json",
+      "asset_count": 14,
+      "bounty_eligible": 12,
+      "url_assets": 8,
+      "wildcard_assets": 4,
+      "cidr_assets": 2,
+      "ip_address_assets": 0,
+      "source_code_assets": 0,
+      "executable_assets": 0,
+      "unsupported_assets": 0,
+      "assets": []
+    }
+  ]
+}
+```
+
+### `dirfuzz_waf_probe`
+
+Returns a JSON object shaped like the engine’s WAF probe report:
+```json
+{
+  "target": "https://example.com",
+  "path": "/admin",
+  "method": "GET",
+  "vendor": "cloudflare",
+  "detected": true,
+  "confidence": "high",
+  "evidence": ["cf-ray header or cloudflare body markers"],
+  "baseline_status_code": 403,
+  "baseline_size_bytes": 1234,
+  "attempts": [],
+  "scoreboard": []
+}
+```
+
+### `dirfuzz_param_fuzz`
+
+Returns a JSON object with a `report` field:
+```json
+{
+  "scan_id": "uuid",
+  "report": {
+    "target": "https://example.com/admin",
+    "path": "/admin",
+    "method": "GET",
+    "baseline_status_code": 200,
+    "baseline_size_bytes": 1234,
+    "baseline_hash": 123456789,
+    "findings": [
+      {
+        "params": ["debug"],
+        "probe_url": "https://example.com/admin?debug=a",
+        "status_code": 200,
+        "size_bytes": 1300,
+        "words": 50,
+        "lines": 10,
+        "content_type": "text/html; charset=utf-8",
+        "duration_ms": 123,
+        "headers": {}
+      }
+    ]
+  }
+}
+```
+
+### `dirfuzz_auth_test`
+
+Returns a JSON object with a `findings` array:
+```json
+{
+  "scan_id": "uuid",
+  "findings": [
+    {
+      "labels": ["AUTH-MATRIX", "BAC"],
+      "confidence": "user=403;admin=200",
+      "summary": "unauth=403/123 | user=403/123 | admin=200/456",
+      "role": "admin"
+    }
+  ]
+}
+```
+
+### `dirfuzz_analyze`
+
+Returns a JSON object with this shape:
+```json
+{
+  "target": "https://example.com",
+  "scan_id": "uuid",
+  "results_file": "scan-uuid.jsonl",
+  "total_hits": 12,
+  "findings": {
+    "critical": [],
+    "high": [],
+    "medium": [],
+    "info": []
+  },
+  "recommended_next_steps": []
+}
+```
+
+### `dirfuzz_build_scan`
+
+Returns a JSON object with this shape:
+```json
+{
+  "recommended_params": {
+    "target": "https://example.com",
+    "wordlist": "/abs/path/to/wordlist.txt",
+    "extensions": "php,env,blade.php",
+    "threads": 20,
+    "match_codes": "200,204,301,302,401,403",
+    "recursive": false,
+    "mutate": false,
+    "smart_api": false
+  },
+  "reasoning": "Detected Laravel/PHP target."
+}
+```
+
+### `dirfuzz_expand`
+
+Returns a JSON object with this shape:
+```json
+{
+  "base_target": "https://example.com",
+  "hits_jsonl": "/abs/path/to/output/scan-uuid.jsonl",
+  "wordlist": "common.txt",
+  "max_depth": 2,
+  "max_targets": 10,
+  "expansions": [
+    {
+      "source_path": "/admin",
+      "target": "https://example.com/admin",
+      "score": 12,
+      "wordlist": "common.txt",
+      "result_count": 3,
+      "error": "",
+      "sub_results": []
+    }
+  ]
+}
+```
 
 ---
 
@@ -63,6 +381,8 @@ go build -o dirfuzz-mcp ./cmd/mcp
 
 Before starting, map your sandbox boundaries. **The Server refuses start-up if validation bounds are omitted.**
 
+If `DIRFUZZ_OUTPUT_DIR` is missing, the server now prints a copy-paste Claude Desktop stanza that uses the binary's own path and the currently loaded scope and wordlist roots.
+
 - **Required Variables**:
   - `DIRFUZZ_WORDLIST_DIR` — Dedicated root hierarchy containing fuzzing dictionaries (`.txt`).
   - `DIRFUZZ_SCOPE_DIR` — H1-Scope-Watcher domain definitions mapping in-scope bounding JSON schemas.
@@ -71,14 +391,22 @@ Before starting, map your sandbox boundaries. **The Server refuses start-up if v
 - **Optional Modifications**:
   - `DIRFUZZ_MAX_THREADS` — Positive integer limit of worker concurrency configurations (Default: 15).
   - `DIRFUZZ_MAX_RESULTS` — Artificial ceiling truncating result sets to lower LLM Context overhead (Default: 200).
+  - `DIRFUZZ_MAX_CONCURRENT_SCANS` — Maximum number of concurrent scans the MCP server will allow at once (Default: 5).
+  - `DIRFUZZ_SCAN_RATE_LIMIT` — Maximum `dirfuzz_scan` invocations allowed within the rolling window (Default: 20).
+  - `DIRFUZZ_TOOL_RATE_LIMIT` — Maximum invocations allowed for non-scan tools within the rolling window (Default: 60).
+  - `DIRFUZZ_RATE_LIMIT_WINDOW_SECONDS` — Size of the rolling rate-limit window in seconds (Default: 600).
+  - `DIRFUZZ_AUDIT_LOG` — Path to the JSONL audit log file (Default: `DIRFUZZ_OUTPUT_DIR/dirfuzz-audit.jsonl`).
 
 ```bash
 export DIRFUZZ_WORDLIST_DIR=/srv/dirfuzz/wordlists
 export DIRFUZZ_SCOPE_DIR=/srv/h1-scope-definitions
 export DIRFUZZ_OUTPUT_DIR=/srv/dirfuzz/results
 export DIRFUZZ_MAX_THREADS=25
+export DIRFUZZ_AUDIT_LOG=/srv/dirfuzz/logs/dirfuzz-audit.jsonl
 ./dirfuzz-mcp
 ```
+
+On Windows, either double every backslash in the JSON file or use forward slashes in the paths. A ready-to-paste Windows-specific example is provided in [claude_desktop_config.example.windows.json](D:/projects/DirFuzzV3/claude_desktop_config.example.windows.json).
 
 ---
 
@@ -103,18 +431,22 @@ export DIRFUZZ_MAX_THREADS=25
 ```text
 You: Probe for open hidden directories facing https://testphp.vulnweb.com/ using smaller dictionaries.
 
-Claude: [Executes 'dirfuzz_list_wordlists']
+Claude: [Reads 'dirfuzz://wordlists']
         [Executes 'dirfuzz_scan' -> target: "https://testphp.vulnweb.com/", wordlist: "common.txt"]
 
-DirFuzz scan results for: https://testphp.vulnweb.com/
-Total hits: 14
-
-Status  Method    Size       URL
-------------------------------------------------------------
-200     GET       4821       https://testphp.vulnweb.com/admin
-301     GET       0          https://testphp.vulnweb.com/images
-200     GET       4600       https://testphp.vulnweb.com/login.php
-...
+{
+  "target": "https://testphp.vulnweb.com/",
+  "scan_id": "2fb0a6c4-ff6f-4f6a-8e73-8d1c8e7c1f85",
+  "started_at": "2026-05-20T12:34:56Z",
+  "duration_ms": 1842,
+  "total_hits": 14,
+  "capped": false,
+  "results_file": "scan-2fb0a6c4-ff6f-4f6a-8e73-8d1c8e7c1f85.jsonl",
+  "results": [
+    { "url": "https://testphp.vulnweb.com/admin", "status_code": 200, "method": "GET", "size_bytes": 4821, "severity": "high" },
+    { "url": "https://testphp.vulnweb.com/images", "status_code": 301, "method": "GET", "size_bytes": 0, "severity": "info" }
+  ]
+}
 
 Claude: DirFuzz found 14 accessible directories. Notably an exposed /admin folder and the primary application login node. Let me know if you would like deeper recursive scanning.
 ```
