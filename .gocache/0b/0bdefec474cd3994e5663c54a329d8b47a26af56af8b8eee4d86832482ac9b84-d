@@ -1,7 +1,0 @@
-./flags.go
-./header_audit.go
-./main.go
-./profile.go
-./report.go
-./scan.go
-./types.go

@@ -1,5 +1,0 @@
-./client.go
-./h2client.go
-./http2.go
-./linger_windows.go
-./pool.go
