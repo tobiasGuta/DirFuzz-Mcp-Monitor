@@ -57,6 +57,7 @@ type Config struct {
 	FilterRegex         string
 	Extensions          []string
 	Methods             []string
+	AuthMatrix          map[string][]string
 	SmartAPI            bool
 	Mutate              bool
 	Recursive           bool
@@ -80,6 +81,7 @@ type Config struct {
 	OutputFile          string
 	Timeout             time.Duration
 	Insecure            bool
+	AntiBotFallback     bool
 	AutoFilterThreshold int
 	SimhashThreshold    int
 	SimhashClusterLimit int
@@ -129,6 +131,8 @@ type configSnapshot struct {
 	ProxyOut            string
 	Timeout             time.Duration
 	SaveRaw             bool
+	AntiBotFallback     bool
+	AuthMatrix          map[string][]string
 	Methods             []string
 	SmartAPI            bool
 	Extensions          []string
@@ -191,10 +195,13 @@ type Result struct {
 	URL              string            `json:"url,omitempty"`
 	Request          string            `json:"request,omitempty"`  // only populated when SaveRaw=true
 	Response         string            `json:"response,omitempty"` // only populated when SaveRaw=true
+	RequestBytes     []byte            `json:"-"`
+	ResponseBytes    []byte            `json:"-"`
 	ContentDrift     bool              `json:"content_drift,omitempty"`
 	OldSize          int               `json:"old_size,omitempty"`
 	OldWords         int               `json:"old_words,omitempty"`
 	DriftDeltaBytes  int               `json:"drift_delta_bytes,omitempty"`
+	DiscoveredParams []string          `json:"discovered_params,omitempty"`
 }
 
 // replayTask carries everything needed to replay a hit through an outbound proxy.
@@ -388,6 +395,9 @@ type Engine struct {
 	H2Client    *http.Client
 	h2StreamSem chan struct{}
 
+	// Anti-bot fallback state shared across workers.
+	antiBot *antiBotManager
+
 	// Timing oracle state (calibrated at scan startup when enabled).
 	timingOracle *TimingOracle
 
@@ -420,12 +430,16 @@ type Engine struct {
 
 	// Bounded outbound proxy replay queue + workers
 	replayCh chan replayTask
+	// Bounded hidden-parameter fuzzing queue + workers.
+	paramTaskChan chan ParamTask
+	paramTaskSeen sync.Map
 	// Cached immutable config snapshot read by workers.
 	configSnap atomic.Pointer[configSnapshot]
 	// Cached outbound HTTP clients for proxy replay to avoid creating a new
 	// Transport/Client per replay task (reduces GC pressure and enables
 	// connection/TLS session reuse).
 	replayClients sync.Map // map[string]*http.Client
+	paramFuzzWg   sync.WaitGroup
 	// Ensure Shutdown only runs once to avoid double-closing channels.
 	shutdownOnce       sync.Once
 	changeWordlistLock sync.Mutex
@@ -438,6 +452,10 @@ const (
 	Forbidden403TypeCFAdmin403 = "CF_ADMIN_403"
 	Forbidden403TypeNginx403   = "NGINX_403"
 	Forbidden403TypeGeneric403 = "GENERIC_403"
+)
+
+const (
+	paramTaskQueueSize = 256
 )
 
 // ─── Result helpers ───────────────────────────────────────────────────────────
@@ -462,6 +480,15 @@ func (r Result) String() string {
 	}
 	if r.Duration > 0 {
 		extras += fmt.Sprintf(" [%s]", r.Duration.Round(time.Millisecond))
+	}
+	if len(r.DiscoveredParams) > 0 {
+		extras += fmt.Sprintf(" [Params: %s]", strings.Join(r.DiscoveredParams, ","))
+	}
+	if len(r.Labels) > 0 {
+		extras += fmt.Sprintf(" [Labels: %s]", strings.Join(r.Labels, ","))
+	}
+	if r.Confidence != "" {
+		extras += fmt.Sprintf(" [Conf: %s]", r.Confidence)
 	}
 	methodStr := r.Method
 	if methodStr == "" {
@@ -580,6 +607,7 @@ func NewEngine(numWorkers int, expectedItems uint, falsePositiveRate float64) *E
 			OutputFormat:        DefaultOutputFormat,
 			Timeout:             DefaultHTTPTimeout,
 			Insecure:            false,
+			AntiBotFallback:     true,
 			AllowPrivateTargets: false,
 			AutoFilterThreshold: DefaultAutoFilterThreshold,
 			SimhashThreshold:    DefaultSimhashThreshold,
@@ -590,6 +618,7 @@ func NewEngine(numWorkers int, expectedItems uint, falsePositiveRate float64) *E
 			EvasionLimit:        DefaultEvasionLimit,
 		},
 		Results:           make(chan Result, ResultsChannelSize),
+		antiBot:           newAntiBotManager(),
 		fpCounts:          make(map[string]int),
 		manualFilterSizes: make(map[int]bool),
 		autoFilterSizes:   make(map[int]bool),
@@ -612,6 +641,13 @@ func NewEngine(numWorkers int, expectedItems uint, falsePositiveRate float64) *E
 			}
 		}()
 	}
+
+	paramWorkers := numWorkers / 4
+	if paramWorkers < 1 {
+		paramWorkers = 1
+	}
+	e.paramTaskChan = make(chan ParamTask, paramTaskQueueSize)
+	e.startParamFuzzWorkers(paramWorkers)
 
 	// Initialize worker-facing immutable config snapshot.
 	e.buildAndStoreConfigSnapshot()
@@ -789,6 +825,8 @@ func (e *Engine) buildAndStoreConfigSnapshot() {
 		ProxyOut:            e.Config.ProxyOut,
 		Timeout:             e.Config.Timeout,
 		SaveRaw:             e.Config.SaveRaw,
+		AntiBotFallback:     e.Config.AntiBotFallback,
+		AuthMatrix:          make(map[string][]string, len(e.Config.AuthMatrix)),
 		Methods:             make([]string, len(e.Config.Methods)),
 		SmartAPI:            e.Config.SmartAPI,
 		Extensions:          make([]string, len(e.Config.Extensions)),
@@ -850,6 +888,9 @@ func (e *Engine) buildAndStoreConfigSnapshot() {
 	copy(s.FilterSizeRanges, e.Config.FilterSizeRanges)
 	copy(s.MatchContentTypes, e.Config.MatchContentTypes)
 	copy(s.FilterContentTypes, e.Config.FilterContentTypes)
+	for role, headers := range e.Config.AuthMatrix {
+		s.AuthMatrix[role] = append([]string(nil), headers...)
+	}
 	copy(s.Methods, e.Config.Methods)
 	copy(s.Extensions, e.Config.Extensions)
 	e.Config.RUnlock()
@@ -2024,6 +2065,7 @@ func (e *Engine) executeRequestWithRetry(ctx context.Context, targetURL string, 
 	retries := e.Config.MaxRetries
 	insecure := e.Config.Insecure
 	h2Mode := e.Config.H2Mode
+	antiBotFallback := e.Config.AntiBotFallback
 	e.Config.RUnlock()
 
 	if ctx == nil {
@@ -2040,8 +2082,12 @@ func (e *Engine) executeRequestWithRetry(ctx context.Context, targetURL string, 
 		err  error
 	)
 	for attempt := 0; attempt <= retries; attempt++ {
-		resp, err = httpclient.SendRawRequestWithContext(ctx, targetURL, rawRequest, timeout, proxyAddr, insecure)
+		resp, err = e.executeRequestOnce(ctx, targetURL, rawRequest, timeout, proxyAddr, insecure, h2Mode, antiBotFallback)
 		if err == nil {
+			e.mergeResponseCookies(targetURL, resp)
+			if retryResp, handled := e.handleAntiBotResponse(ctx, targetURL, rawRequest, timeout, proxyAddr, insecure, h2Mode, antiBotFallback, resp); handled {
+				return retryResp, nil
+			}
 			return resp, nil
 		}
 		if attempt < retries {
@@ -2239,6 +2285,15 @@ func buildRequest(method, reqPath, reqHost, ua, headersStr, bodyContent string) 
 		"%s %s HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\nUser-Agent: %s\r\n%sAccept: */*\r\nAccept-Encoding: identity\r\n\r\n",
 		method, reqPath, reqHost, ua, headersStr,
 	))
+}
+
+func spiderChildJob(parent Job, newPath string) Job {
+	return Job{
+		Path:   newPath,
+		Depth:  parent.Depth + 1,
+		Method: "GET",
+		RunID:  parent.RunID,
+	}
 }
 
 func computeResponseMetrics(resp *httpclient.RawResponse, successfulMethod string) (bodySize, wordCount, lineCount int, contentType string, bodyHash uint64) {
@@ -2551,6 +2606,7 @@ func (e *Engine) worker(id int) {
 						VerbTamper:          e.Config.VerbTamper,
 						FourOhThreeBypass:   e.Config.FourOhThreeBypass,
 						Spidering:           e.Config.Spidering,
+						AuthMatrix:          make(map[string][]string, len(e.Config.AuthMatrix)),
 					}
 					ua := local.UserAgent
 					for k, v := range e.Config.Headers {
@@ -2570,6 +2626,9 @@ func (e *Engine) worker(id int) {
 					copy(local.FilterSizeRanges, e.Config.FilterSizeRanges)
 					copy(local.MatchContentTypes, e.Config.MatchContentTypes)
 					copy(local.FilterContentTypes, e.Config.FilterContentTypes)
+					for role, hdrs := range e.Config.AuthMatrix {
+						local.AuthMatrix[role] = append([]string(nil), hdrs...)
+					}
 					e.Config.RUnlock()
 					snap = local
 				}
@@ -2598,6 +2657,7 @@ func (e *Engine) worker(id int) {
 				requestTimeout = DefaultHTTPTimeout
 			}
 			saveRaw := snap.SaveRaw
+			authMatrix := snap.AuthMatrix
 			autoFilterThreshold := snap.AutoFilterThreshold
 			doMutate := snap.Mutate
 			doRecurse := snap.Recursive
@@ -2735,6 +2795,7 @@ func (e *Engine) worker(id int) {
 			var err error
 			var successfulMethod string
 			var rawRequest []byte
+			var authFinding *authMatrixFinding
 			var bodyContent string
 			var timingMedian time.Duration
 			var timingOracleHit bool
@@ -2748,33 +2809,48 @@ func (e *Engine) worker(id int) {
 					filterWords >= 0 || filterLines >= 0 || matchWords >= 0 || matchLines >= 0 ||
 					len(matchContentTypes) > 0 || len(filterContentTypes) > 0
 
-				if bodyFilterActive || e.isHeadRejected(reqHost) || followRedirects || oracleEnabled {
+				if len(authMatrix) > 0 {
 					successfulMethod = "GET"
-					rawRequest = buildRequest("GET", reqPath, reqHost, ua, headersStr, "")
+					resp, rawRequest, successfulMethod, authFinding, err = e.executeAuthMatrixRequests(
+						localCtx,
+						currentBaseURL,
+						reqPath,
+						reqHost,
+						ua,
+						reqHeaders,
+						requestTimeout,
+						proxyAddr,
+						authMatrix,
+					)
 				} else {
-					successfulMethod = "HEAD"
-					rawRequest = buildRequest("HEAD", reqPath, reqHost, ua, headersStr, "")
-				}
-
-				if oracleEnabled {
-					resp, samples, oracleErr = e.executeTimingOracleRequests(localCtx, currentBaseURL, rawRequest, requestTimeout, proxyAddr)
-					if oracleErr != nil {
-						err = oracleErr
-					} else if e.timingOracle != nil {
-						timingMedian = e.timingOracle.Median(samples)
-						timingOracleHit = e.timingOracle.IsAnomaly(timingMedian)
-						timingOracleZ = e.timingOracle.ZScore(timingMedian)
-					}
-				} else {
-					resp, err = e.executeRequestWithRetry(localCtx, currentBaseURL, rawRequest, requestTimeout, proxyAddr)
-					if err == nil && successfulMethod == "HEAD" && (resp.StatusCode == 405 || resp.StatusCode == 501) {
-						e.markHeadRejected(reqHost)
+					if bodyFilterActive || e.isHeadRejected(reqHost) || followRedirects || oracleEnabled {
 						successfulMethod = "GET"
 						rawRequest = buildRequest("GET", reqPath, reqHost, ua, headersStr, "")
-						if fbResp, fbErr := e.executeRequestWithRetry(localCtx, currentBaseURL, rawRequest, requestTimeout, proxyAddr); fbErr == nil {
-							resp = fbResp
-						} else {
-							successfulMethod = "HEAD"
+					} else {
+						successfulMethod = "HEAD"
+						rawRequest = buildRequest("HEAD", reqPath, reqHost, ua, headersStr, "")
+					}
+
+					if oracleEnabled {
+						resp, samples, oracleErr = e.executeTimingOracleRequests(localCtx, currentBaseURL, rawRequest, requestTimeout, proxyAddr)
+						if oracleErr != nil {
+							err = oracleErr
+						} else if e.timingOracle != nil {
+							timingMedian = e.timingOracle.Median(samples)
+							timingOracleHit = e.timingOracle.IsAnomaly(timingMedian)
+							timingOracleZ = e.timingOracle.ZScore(timingMedian)
+						}
+					} else {
+						resp, err = e.executeRequestWithRetry(localCtx, currentBaseURL, rawRequest, requestTimeout, proxyAddr)
+						if err == nil && successfulMethod == "HEAD" && (resp.StatusCode == 405 || resp.StatusCode == 501) {
+							e.markHeadRejected(reqHost)
+							successfulMethod = "GET"
+							rawRequest = buildRequest("GET", reqPath, reqHost, ua, headersStr, "")
+							if fbResp, fbErr := e.executeRequestWithRetry(localCtx, currentBaseURL, rawRequest, requestTimeout, proxyAddr); fbErr == nil {
+								resp = fbResp
+							} else {
+								successfulMethod = "HEAD"
+							}
 						}
 					}
 				}
@@ -3064,6 +3140,8 @@ func (e *Engine) worker(id int) {
 			if saveRaw {
 				result.Request = string(rawRequest)
 				result.Response = string(resp.Raw)
+				result.RequestBytes = append([]byte(nil), rawRequest...)
+				result.ResponseBytes = append([]byte(nil), resp.Raw...)
 			}
 
 			if resp.StatusCode >= 300 && resp.StatusCode < 400 && !followRedirects {
@@ -3127,6 +3205,25 @@ func (e *Engine) worker(id int) {
 				}
 			}
 
+			if authFinding != nil {
+				if result.Headers == nil {
+					result.Headers = make(map[string]string)
+				}
+				result.Labels = append(result.Labels, authFinding.labels...)
+				if authFinding.confidence != "" {
+					if result.Confidence == "" {
+						result.Confidence = authFinding.confidence
+					} else {
+						result.Confidence = result.Confidence + ";" + authFinding.confidence
+					}
+				}
+				if authFinding.summary != "" {
+					result.Headers["Auth-Matrix"] = authFinding.summary
+				}
+			}
+
+			e.queueParamFuzzFromResult(result, bodySize, bodyHash)
+
 			// Spidering / dynamic link extraction
 			if spidering && len(resp.Body) > 0 && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				matches := linkRegex.FindAllStringSubmatch(string(resp.Body), -1)
@@ -3158,7 +3255,7 @@ func (e *Engine) worker(id int) {
 					}
 
 					// Submit will run Bloom filter check
-					e.Submit(Job{Path: newPath, Depth: depth, Method: "GET", RunID: job.RunID})
+					e.Submit(spiderChildJob(job, newPath))
 				}
 			}
 
@@ -3394,6 +3491,13 @@ func (e *Engine) Shutdown() {
 
 		// Wait for all worker goroutines to finish.
 		e.wg.Wait()
+
+		// Drain and stop the hidden-parameter worker pool after the main
+		// directory scan workers have finished submitting tasks.
+		if e.paramTaskChan != nil {
+			close(e.paramTaskChan)
+			e.paramFuzzWg.Wait()
+		}
 
 		// Close replay channel, stopping replay workers.
 		close(e.replayCh)

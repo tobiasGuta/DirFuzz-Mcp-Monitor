@@ -1,0 +1,4 @@
+./diff.go
+./hexview.go
+./tui.go
+./tui_test.go

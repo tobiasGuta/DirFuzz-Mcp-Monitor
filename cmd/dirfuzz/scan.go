@@ -25,6 +25,10 @@ const tuiResultBufSize = engine.ResultsChannelSize
 // run builds the engine from cfg, starts a scan, and hands off to either the
 // Bubble Tea TUI (default) or a plain stdout loop (--no-tui).
 func run(cfg cliConfig) error {
+	if cfg.Swarm {
+		return runSwarm(cfg)
+	}
+
 	// ── 1. Engine ─────────────────────────────────────────────────────────────
 	eng := engine.NewEngine(cfg.Threads, engine.DefaultBloomFilterSize, engine.DefaultBloomFilterFP)
 	eng.ResumeFile = cfg.ResumeFile
@@ -60,6 +64,11 @@ func run(cfg cliConfig) error {
 	if cfg.Follow {
 		eng.SetFollowRedirects(true)
 	}
+	if normalized, err := normalizeAuthMatrix(cfg.AuthMatrix); err != nil {
+		return fmt.Errorf("invalid auth matrix: %w", err)
+	} else {
+		cfg.AuthMatrix = normalized
+	}
 
 	eng.UpdateConfig(func(c *engine.Config) {
 		c.Timeout = cfg.Timeout
@@ -67,6 +76,7 @@ func run(cfg cliConfig) error {
 		c.MaxRedirects = cfg.MaxRedirects
 		c.RequestBody = cfg.Body
 		c.SaveRaw = cfg.SaveRaw
+		c.AuthMatrix = cfg.AuthMatrix
 		c.Recursive = cfg.Recursive
 		c.MaxDepth = cfg.MaxDepth
 		c.SmartAPI = cfg.SmartAPI
@@ -94,6 +104,7 @@ func run(cfg cliConfig) error {
 		c.MaxRetries = cfg.MaxRetries
 		c.VerbTamper = cfg.VerbTamper
 		c.FourOhThreeBypass = cfg.FourOhThreeBypass
+		c.AntiBotFallback = cfg.AntiBotFallback
 		c.AllowPrivateTargets = cfg.AllowPrivate
 		if cfg.OutputFile != "" {
 			c.OutputFile = cfg.OutputFile

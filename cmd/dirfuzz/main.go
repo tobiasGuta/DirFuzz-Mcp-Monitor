@@ -12,6 +12,14 @@ import (
 func main() {
 	cfg := parseFlags()
 
+	if cfg.SwarmWorker {
+		if err := runSwarmWorkerCLI(); err != nil {
+			fmt.Fprintf(os.Stderr, "error: swarm worker failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if cfg.ActivePoC != "" {
 		fmt.Fprintf(os.Stderr, "[*] Running Active PoC plugin: %s\n", cfg.ActivePoC)
 		

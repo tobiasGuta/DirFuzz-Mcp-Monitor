@@ -465,6 +465,8 @@ type ViewState int
 const (
 	StateList ViewState = iota
 	StateDetail
+	StateHexView
+	StateDiffView
 	StateCommand
 	StateRepeater
 )
@@ -506,10 +508,13 @@ type Model struct {
 	atBottom      bool
 
 	// Detail Viewports
-	reqViewport viewport.Model
-	resViewport viewport.Model
-	cmdOutput   []string
-	cmdViewport viewport.Model
+	reqViewport       viewport.Model
+	resViewport       viewport.Model
+	hexViewport       viewport.Model
+	diffLeftViewport  viewport.Model
+	diffRightViewport viewport.Model
+	cmdOutput         []string
+	cmdViewport       viewport.Model
 
 	// Repeater state
 	repeaterInput        textarea.Model
@@ -519,9 +524,18 @@ type Model struct {
 	repeaterFocusReq     bool
 	repeaterLastStatus   int
 	repeaterLastDuration time.Duration
+	repeaterLastRaw      []byte
 	repeaterCancelFn     context.CancelFunc
 	repeaterHistory      []RepeaterHistoryEntry
 	repeaterHistoryIdx   int
+
+	// Hex view state
+	hexSelectedIndex int
+	hexTarget        HexViewTarget
+
+	// Diff view state
+	diffReference *DiffSample
+	diffCurrent   *DiffSample
 
 	// Telemetry display
 	startTime       time.Time
@@ -564,6 +578,9 @@ func NewModel(eng *engine.Engine, resultsCh <-chan engine.Result) Model {
 
 	reqVp := viewport.New(40, 20)
 	resVp := viewport.New(40, 20)
+	hexVp := viewport.New(80, 20)
+	diffLeftVp := viewport.New(40, 20)
+	diffRightVp := viewport.New(40, 20)
 	cmdVp := viewport.New(80, 10)
 
 	ta := textarea.New()
@@ -577,26 +594,30 @@ func NewModel(eng *engine.Engine, resultsCh <-chan engine.Result) Model {
 	repeaterVp := viewport.New(40, 20)
 
 	m := Model{
-		Engine:           eng,
-		resultsCh:        resultsCh,
-		viewport:         vp,
-		reqViewport:      reqVp,
-		resViewport:      resVp,
-		cmdViewport:      cmdVp,
-		textInput:        ti,
-		logs:             []string{},
-		logLineHits:      []*engine.Result{},
-		hits:             []engine.Result{},
-		rpsHistory:       []int64{},
-		cmdOutput:        []string{},
-		startTime:        time.Now(),
-		state:            StateList,
-		commandPulseOn:   true,
-		atBottom:         true,
-		repeaterInput:    ta,
-		repeaterRespVp:   repeaterVp,
-		repeaterFocusReq: true,
-		lastProgressPct:  -1,
+		Engine:            eng,
+		resultsCh:         resultsCh,
+		viewport:          vp,
+		reqViewport:       reqVp,
+		resViewport:       resVp,
+		hexViewport:       hexVp,
+		diffLeftViewport:  diffLeftVp,
+		diffRightViewport: diffRightVp,
+		cmdViewport:       cmdVp,
+		textInput:         ti,
+		logs:              []string{},
+		logLineHits:       []*engine.Result{},
+		hits:              []engine.Result{},
+		rpsHistory:        []int64{},
+		cmdOutput:         []string{},
+		startTime:         time.Now(),
+		state:             StateList,
+		commandPulseOn:    true,
+		atBottom:          true,
+		repeaterInput:     ta,
+		repeaterRespVp:    repeaterVp,
+		repeaterFocusReq:  true,
+		repeaterLastRaw:   nil,
+		lastProgressPct:   -1,
 	}
 	m.initCommands()
 	return m
@@ -1369,6 +1390,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Detail viewports
 			m.reqViewport = viewport.New(paneInnerWidth, vpHeight-2)
 			m.resViewport = viewport.New(paneInnerWidth, vpHeight-2)
+			m.hexViewport = viewport.New(vpWidth-4, vpHeight-2)
+			m.diffLeftViewport = viewport.New(paneInnerWidth, vpHeight-2)
+			m.diffRightViewport = viewport.New(paneInnerWidth, vpHeight-2)
 
 			m.ready = true
 		} else {
@@ -1381,6 +1405,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.reqViewport.Height = vpHeight - 2
 			m.resViewport.Width = paneInnerWidth
 			m.resViewport.Height = vpHeight - 2
+			m.hexViewport.Width = vpWidth - 4
+			m.hexViewport.Height = vpHeight - 2
+			m.diffLeftViewport.Width = paneInnerWidth
+			m.diffLeftViewport.Height = vpHeight - 2
+			m.diffRightViewport.Width = paneInnerWidth
+			m.diffRightViewport.Height = vpHeight - 2
 		}
 		m.repeaterInput.SetWidth(paneInnerWidth)
 		m.repeaterInput.SetHeight(vpHeight - 4)
@@ -1390,6 +1420,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cmdViewport.Height = 12
 		m.textInput.Width = vpWidth - 7
 		m.footerBarStyle = lipgloss.NewStyle().Foreground(DraculaCyan).Bold(true).Width(m.width).PaddingLeft(2)
+		if m.state == StateHexView {
+			m.updateHexView()
+		} else if m.state == StateDiffView {
+			m.updateDiffView()
+		}
 
 	case TickMsg:
 		// Clear expired status messages
@@ -1433,8 +1468,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.repeaterRespVp.SetContent(errorStyle.Render(fmt.Sprintf("Error: %v", msg.Err)))
 			m.repeaterLastStatus = 0
 			m.repeaterLastDuration = 0
+			m.repeaterLastRaw = nil
 			m.repeaterRespVp.GotoTop()
 		} else {
+			m.repeaterLastRaw = append(m.repeaterLastRaw[:0], msg.RawResponse.Raw...)
 			content := strings.ReplaceAll(string(msg.RawResponse.Raw), "\r\n", "\n")
 			content = formatHTTPResponse(content)
 			if len(content) > 50_000 {
@@ -1535,7 +1572,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "q":
-			if m.state == StateDetail || m.state == StateRepeater {
+			if m.state == StateDetail || m.state == StateHexView || m.state == StateDiffView || m.state == StateRepeater {
 				m.state = StateList
 				return m, nil
 			}
@@ -1565,7 +1602,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.suggestions = nil
 				return m, nil
 			}
-			if m.state == StateDetail {
+			if m.state == StateDetail || m.state == StateHexView || m.state == StateDiffView {
 				m.state = StateList
 				return m, nil
 			}
@@ -1631,9 +1668,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.state == StateDetail {
+			if m.state == StateDetail || m.state == StateHexView || m.state == StateDiffView {
 				m.reqViewport.LineUp(1)
 				m.resViewport.LineUp(1)
+				m.hexViewport.LineUp(1)
+				m.diffLeftViewport.LineUp(1)
+				m.diffRightViewport.LineUp(1)
 				return m, nil
 			}
 			if m.state == StateCommand {
@@ -1672,9 +1712,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.state == StateDetail {
+			if m.state == StateDetail || m.state == StateHexView || m.state == StateDiffView {
 				m.reqViewport.LineDown(1)
 				m.resViewport.LineDown(1)
+				m.hexViewport.LineDown(1)
+				m.diffLeftViewport.LineDown(1)
+				m.diffRightViewport.LineDown(1)
 				return m, nil
 			}
 			if m.state == StateCommand {
@@ -1699,9 +1742,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				m.renderListView()
-			} else if m.state == StateDetail {
+			} else if m.state == StateDetail || m.state == StateHexView || m.state == StateDiffView {
 				m.reqViewport.ViewDown()
 				m.resViewport.ViewDown()
+				m.hexViewport.ViewDown()
+				m.diffLeftViewport.ViewDown()
+				m.diffRightViewport.ViewDown()
 			}
 			return m, nil
 
@@ -1717,13 +1763,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.listScrollIdx = 0
 				}
 				m.renderListView()
-			} else if m.state == StateDetail {
+			} else if m.state == StateDetail || m.state == StateHexView || m.state == StateDiffView {
 				m.reqViewport.ViewUp()
 				m.resViewport.ViewUp()
+				m.hexViewport.ViewUp()
+				m.diffLeftViewport.ViewUp()
+				m.diffRightViewport.ViewUp()
 			}
 			return m, nil
 
 		case "tab":
+			if m.state == StateHexView {
+				m.toggleHexTarget()
+				return m, nil
+			}
 			if m.commandMode && len(m.suggestions) > 0 {
 				val := m.textInput.Value()
 				if strings.HasPrefix(val, "wordlist ") {
@@ -1798,6 +1851,52 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.statusMessage = errorStyle.Render("No raw request available. Use --save-raw and restart.")
 					m.statusExpiry = time.Now().Add(3 * time.Second)
 				}
+			}
+		case "R":
+			switch m.state {
+			case StateList, StateDetail:
+				m.saveDiffReferenceFromSelected()
+			case StateRepeater:
+				m.saveDiffReferenceFromReplay()
+			}
+		case "d":
+			switch m.state {
+			case StateList, StateDetail:
+				if m.openDiffViewFromSelected() {
+					return m, nil
+				}
+			case StateRepeater:
+				if m.openDiffViewFromReplay() {
+					return m, nil
+				}
+			}
+		case "D":
+			if m.state == StateRepeater {
+				if m.openDiffViewFromReplay() {
+					return m, nil
+				}
+			}
+		case "h":
+			if m.state == StateDetail {
+				if m.openHexView(HexViewRequest) {
+					return m, nil
+				}
+				if m.openHexView(HexViewResponse) {
+					return m, nil
+				}
+				m.statusMessage = errorStyle.Render("No raw bytes available. Use --save-raw and retry.")
+				m.statusExpiry = time.Now().Add(3 * time.Second)
+			}
+		case "H":
+			if m.state == StateDetail {
+				if m.openHexView(HexViewResponse) {
+					return m, nil
+				}
+				if m.openHexView(HexViewRequest) {
+					return m, nil
+				}
+				m.statusMessage = errorStyle.Render("No raw bytes available. Use --save-raw and retry.")
+				m.statusExpiry = time.Now().Add(3 * time.Second)
 			}
 		case "p":
 			m.Engine.Config.RLock()
@@ -2109,6 +2208,15 @@ func formatResult(r engine.Result) string {
 	if r.Duration > 0 {
 		extras += mutedStyle.Render(fmt.Sprintf(" [%s]", r.Duration.Round(time.Millisecond)))
 	}
+	if len(r.DiscoveredParams) > 0 {
+		extras += mutedStyle.Render(fmt.Sprintf(" [Params: %s]", strings.Join(r.DiscoveredParams, ",")))
+	}
+	if len(r.Labels) > 0 {
+		extras += mutedStyle.Render(fmt.Sprintf(" [Labels: %s]", strings.Join(r.Labels, ",")))
+	}
+	if r.Confidence != "" {
+		extras += mutedStyle.Render(fmt.Sprintf(" [Conf: %s]", r.Confidence))
+	}
 
 	return fmt.Sprintf("%s %s %s %s %s %s%s",
 		statusColor.Render(fmt.Sprintf("[%d]", r.StatusCode)),
@@ -2285,6 +2393,60 @@ func (m *Model) View() string {
 		)
 		spacer := strings.Repeat(" ", m.width-(paneOuterWidth*2))
 		mainContent = lipgloss.JoinHorizontal(lipgloss.Top, reqPane, spacer, resPane)
+	} else if m.state == StateHexView {
+		headerHeight := 6
+		footerHeight := bottomBandHeight
+		vpHeight := m.height - headerHeight - footerHeight
+		if vpHeight < 5 {
+			vpHeight = 5
+		}
+		hexPaneWidth := m.width - 2
+		if hexPaneWidth < 20 {
+			hexPaneWidth = 20
+		}
+
+		hexHeader := renderPaneHeader(requestPaneHeaderStyle, m.hexViewport.Width, m.hexViewHeader())
+		hexSeparator := separatorStyle.Render(strings.Repeat("─", m.hexViewport.Width))
+		hexPane := paneStyle.Width(hexPaneWidth).Height(vpHeight).Render(
+			lipgloss.JoinVertical(lipgloss.Top,
+				hexHeader,
+				hexSeparator,
+				m.hexViewport.View(),
+			),
+		)
+		mainContent = hexPane
+	} else if m.state == StateDiffView {
+		headerHeight := 6
+		footerHeight := bottomBandHeight
+		vpHeight := m.height - headerHeight - footerHeight
+		paneOuterWidth := (m.width - 2) / 2
+		leftTitle := "Reference"
+		rightTitle := "Current"
+		if m.diffReference != nil && m.diffReference.Title != "" {
+			leftTitle = m.diffReference.Title
+		}
+		if m.diffCurrent != nil && m.diffCurrent.Title != "" {
+			rightTitle = m.diffCurrent.Title
+		}
+
+		leftHeader := renderPaneHeader(diffHeaderStyle, m.diffLeftViewport.Width, leftTitle)
+		rightHeader := renderPaneHeader(diffHeaderStyle, m.diffRightViewport.Width, rightTitle)
+		leftPane := paneStyle.Width(paneOuterWidth - 2).Height(vpHeight).Render(
+			lipgloss.JoinVertical(lipgloss.Top,
+				leftHeader,
+				separatorStyle.Render(strings.Repeat("─", m.diffLeftViewport.Width)),
+				m.diffLeftViewport.View(),
+			),
+		)
+		rightPane := paneStyle.Width(paneOuterWidth - 2).Height(vpHeight).Render(
+			lipgloss.JoinVertical(lipgloss.Top,
+				rightHeader,
+				separatorStyle.Render(strings.Repeat("─", m.diffRightViewport.Width)),
+				m.diffRightViewport.View(),
+			),
+		)
+		spacer := strings.Repeat(" ", m.width-(paneOuterWidth*2))
+		mainContent = lipgloss.JoinHorizontal(lipgloss.Top, leftPane, spacer, rightPane)
 	} else if m.state == StateCommand {
 		mainContent = m.viewport.View()
 	} else if m.state == StateRepeater {
@@ -2360,10 +2522,16 @@ func (m *Model) View() string {
 	if m.statusMessage != "" {
 		footerBody = m.statusMessage
 	} else {
-		if m.state == StateDetail {
-			footerBody = m.footerBarStyle.Render("Press 'Esc' or 'q' to return to list | Up/Down to scroll")
+		if m.state == StateList {
+			footerBody = m.footerBarStyle.Render("Enter: details | R: save ref | d: diff | h/H: hex | r: repeater | ':' commands | q: quit")
+		} else if m.state == StateDetail {
+			footerBody = m.footerBarStyle.Render("R: save ref | d: diff | h/H: hex | Esc/q: back | Up/Down to scroll")
+		} else if m.state == StateHexView {
+			footerBody = m.footerBarStyle.Render("R: save ref | d: diff | D: replay diff | Tab: switch request/response | Esc/q: back")
+		} else if m.state == StateDiffView {
+			footerBody = m.footerBarStyle.Render("Esc/q: back | Up/Down: scroll | PgUp/PgDn: page")
 		} else if m.state == StateRepeater {
-			footerBody = m.footerBarStyle.Render("Tab: focus | Ctrl+R: send | Ctrl+P/N: history | Esc/q: back")
+			footerBody = m.footerBarStyle.Render("R: save ref | D: diff replay | Tab: focus | Ctrl+R: send | Ctrl+P/N: history | Esc/q: back")
 		} else {
 			footerBody = m.footerBarStyle.Render("Press ':' for commands | 'p' to pause | 'q' to quit | 'r' for repeater")
 		}

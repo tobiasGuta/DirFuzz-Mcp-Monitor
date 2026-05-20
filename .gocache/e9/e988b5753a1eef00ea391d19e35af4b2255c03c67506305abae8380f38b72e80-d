@@ -1,0 +1,5 @@
+# test log
+getenv NO_COLOR
+getenv CLICOLOR
+getenv CI
+getenv CLICOLOR_FORCE

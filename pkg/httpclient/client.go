@@ -13,6 +13,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -46,6 +47,15 @@ type RawResponse struct {
 	BodyEncoded bool
 }
 
+// AntiBotSignal summarises whether a response looks like a WAF or challenge
+// page and exposes any Set-Cookie headers that can be persisted.
+type AntiBotSignal struct {
+	Blocked  bool
+	Provider string
+	Reasons  []string
+	Cookies  []*http.Cookie
+}
+
 // GetHeader extracts a header value from the raw headers string (case-insensitive).
 func (r *RawResponse) GetHeader(key string) string {
 	if r == nil {
@@ -75,6 +85,136 @@ func (r *RawResponse) GetHeader(key string) string {
 		}
 	}
 	return ""
+}
+
+// ParseSetCookies extracts all Set-Cookie headers from a raw response header
+// block. Session cookies are preserved as session cookies rather than being
+// converted to already-expired timestamps.
+func ParseSetCookies(headers string) []*http.Cookie {
+	if headers == "" {
+		return nil
+	}
+
+	hdr := http.Header{}
+	normalized := strings.ReplaceAll(headers, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	lines := strings.Split(normalized, "\n")
+	for _, line := range lines[1:] {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		hdr.Add(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
+	}
+
+	resp := &http.Response{Header: hdr}
+	return resp.Cookies()
+}
+
+func isChallengeText(bodyLower string) bool {
+	if bodyLower == "" {
+		return false
+	}
+
+	signatures := []string{
+		"just a moment",
+		"checking your browser",
+		"verify you are human",
+		"please enable cookies",
+		"enable javascript and cookies",
+		"security check",
+		"human verification",
+		"captcha",
+		"turnstile",
+		"cf-challenge",
+		"access denied",
+		"request blocked",
+		"pardon our interruption",
+		"attention required",
+		"one moment please",
+		"sorry, you have been blocked",
+		"cloudflare",
+		"incapsula incident id",
+		"data-dome",
+		"datadome",
+		"modsecurity",
+		"sucuri website firewall",
+		"barracuda web application firewall",
+		"the requested url was rejected",
+	}
+	for _, sig := range signatures {
+		if strings.Contains(bodyLower, sig) {
+			return true
+		}
+	}
+	return false
+}
+
+// InspectAntiBotResponse reports whether a response resembles a WAF block or
+// a JavaScript/captcha challenge page.
+func InspectAntiBotResponse(resp *RawResponse) AntiBotSignal {
+	if resp == nil {
+		return AntiBotSignal{}
+	}
+
+	headersLower := strings.ToLower(resp.Headers)
+	bodyLower := strings.ToLower(string(resp.Body))
+	signal := AntiBotSignal{
+		Cookies: ParseSetCookies(resp.Headers),
+	}
+	statusBlocked := resp.StatusCode == 403 || resp.StatusCode == 429
+
+	addReason := func(provider, reason string) {
+		signal.Blocked = true
+		if signal.Provider == "" {
+			signal.Provider = provider
+		}
+		signal.Reasons = append(signal.Reasons, reason)
+	}
+
+	if statusBlocked || isChallengeText(bodyLower) {
+		switch {
+		case strings.Contains(headersLower, "server: cloudflare") || strings.Contains(headersLower, "cf-ray:") || strings.Contains(headersLower, "cf-mitigated: challenge"):
+			addReason("cloudflare", "cloudflare header signature")
+		case strings.Contains(headersLower, "server: akamaighost") || strings.Contains(headersLower, "x-akamai-transformed:") || strings.Contains(bodyLower, "akamai"):
+			addReason("akamai", "akamai signature")
+		case strings.Contains(headersLower, "x-iinfo:") || strings.Contains(headersLower, "x-cdn: incapsula") || strings.Contains(bodyLower, "incapsula incident id"):
+			addReason("imperva", "imperva/incapsula signature")
+		case strings.Contains(headersLower, "server: sucuri") || strings.Contains(bodyLower, "sucuri website firewall"):
+			addReason("sucuri", "sucuri signature")
+		case strings.Contains(headersLower, "server: bigip") || strings.Contains(bodyLower, "the requested url was rejected"):
+			addReason("f5_bigip", "f5 bigip signature")
+		case strings.Contains(headersLower, "modsecurity") || strings.Contains(bodyLower, "modsecurity action"):
+			addReason("modsecurity", "modsecurity signature")
+		case strings.Contains(headersLower, "server: barracuda") || strings.Contains(bodyLower, "barracuda web application firewall"):
+			addReason("barracuda", "barracuda signature")
+		case strings.Contains(headersLower, "server: datadome") || strings.Contains(bodyLower, "datadome"):
+			addReason("datadome", "data dome signature")
+		}
+	}
+
+	if isChallengeText(bodyLower) {
+		if signal.Provider == "" {
+			signal.Provider = "generic"
+		}
+		addReason(signal.Provider, "challenge body signature")
+	}
+
+	if signal.Blocked {
+		return signal
+	}
+
+	// Challenge pages can legitimately return 200 while a JS interstitial is
+	// still running. Treat those as blocked as well so the engine can solve
+	// them before continuing the fuzz loop.
+	if isChallengeText(bodyLower) {
+		addReason("generic", "challenge body signature")
+	}
+	return signal
 }
 
 // ─── DNS cache ────────────────────────────────────────────────────────────────
@@ -484,11 +624,15 @@ func dialHTTPProxy(ctx context.Context, proxyAddr, targetAddr string, timeout ti
 func parseSocks5Proxy(proxyAddr string) (auth *proxy.Auth, cleanAddr string) {
 	proxyAddr = strings.TrimPrefix(proxyAddr, "socks5://")
 	if strings.Contains(proxyAddr, "@") {
-		parts := strings.SplitN(proxyAddr, "@", 2)
-		if len(parts) == 2 && strings.Contains(parts[0], ":") {
-			authParts := strings.SplitN(parts[0], ":", 2)
-			auth = &proxy.Auth{User: authParts[0], Password: authParts[1]}
-			proxyAddr = parts[1]
+		at := strings.LastIndex(proxyAddr, "@")
+		if at > 0 {
+			creds := proxyAddr[:at]
+			addr := proxyAddr[at+1:]
+			if strings.Contains(creds, ":") && addr != "" {
+				authParts := strings.SplitN(creds, ":", 2)
+				auth = &proxy.Auth{User: authParts[0], Password: authParts[1]}
+				proxyAddr = addr
+			}
 		}
 	}
 	return auth, proxyAddr
@@ -559,13 +703,43 @@ func dechunkBody(body []byte) ([]byte, map[string]string) {
 			}
 			return dechunked.Bytes(), trailers
 		}
-		chunk := make([]byte, chunkSize)
-		_, err = io.ReadFull(buf, chunk)
-		if err != nil {
-			dechunked.Write(chunk)
+		remaining := MaxBodySize - dechunked.Len()
+		if remaining <= 0 {
+			_, _ = io.CopyN(io.Discard, buf, chunkSize)
+			buf.ReadString('\n')
 			break
 		}
-		dechunked.Write(chunk)
+
+		toRead := chunkSize
+		if toRead > int64(remaining) {
+			toRead = int64(remaining)
+		}
+
+		const chunkReadBufSize = 32 * 1024
+		readBufSize := int64(chunkReadBufSize)
+		if toRead < readBufSize {
+			readBufSize = toRead
+		}
+		tmp := make([]byte, int(readBufSize))
+		var readTotal int64
+		for readTotal < toRead {
+			want := int64(len(tmp))
+			if remainingChunk := toRead - readTotal; remainingChunk < want {
+				want = remainingChunk
+			}
+			n, readErr := io.ReadFull(buf, tmp[:int(want)])
+			if n > 0 {
+				dechunked.Write(tmp[:n])
+				readTotal += int64(n)
+			}
+			if readErr != nil {
+				break
+			}
+		}
+
+		if chunkSize > toRead {
+			_, _ = io.CopyN(io.Discard, buf, chunkSize-toRead)
+		}
 		// Consume the trailing CRLF after the chunk data.
 		buf.ReadString('\n')
 	}
@@ -584,7 +758,7 @@ func decompressGzip(body []byte) ([]byte, error) {
 		return nil, err
 	}
 	defer reader.Close()
-	decompressed, err := io.ReadAll(reader)
+	decompressed, err := io.ReadAll(io.LimitReader(reader, MaxBodySize))
 	if err != nil && err != io.ErrUnexpectedEOF {
 		if len(decompressed) == 0 {
 			return nil, err
@@ -604,7 +778,7 @@ func decompressDeflate(body []byte) ([]byte, error) {
 	// Try zlib-wrapped (RFC 1950).
 	if zr, err := zlib.NewReader(bytes.NewReader(body)); err == nil {
 		defer zr.Close()
-		out, err := io.ReadAll(zr)
+		out, err := io.ReadAll(io.LimitReader(zr, MaxBodySize))
 		if err == nil || (err == io.ErrUnexpectedEOF && len(out) > 0) {
 			return out, nil
 		}
@@ -613,7 +787,7 @@ func decompressDeflate(body []byte) ([]byte, error) {
 	fr := flate.NewReader(bytes.NewReader(body))
 	if fr != nil {
 		defer fr.Close()
-		out, err := io.ReadAll(fr)
+		out, err := io.ReadAll(io.LimitReader(fr, MaxBodySize))
 		if err == nil || (err == io.ErrUnexpectedEOF && len(out) > 0) {
 			return out, nil
 		}
@@ -626,7 +800,7 @@ func decompressBrotli(body []byte) ([]byte, error) {
 		return body, nil
 	}
 	r := brotli.NewReader(bytes.NewReader(body))
-	return io.ReadAll(r)
+	return io.ReadAll(io.LimitReader(r, MaxBodySize))
 }
 
 func hasCompleteChunkedBody(body []byte) bool {

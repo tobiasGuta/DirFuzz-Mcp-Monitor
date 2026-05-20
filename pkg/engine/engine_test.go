@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -81,6 +82,123 @@ func TestSimhashBodyIsStable(t *testing.T) {
 	}
 }
 
+func TestExecuteAuthMatrixRequestsDetectsPrivilegeEscalation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("Cookie") {
+		case "session=A":
+			fmt.Fprintln(w, "admin area")
+		case "session=B":
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprintln(w, "forbidden")
+		default:
+			fmt.Fprintln(w, "public area")
+		}
+	}))
+	defer server.Close()
+
+	eng := NewEngine(1, 100, 0.01)
+	eng.Config.Lock()
+	eng.Config.AllowPrivateTargets = true
+	eng.Config.AuthMatrix = map[string][]string{
+		"unauth": {"Cookie: session=guest"},
+		"user":   {"Cookie: session=B"},
+		"admin":  {"Cookie: session=A"},
+	}
+	eng.Config.Unlock()
+	eng.RefreshConfigSnapshot()
+	if err := eng.SetTarget(server.URL); err != nil {
+		t.Fatalf("SetTarget() failed: %v", err)
+	}
+
+	snap := eng.configSnap.Load()
+	if snap == nil {
+		t.Fatal("expected config snapshot")
+	}
+
+	resp, rawReq, method, finding, err := eng.executeAuthMatrixRequests(
+		context.Background(),
+		server.URL,
+		"/admin",
+		"example.com",
+		"DirFuzz/2.0",
+		map[string]string{},
+		DefaultHTTPTimeout,
+		"",
+		snap.AuthMatrix,
+	)
+	if err != nil {
+		t.Fatalf("executeAuthMatrixRequests() failed: %v", err)
+	}
+	if method != "GET" {
+		t.Fatalf("method = %q, want GET", method)
+	}
+	if len(rawReq) == 0 {
+		t.Fatal("expected raw request bytes to be returned")
+	}
+	if resp == nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("selected status = %v, want 200", func() any {
+			if resp == nil {
+				return nil
+			}
+			return resp.StatusCode
+		}())
+	}
+	if finding == nil {
+		t.Fatal("expected auth-matrix finding")
+	}
+	if !strings.Contains(strings.Join(finding.labels, ","), "BAC") {
+		t.Fatalf("finding labels = %v, want BAC label", finding.labels)
+	}
+	if !strings.Contains(finding.confidence, "user=403") {
+		t.Fatalf("finding confidence = %q, want user=403", finding.confidence)
+	}
+}
+
+func TestDiscoverParamHitsBisectsHiddenParameters(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("debug") != "" || r.URL.Query().Get("preview") != "" {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintln(w, "mutated-response")
+			return
+		}
+		fmt.Fprintln(w, "baseline-response")
+	}))
+	defer server.Close()
+
+	eng := NewEngine(1, 100, 0.01)
+	eng.Config.Lock()
+	eng.Config.AllowPrivateTargets = true
+	eng.Config.Unlock()
+	if err := eng.SetTarget(server.URL); err != nil {
+		t.Fatalf("SetTarget() failed: %v", err)
+	}
+	eng.RefreshConfigSnapshot()
+
+	baseReq := buildRequest("GET", "/", "example.com", "DirFuzz/2.0", "", "")
+	baseResp, err := eng.executeRequestWithRetry(context.Background(), server.URL, baseReq, DefaultHTTPTimeout, "")
+	if err != nil {
+		t.Fatalf("baseline request failed: %v", err)
+	}
+	baseSize, _, _, _, baseHash := computeResponseMetrics(baseResp, "GET")
+
+	hits := eng.discoverParamHits(
+		context.Background(),
+		ParamTask{URL: server.URL, BaselineStatusCode: baseResp.StatusCode, BaselineSize: baseSize, BaselineHash: baseHash},
+		[]string{"foo", "debug", "bar", "preview"},
+		paramBaseline{statusCode: baseResp.StatusCode, size: baseSize, hash: baseHash},
+		eng.configSnap.Load(),
+	)
+
+	if len(hits) != 2 {
+		t.Fatalf("discoverParamHits() returned %d hits, want 2", len(hits))
+	}
+	got := []string{hits[0].params[0], hits[1].params[0]}
+	want := []string{"debug", "preview"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("discoverParamHits() params = %v, want %v", got, want)
+	}
+}
+
 func TestSimhashSoft404Clustering(t *testing.T) {
 	eng := NewEngine(1, 100, 0.01)
 	eng.SimhashThreshold = 3
@@ -97,6 +215,24 @@ func TestSimhashSoft404Clustering(t *testing.T) {
 	}
 	if eng.isSimhashSoftFour(0xfedcba0987654321) {
 		t.Fatal("distant hash should start a fresh cluster")
+	}
+}
+
+func TestSpiderChildJobIncrementsDepth(t *testing.T) {
+	parent := Job{Path: "/page/1", Depth: 4, Method: "GET", RunID: 99}
+	child := spiderChildJob(parent, "/page/2")
+
+	if child.Path != "/page/2" {
+		t.Fatalf("child path = %q, want %q", child.Path, "/page/2")
+	}
+	if child.Depth != parent.Depth+1 {
+		t.Fatalf("child depth = %d, want %d", child.Depth, parent.Depth+1)
+	}
+	if child.Method != "GET" {
+		t.Fatalf("child method = %q, want GET", child.Method)
+	}
+	if child.RunID != parent.RunID {
+		t.Fatalf("child run ID = %d, want %d", child.RunID, parent.RunID)
 	}
 }
 

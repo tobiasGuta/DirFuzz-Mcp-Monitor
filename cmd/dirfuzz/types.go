@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"time"
 )
@@ -28,8 +29,9 @@ type cliConfig struct {
 	// ── HTTP behaviour ───────────────────────────────────────────────────────
 	UserAgent    string
 	Headers      []string // raw "Key: Value" strings from -H
-	Cookie       string   // shorthand for -H "Cookie: …"
-	Methods      string   // comma-separated HTTP verbs
+	AuthMatrix   map[string][]string
+	Cookie       string // shorthand for -H "Cookie: …"
+	Methods      string // comma-separated HTTP verbs
 	VerbTamper   bool
 	Body         string // request body for POST / PUT
 	Follow       bool
@@ -80,6 +82,12 @@ type cliConfig struct {
 	DryRun              bool
 	MaxWSFrames         int
 	FourOhThreeBypass   bool
+	AntiBotFallback     bool
+	Swarm               bool
+	SwarmProvider       string
+	SwarmNodes          int
+	SwarmChunkSize      int
+	SwarmWorker         bool
 
 	// ── Eagle mode (differential scan) ───────────────────────────────────────
 	EagleFile string // path to previous JSONL baseline
@@ -106,4 +114,70 @@ type cliConfig struct {
 
 	// ── Ssrf ──────────────────────────────────────────────────────────────
 	AllowPrivate bool
+}
+
+func parseAuthMatrix(entries []string) (map[string][]string, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	out := make(map[string][]string)
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid auth matrix entry %q: expected role=Header: Value||Header2: Value2", entry)
+		}
+		role := strings.TrimSpace(parts[0])
+		if role == "" {
+			return nil, fmt.Errorf("invalid auth matrix entry %q: empty role", entry)
+		}
+		rawHeaders := strings.TrimSpace(parts[1])
+		if rawHeaders == "" {
+			return nil, fmt.Errorf("invalid auth matrix entry %q: empty header list", entry)
+		}
+		for _, hdr := range strings.Split(rawHeaders, "||") {
+			hdr = strings.TrimSpace(hdr)
+			if hdr == "" {
+				continue
+			}
+			if !strings.Contains(hdr, ":") {
+				return nil, fmt.Errorf("invalid auth matrix header %q for role %q: expected Key: Value", hdr, role)
+			}
+			out[role] = append(out[role], hdr)
+		}
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return normalizeAuthMatrix(out)
+}
+
+func normalizeAuthMatrix(matrix map[string][]string) (map[string][]string, error) {
+	if len(matrix) == 0 {
+		return nil, nil
+	}
+	out := make(map[string][]string, len(matrix))
+	for role, headers := range matrix {
+		role = strings.TrimSpace(role)
+		if role == "" {
+			return nil, fmt.Errorf("invalid auth matrix: empty role name")
+		}
+		for _, hdr := range headers {
+			hdr = strings.TrimSpace(hdr)
+			if hdr == "" {
+				continue
+			}
+			if !strings.Contains(hdr, ":") {
+				return nil, fmt.Errorf("invalid auth matrix header %q for role %q: expected Key: Value", hdr, role)
+			}
+			out[role] = append(out[role], hdr)
+		}
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
 }

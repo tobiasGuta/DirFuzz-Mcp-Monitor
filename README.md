@@ -1,305 +1,179 @@
-# 🦇 DirFuzz v4.0
+# DirFuzz v4.0
 
-DirFuzz is a memory-efficient, high-performance web security testing and directory fuzzing engine. It is designed for a wide range of use cases, from large-scale automated scans and continuous monitoring to detailed manual vulnerability hunting and safe, AI-driven automation.
+DirFuzz is a memory-efficient, high-performance web security testing and directory fuzzing engine. It is built for fast local scans, interactive manual follow-up, raw request/response inspection, authorized distributed execution, and automated monitoring.
 
-This repository contains:
-- The core high-performance fuzzing **engine** (`pkg/engine`), which can be embedded in other Go applications.
-- A powerful **CLI runner** (`cmd/dirfuzz`) with a rich TUI for interactive fuzzing.
-- A **continuous monitoring** runner (`cmd/monitor`) for scheduled, automated security checks.
-- An **MCP (Model Context Protocol) Server** (`cmd/mcp`) for secure integration with AI assistants.
+## What’s Included
 
-* * * * *
+- `cmd/dirfuzz`: the main CLI scanner with the interactive TUI.
+- `cmd/monitor`: the scheduled monitoring runner.
+- `cmd/mcp`: the MCP server for AI-assisted workflows.
+- `pkg/engine`: the reusable scanning engine.
 
-## Key Capabilities & Features
+## Key Capabilities
 
-DirFuzz transcends a simple directory enumerator, acting as a complete protocol fuzzing suite tightly integrated with both AI environments and manual bug bounty workflows.
+- Fast HTTP/1.1 and HTTP/2 scanning with connection pooling, proxy support, and request mutation.
+- Smart filtering with status, size, word/line, regex, response-time, AutoFilter, and SimHash suppression.
+- WAF and anti-bot handling, including optional headless fallback when challenge responses are detected.
+- Recursive scanning, wildcard calibration, timing-oracle enumeration, and route harvesting from JS/OpenAPI/GraphQL.
+- Hidden parameter fuzzing with chunked probes and bisection to isolate interesting parameters.
+- Role-based auth matrix execution for comparing the same path across multiple header/cookie states.
+- Raw request/response capture with hex inspection and split-screen replay/diff workflows in the TUI.
+- Lua plugins for transformers, matchers, mutators, and active proof-of-concept flows.
+- Swarm mode for authorized distributed execution. It is opt-in only and stays disabled unless `--swarm` is provided.
+- Eagle mode, resume support, and continuous monitoring with webhook alerts.
+- MCP integration for scoped AI workflows.
 
--   **High-Performance HTTP Engine:** Built on a custom raw HTTP/1.1 and **HTTP/2** client with state-of-the-art connection pooling. It features **chunked transfer encoding** support, TLS cipher randomization, persistent connection recycling, and **SOCKS5/HTTP Proxy Rotation**.
--   **WAF Fingerprinting & Adaptive Evasion:** Automatically fingerprints responses against major Web Application Firewalls (AWS WAF, Cloudflare, Akamai, Barracuda, F5). When a 403 is encountered, DirFuzz can now use a stateful feedback loop (`--bypass-403`) that ranks bypass techniques by observed success rate, caps attempts per path with `--evasion-limit`, and writes a WAF bypass summary into the final report.
--   **Suite Bridge & Interactive TUI:** An interactive Terminal UI featuring real-time logging, response insights, and a **Suite Bridge**. With a single keystroke, you can send any discovered endpoint straight to **Burp Suite Repeater (`r`)** or **Intruder (`i`)**.
--   **Lua Plugin Ecosystem:** Write custom fuzzing logic using the built-in parallel Lua VM pool:
-    -   **Transformers:** Manipulate requests raw on-the-fly (`transform_plugin.go`).
-    -   **Matchers & Mutators:** Define custom payload generation and match signatures.
-    -   **Active PoC:** Enables dynamic, multi-stage exploitation (e.g. `Spring4Shell`) directly from Lua using the exposed `http_send()` function. 
--   **Smart Target Harvesting:** Before the main scan, `--harvest` can mine routes from JavaScript bundles, OpenAPI/Swagger specs, and GraphQL introspection to seed the queue with app-specific paths instead of only brute-forcing a static list.
--   **Smart Target & Recursion Tracking:** Configurable `MaxDepth` recursion, intelligent wildcard calibration (`--calibrate`) to baseline soft-404s, `SmartAPI` mode to restrict method fuzzing to API-like paths (`/api/`, `/v1/`), and a response-time oracle (`--time-oracle`) for blind enumeration when the app returns identical status codes and bodies.
--   **Advanced Filtering & Deduplication:** Filter by HTTP codes, response sizes, payload content boundaries, regex body matches, word/line counts, or strict response time thresholds. Employs a low-contention Bloom filter for instant memory-efficient deduplication, alongside an **AutoFilter threshold** (`-af`) and SimHash soft-404 clustering to suppress repetitive error templates.
--   **WebSocket Frame Tracking:** Configurable WebSocket frame extraction and logging constraint (`--max-ws-frames`) extending scope across WS endpoints.
--   **Eagle Mode & State Monitoring:** Conduct differential scans (`--eagle`) against previous baseline JSONL persistence files. A `cmd/monitor` binary orchestrates continuous execution hooks and **Discord webhook alerting** upon discovering new endpoints.
--   **Safe AI Tooling (MCP):** A completely isolated Model Context Protocol (MCP) server that exposes fuzzing APIs `dirfuzz_scan` & `dirfuzz_list_wordlists` to Claude or Copilot—fortified by strict SSRF prevention, H1-Scope JSON validator, and path-traversal resistant wordlist selection.
+## Build
 
-* * * * *
+Requirements: Go 1.24.2 or newer.
 
-## Provided Binaries & Runners
-
--   `cmd/dirfuzz`: The CLI runner encompassing the complete platform including the TUI, proxy forwarding (`--proxy-out`), reports, plugins, resume capabilities, and eagle mode.
--   `cmd/monitor`: A continuous monitor executing background loops over environment-driven configs to deliver JSONL differential alerting securely over Webhooks.
--   `cmd/mcp`: The Model Context Protocol abstraction layer exposing secure capabilities to underlying LLMs.
-
-* * * * *
-
-## Build & Deploy
-
-Requirements: Go 1.22+
-
-**Build the Go Binaries:**
 ```bash
 go build -o dirfuzz ./cmd/dirfuzz
 go build -o dirfuzz-monitor ./cmd/monitor
 go build -o dirfuzz-mcp ./cmd/mcp
 ```
 
-**Docker / Compose:**
-The included `docker-compose.yml` can build and run the monitor image and mount your wordlists and state files.
-1.  Copy `.env.example` to `.env` and configure your deployment targets.
-2.  Ensure your wordlists are located in the `./wordlists` directory.
-3.  Run `docker compose up --build -d` to start the monitor.
+## Quick Start
 
-* * * * *
+### Basic local scan
 
-## Example Usage
-
-**CLI Fuzzing (With TUI and Proxying):**
 ```bash
-# Fuzz deeply, send through local Burp proxy out-of-the-box
-./dirfuzz -u https://api.example.com -w wordlists/common.txt -t 50 -r -depth 3 --proxy-out http://127.0.0.1:8080
+./dirfuzz -u https://example.com -w wordlists/common.txt
 ```
 
-**Modern Web-App Triage:**
+This is the default behavior. No distributed mode is used unless you explicitly pass `--swarm`.
+
+### Headless JSONL output
+
 ```bash
-# Harvest routes from JS/specs, fuzz over HTTP/2, and keep bypass attempts tight
-./dirfuzz -u https://app.example.com -w wordlists/common.txt --harvest --h2 --bypass-403 --evasion-limit 4 -af 10
+./dirfuzz -u https://example.com -w wordlists/common.txt --no-tui -o results.jsonl
 ```
 
-**CLI Headless Fuzzing (Save to JSONL):**
+### Save raw request and response bytes
+
 ```bash
-# Great for continuous baselining or piping into analysis workflows
-./dirfuzz --no-tui -u https://example.com -w wordlists/common.txt -o results.jsonl -v
+./dirfuzz -u https://example.com -w wordlists/common.txt --save-raw
 ```
 
-**Blind Enumeration with Timing Oracle:**
+`--save-raw` unlocks the raw hex viewer, replay diff workflow, and raw-request replay in the TUI.
+
+### Anti-bot fallback
+
 ```bash
-# Useful when everything returns the same status/body but real paths take longer
+./dirfuzz -u https://example.com -w wordlists/common.txt --anti-bot-fallback
+```
+
+The fallback is enabled by default. You can disable it with `--anti-bot-fallback=false`.
+
+### Harvest routes before scanning
+
+```bash
+./dirfuzz -u https://app.example.com -w wordlists/common.txt --harvest
+```
+
+### Blind enumeration with the timing oracle
+
+```bash
 ./dirfuzz -u https://example.com -w wordlists/common.txt --time-oracle --time-n 5 --time-k 2.5 --time-trim
 ```
 
-**Lua Active PoC Bridge:**
+### WAF bypass attempts
+
+```bash
+./dirfuzz -u https://example.com -w wordlists/common.txt --bypass-403 --evasion-limit 4
+```
+
+### Role-based auth matrix
+
+```bash
+./dirfuzz -u https://example.com -w wordlists/common.txt \
+  --auth admin="Cookie: session=A" \
+  --auth user="Cookie: session=B"
+```
+
+You can also define this in a profile with `auth_matrix`.
+
+### Swarm mode
+
+```bash
+./dirfuzz -u https://example.com -w wordlists/common.txt --swarm --swarm-nodes 8 --swarm-chunk-size 5000
+./dirfuzz -u https://example.com -w wordlists/common.txt --swarm --swarm-provider lambda
+```
+
+Swarm mode is completely opt-in. Without `--swarm`, DirFuzz stays local and single-node.
+
+### Lua active PoC
+
 ```bash
 ./dirfuzz -u https://target.com -active-poc plugins/spring4shell.lua
 ```
 
-**Eagle Mode (Differential Scan against Baseline):**
+### Eagle mode
+
 ```bash
 ./dirfuzz -u https://api.example.com -w wordlists/common.txt --eagle previous_scan.jsonl
 ```
 
-**403 Bypass Systematizer:**
-```bash
-# Automatically retry every 403 with header injection and path mutations
-./dirfuzz -u https://example.com -w wordlists/common.txt --bypass-403 --evasion-limit 4 -t 50
-```
+## TUI Workflow
 
-### Flag notes that trip people up
+The TUI is where the new inspection features shine.
 
-- `-e` takes one comma-separated list of extensions. Use `-e php,html,js`, not multiple `-e` flags.
-- `-o` writes surfaced results to a file. It does not save every request the scanner sends.
-- `--save-raw` stores the raw request/response inside each saved hit when `-o` is enabled.
-- `--no-tui` is the cleanest mode when you want a plain JSONL file for piping or later analysis.
-- `--harvest` mines routes from JavaScript, OpenAPI/Swagger, and GraphQL before the main scan starts. Use `--harvest-js` or `--harvest-api` when you only want one discovery source family.
-- `--time-oracle` is for blind enumeration when every response looks the same. Tune `--time-n`, `--time-k`, and `--time-trim` to match the target's latency profile.
-- `--h2` switches the scan to HTTP/2, which is often worth trying against modern reverse proxies and WAFs that inspect H1 and H2 differently.
-- `--bypass-403` now learns over time. It ranks techniques by observed success rate, caps attempts per path with `--evasion-limit`, and includes a summary in the final report.
+- `Enter` on a hit opens the detail view.
+- `h` opens the raw request hex view.
+- `H` opens the raw response hex view.
+- `Tab` toggles request and response inside the hex view.
+- `R` saves the selected response as the diff reference.
+- `d` opens the split diff view against the saved reference.
+- `D` opens the replay diff view from the repeater.
+- `r` sends a selected request to the repeater.
+- `Esc` or `q` returns to the previous screen.
 
-Here is a practical workflow for using DirFuzz effectively in a real-world web application assessment:
+The list view footer also advertises the most important shortcuts so they are discoverable without opening detail first.
 
-### Suggested Web App Pentest Playbook
+## Diff and Replay Workflow
 
-1. Start with `--calibrate` and `-af` so wildcard and soft-404 noise gets suppressed early.
-2. Add `--harvest` to pull app-specific routes from JavaScript bundles and API specs before the brute-force pass.
-3. Try `--h2` on modern apps behind CDNs, ALBs, or reverse proxies, especially when H1 looks heavily filtered.
-4. Use `--time-oracle` when every endpoint returns the same body and status but real endpoints are slower.
-5. Use `--bypass-403 --evasion-limit 4` when you know the path exists but access controls are blocking you.
-6. Keep `--proxy-out` pointed at Burp Suite when you want to inspect, replay, and tune findings manually.
-7. Export a report with `--report` so the WAF bypass summary and high-signal hits are easy to share.
+1. Run a scan with `--save-raw`.
+2. Open a hit in the TUI with `Enter`.
+3. Press `R` to save the current response as your reference.
+4. Select another hit and press `d` to compare them.
+5. Or press `r` to send a request to the repeater, then use `D` to diff the replayed response against the saved reference.
 
-* * * * *
+The diff view highlights deleted text in red on the left and added text in green on the right.
 
-1\. The Recon Phase: "Deep & Quiet"
------------------------------------
+## Feature Notes
 
-Before going loud, you want to map the hidden structure without being blocked. Use `--calibrate` to handle those annoying custom "soft-404" pages and `-af` (Auto-filter) to ignore junk.
+- `--save-raw` is what enables the hex viewer, replay comparison, and diff screens.
+- `--auth` is repeatable and accepts `role=Header: Value||Header2: Value2`.
+- `--swarm-provider lambda` expects a Lambda function name in `DIRFUZZ_SWARM_LAMBDA_FUNCTION`, `SWARM_LAMBDA_FUNCTION`, or `AWS_LAMBDA_FUNCTION_NAME`.
+- `--harvest-js` and `--harvest-api` let you narrow route harvesting to one source family.
+- `--no-tui` is the best choice when you want machine-readable JSONL output.
+- `-e` accepts a comma-separated extension list such as `-e php,html,js`.
 
-Bash
+## Suggested Workflow
 
-```
-# Calibrate against wildcards, use recursion, and output to JSONL for your logs
-dirfuzz -u https://api.target.com -w common.txt --calibrate -r -depth 2 -o initial_recon.jsonl
+1. Start with `--calibrate` and `-af` to suppress wildcard and soft-404 noise.
+2. Add `--harvest` to seed the queue with app-specific routes.
+3. Use `--save-raw` when you want hex, replay, or diff inspection.
+4. Enable `--anti-bot-fallback` on targets that present WAF or challenge behavior.
+5. Use `--auth` when you want to compare the same path across multiple roles.
+6. Turn on `--swarm` only for authorized distributed execution.
+7. Export with `--no-tui -o results.jsonl` when you want a clean JSONL stream.
 
-```
+## Monitoring and MCP
 
--   **Why:** `--calibrate` baselines the server's behavior. If everything returns a 200 with 1243 bytes, DirFuzz will stop bothering you with those results.
+- `cmd/monitor` runs recurring scans and can alert on new findings.
+- `cmd/mcp` exposes the scanner through MCP for scoped AI workflows.
 
-2\. The Manual Bridge: "The Burp Workflow"
-------------------------------------------
+## Docker / Compose
 
-This is the "Killer Feature." Instead of copy-pasting URLs into Burp Suite, let DirFuzz act as your scout while you sit in the Repeater.
+The included `docker-compose.yml` can build and run the monitoring workflow.
 
-Bash
+1. Copy `.env.example` to `.env` and configure your targets.
+2. Place wordlists in `./wordlists`.
+3. Run `docker compose up --build -d`.
 
-```
-dirfuzz -u https://target.com -w big.txt -t 60 --proxy-out http://127.0.0.1:8080
+## Final Notes
 
-```
-
--   **Tactical Tip:** Launch with the **TUI enabled**. When you see a suspicious `403 Forbidden` or a `500 Internal Server Error`, hit **`r`**. It instantly fires that exact request into **Burp Repeater**, allowing you to test for bypasses (like `X-Forwarded-For` or path normalization) immediately.
-
-3\. Targeting APIs: "Method Swapping"
--------------------------------------
-
-Many hunters miss vulnerabilities because they only use `GET`. The `--smart-api` flag is high-signal for API bug hunting.
-
-Bash
-
-```
-dirfuzz -u https://target.com/api/v2/ -w api_endpoints.txt --smart-api -m GET,POST,PUT,DELETE,PATCH
-
-```
-
--   **Why:** `--smart-api` is intelligent. It won't try `DELETE` on a standard image directory, but it *will* cycle methods on paths that look like REST endpoints, potentially uncovering unauthorized data modification.
-
-4\. Bypassing Access Controls: "The 403 Systematizer"
------------------------------------------------------
-
-Sometimes a path exists but returns 403. Many security teams assume it's truly forbidden—but standard bypass techniques often work.
-
-Bash
-
-```
-dirfuzz -u https://target.com -w discovery.txt -t 50 --bypass-403
-
-```
-
--   **What it does:** On every `403` hit, DirFuzz automatically retries with 8 bypass techniques:
-    - Header injection: `X-Original-URL`, `X-Rewrite-URL`, `X-Custom-IP-Authorization`, `X-Forwarded-For`
-    - Path mutations: trailing slashes, dot-slashes (`/./`), URL-encoded slashes, double-slash prefixes
--   **Why:** Often misconfigured middleware or WAFs block on one representation but miss others. DirFuzz tests all common variants instantly and surfaces successful bypasses as separate results, passing them through your existing filters.
--   **Pro Tip:** Combine with `--proxy-out http://127.0.0.1:8080` to immediately test each bypass in Burp Repeater for manual validation.
-
-<img width="1913" height="994" alt="Screenshot 2026-05-12 221749" src="https://github.com/user-attachments/assets/10a5877d-9cbb-49e7-96e7-b1062f862c0d" />
-
-5\. The "Eagle Mode" for Continuous Income
-------------------------------------------
-
-If you are on a long-term private program, "New" is your best friend. New endpoints often lack the hardened security of the old ones.
-
-Bash
-
-```
-# Day 1: Establish baseline
-dirfuzz -u https://target.com -w discovery.txt -o baseline.jsonl
-
-# Day 7: Run Eagle Mode
-dirfuzz -u https://target.com -w discovery.txt --eagle baseline.jsonl
-
-```
-
--   **Why:** `--eagle` filters out everything you've already seen. It highlights **only what changed**. If a developer pushes a `/dev/` or `/backup/` folder on a Friday night, Eagle mode surfaces it instantly.
-
-6\. Hunting for Hidden Treasures: "The Mutator"
------------------------------------------------
-
-Backups and swap files are gold mines for source code disclosure.
-
-Bash
-
-```
-dirfuzz -u https://target.com -w files.txt -e php,asp,aspx --mutate
-
-```
-
--   **Why:** The `--mutate` flag will automatically check for `config.php.bak`, `index.php~`, or `.DS_Store`. These often contain hardcoded credentials or logic that the main app hides.
-
-7\. Advanced: The "Active PoC" (Lua)
-------------------------------------
-
-When a new CVE drops (like a Log4Shell or Spring4Shell), you can use the Lua engine to test for it at scale without needing a separate tool.
-
-Bash
-
-```
-dirfuzz -u https://target.com -w subdomains.txt -active-poc plugins/cve-2024-xxxx.lua
-
-```
-
--   **Why:** This allows for multi-stage fuzzing. Your Lua script can see a `403`, try a specific bypass header, and if it gets a `200`, log it as a critical hit.
-
-* * * * *
-
-### Pro-Tip: The "Bug Hunter's Stealth" Combo
-
-If you suspect a WAF (Cloudflare/Akamai) is tracking you:
-
-1.  **`-delay 200ms`**: Slow down to stay under the radar.
-
-2.  **`--proxy proxy_list.txt`**: Rotate your IP address through a list of SOCKS5 proxies to avoid IP-based rate limiting.
-
-3.  **`-ua "Custom User Agent"`**: Mimic a common browser or a known crawler.
-
-**Continuous Monitor (Env-driven):**
-```bash
-export TARGET=https://target.example.com
-export WORDLIST=/data/wordlists/common.txt
-export DISCORD_WEBHOOK=https://discordapp/api/webhooks/...
-export STATE_FILE=/data/state.jsonl
-export SCAN_INTERVAL=1h
-./dirfuzz-monitor
-```
-
-* * * * *
-
-## Engine & Embedding
-
-The scanning engine is implemented in `pkg/engine` and fully accommodates dependency embedding into other Go solutions.
-
-It offers a robust `Config` struct that natively drives logic across:
-- Connection pooling & HTTP/2 transports.
-- Outbound forwarding via `proxy-out`.
-- Recursive depth scanning and bounding concurrency.
-- Built-in persistence for checkpoint resumption (`LoadPreviousScan`).
-
-* * * * *
-
-## Advanced Integrations
-
-### Lua Plugin Handlers
-Place Lua scripts inside the `plugins/` directory or inject statically via CLI arguments (`--plugin-match` / `--plugin-mutate` / `--active-poc`).
-A pool of Lua VMs will execute handlers in parallel with high-performance CGO boundaries isolating custom behaviors securely from core concurrency blocks.
-
-### TUI Suite Bridge Integrations
-Upon launching the binary (without `--no-tui`), users navigate fuzzing results concurrently. The selection pane intercepts native commands:
-- **`r`** pipes current endpoint and session attributes directly to the Repeater.
-- **`i`** intercepts and injects parameters straight into Intruder deployments.
-
-* * * * *
-
-## Output Exports
-
-When `-o` is set, DirFuzz writes the results it surfaces as hits. The default format is `jsonl`, which is the most useful option for baselining, diffing, and later analysis. You can switch to `csv` for spreadsheet workflows or `url` for a clean list of paths suitable for piping. If you want a file that is easy to inspect line-by-line, pair `-o` with `--no-tui`.
-
-`--save-raw` adds the raw HTTP request/response bytes to each saved hit. It does not create a full request log by itself, and it only affects results that are actually written.
-
-For standalone summaries, use `--report` with `--report-format html|markdown`. The report now includes a WAF bypass summary table when `--bypass-403` is active, which is useful for comparing technique effectiveness across a scan.
-
-* * * * *
-
-## DirFuzz
-
-https://github.com/user-attachments/assets/ec012ec6-6230-423c-8564-9df753e4c5a7
-
-## Contributing
-Contributions and community bug reports are openly accepted. The project is managed with clear separation across plugins, engines, UI, and external integrations. Please log issues and open discussion threads before large refactors.
-
-* * * * *
-
-## License
-MIT
+- Normal scans are local and single-node by default.
+- Distributed execution only happens when `--swarm` is explicitly provided.
+- The TUI, raw capture, auth matrix, hidden parameter fuzzing, and replay/diff features all work without any extra setup beyond the relevant flags.

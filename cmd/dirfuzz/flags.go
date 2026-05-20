@@ -96,6 +96,12 @@ func parseFlags() cliConfig {
 	dryRun := flag.Bool("dry-run", false, "Estimate request volume and exit without sending traffic")
 	maxWSFrames := flag.Int("max-ws-frames", 5000, "Maximum number of WebSocket frames to store in memory")
 	fourOhThreeBypass := flag.Bool("bypass-403", false, "On every 403 hit, retry with path and header bypass techniques (X-Original-URL, dot-slash, url-encoding, …)")
+	antiBotFallback := flag.Bool("anti-bot-fallback", true, "Enable the headless browser anti-bot fallback when WAF or challenge responses are detected")
+	swarm := flag.Bool("swarm", false, "Enable distributed worker mode for large authorized scans")
+	swarmProvider := flag.String("swarm-provider", "", "Swarm provider backend: local or lambda")
+	swarmNodes := flag.Int("swarm-nodes", 4, "Number of worker nodes to fan out across")
+	swarmChunkSize := flag.Int("swarm-chunk-size", 5000, "Wordlist lines per worker chunk")
+	swarmWorker := flag.Bool("swarm-worker", false, "Internal worker entrypoint")
 
 	// ── Eagle mode ───────────────────────────────────────────────────────────
 	eagleFile := flag.String("eagle", "",
@@ -144,6 +150,8 @@ func parseFlags() cliConfig {
 	// ── Multi-value ──────────────────────────────────────────────────────────
 	var headers multiFlag
 	flag.Var(&headers, "H", "Add a custom header  (format: 'Key: Value', repeatable)")
+	var authEntries multiFlag
+	flag.Var(&authEntries, "auth", "Add an auth role mapping as role=Header: Value||Header2: Value2 (repeatable)")
 
 	flag.Usage = printUsage
 	flag.Parse()
@@ -172,6 +180,7 @@ func parseFlags() cliConfig {
 
 		UserAgent:    *ua,
 		Headers:      []string(headers),
+		AuthMatrix:   nil,
 		Cookie:       *cookie,
 		Methods:      *methods,
 		VerbTamper:   *verbTamper,
@@ -221,6 +230,7 @@ func parseFlags() cliConfig {
 		DryRun:              *dryRun,
 		MaxWSFrames:         *maxWSFrames,
 		FourOhThreeBypass:   *fourOhThreeBypass,
+		AntiBotFallback:     *antiBotFallback,
 
 		EagleFile: *eagleFile,
 
@@ -242,6 +252,13 @@ func parseFlags() cliConfig {
 		AllowPrivate: *allowPrivate,
 	}
 
+	if authMatrix, err := parseAuthMatrix([]string(authEntries)); err != nil {
+		fmt.Fprintf(os.Stderr, "error: invalid -auth value: %v\n", err)
+		os.Exit(1)
+	} else {
+		cfg.AuthMatrix = authMatrix
+	}
+
 	if cfg.Profile != "" {
 		if err := applyProfile(&cfg, setFlags); err != nil {
 			fmt.Fprintf(os.Stderr, "error: loading profile: %v\n", err)
@@ -255,7 +272,17 @@ func parseFlags() cliConfig {
 		cfg.ReportFormat = inferReportFormat(cfg.ReportFile)
 	}
 
-	if cfg.ActivePoC == "" {
+	if *swarm {
+		cfg.Swarm = true
+		cfg.SwarmProvider = strings.ToLower(strings.TrimSpace(*swarmProvider))
+		cfg.SwarmNodes = *swarmNodes
+		cfg.SwarmChunkSize = *swarmChunkSize
+	}
+	if *swarmWorker {
+		cfg.SwarmWorker = true
+	}
+
+	if cfg.ActivePoC == "" && !cfg.SwarmWorker {
 		if cfg.Target == "" {
 			fmt.Fprintln(os.Stderr, "error: -u <target> is required")
 			fmt.Fprintln(os.Stderr)
@@ -302,6 +329,19 @@ func parseFlags() cliConfig {
 		fmt.Fprintln(os.Stderr, "error: --h2 cannot be used together with --proxy")
 		os.Exit(1)
 	}
+	if cfg.Swarm {
+		if cfg.SwarmNodes < 1 {
+			fmt.Fprintln(os.Stderr, "error: --swarm-nodes must be >= 1")
+			os.Exit(1)
+		}
+		if cfg.SwarmChunkSize < 1 {
+			fmt.Fprintln(os.Stderr, "error: --swarm-chunk-size must be >= 1")
+			os.Exit(1)
+		}
+		if cfg.SwarmProvider == "" {
+			cfg.SwarmProvider = "local"
+		}
+	}
 	return cfg
 }
 
@@ -317,6 +357,7 @@ Quick examples:
   dirfuzz -u https://example.com -w wordlists/common.txt --no-tui -o results.jsonl
   dirfuzz -u https://example.com -w wordlists/common.txt -r -depth 3 --calibrate
   dirfuzz -u https://example.com -w wordlists/common.txt --eagle prev.jsonl
+  dirfuzz -u https://example.com -w wordlists/common.txt --swarm --swarm-provider=lambda
 
 All flags:
 `, cliVersion)

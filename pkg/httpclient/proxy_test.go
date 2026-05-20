@@ -12,6 +12,22 @@ import (
 	"time"
 )
 
+func TestParseSocks5ProxyPreservesAtInPassword(t *testing.T) {
+	auth, cleanAddr := parseSocks5Proxy("socks5://user:p@ssword@proxy.local:1080")
+	if auth == nil {
+		t.Fatal("expected auth to be parsed")
+	}
+	if auth.User != "user" {
+		t.Fatalf("user = %q, want %q", auth.User, "user")
+	}
+	if auth.Password != "p@ssword" {
+		t.Fatalf("password = %q, want %q", auth.Password, "p@ssword")
+	}
+	if cleanAddr != "proxy.local:1080" {
+		t.Fatalf("cleanAddr = %q, want %q", cleanAddr, "proxy.local:1080")
+	}
+}
+
 func TestHTTPProxyUsesAbsoluteFormForPlainHTTP(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

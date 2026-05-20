@@ -1,0 +1,4 @@
+./keycodes.go
+./mode.go
+./read.go
+./records.go

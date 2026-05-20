@@ -10,65 +10,67 @@ import (
 )
 
 type scanProfile struct {
-	Target              string        `yaml:"target" json:"target"`
-	Wordlist            string        `yaml:"wordlist" json:"wordlist"`
-	Threads             int           `yaml:"threads" json:"threads"`
-	Delay               time.Duration `yaml:"delay" json:"delay"`
-	RPS                 int           `yaml:"rps" json:"rps"`
-	UserAgent           string        `yaml:"user_agent" json:"user_agent"`
-	Headers             []string      `yaml:"headers" json:"headers"`
-	Cookie              string        `yaml:"cookie" json:"cookie"`
-	Methods             string        `yaml:"methods" json:"methods"`
-	Body                string        `yaml:"body" json:"body"`
-	Follow              bool          `yaml:"follow" json:"follow"`
-	MaxRedirects        int           `yaml:"max_redirects" json:"max_redirects"`
-	Timeout             time.Duration `yaml:"timeout" json:"timeout"`
-	Insecure            bool          `yaml:"insecure" json:"insecure"`
-	MatchCodes          string        `yaml:"match_codes" json:"match_codes"`
-	FilterSizes         string        `yaml:"filter_sizes" json:"filter_sizes"`
-	Extensions          string        `yaml:"extensions" json:"extensions"`
-	MatchRegex          string        `yaml:"match_regex" json:"match_regex"`
-	FilterRegex         string        `yaml:"filter_regex" json:"filter_regex"`
-	FilterWords         int           `yaml:"filter_words" json:"filter_words"`
-	FilterLines         int           `yaml:"filter_lines" json:"filter_lines"`
-	MatchWords          int           `yaml:"match_words" json:"match_words"`
-	MatchLines          int           `yaml:"match_lines" json:"match_lines"`
-	RTMin               time.Duration `yaml:"rt_min" json:"rt_min"`
-	RTMax               time.Duration `yaml:"rt_max" json:"rt_max"`
-	OutputFormat        string        `yaml:"output_format" json:"output_format"`
-	OutputFile          string        `yaml:"output_file" json:"output_file"`
-	ReportFile          string        `yaml:"report_file" json:"report_file"`
-	ReportFormat        string        `yaml:"report_format" json:"report_format"`
-	SaveRaw             bool          `yaml:"save_raw" json:"save_raw"`
-	Recursive           bool          `yaml:"recursive" json:"recursive"`
-	MaxDepth            int           `yaml:"max_depth" json:"max_depth"`
-	Mutate              bool          `yaml:"mutate" json:"mutate"`
-	SmartAPI            bool          `yaml:"smart_api" json:"smart_api"`
-	AutoFilterThreshold int           `yaml:"auto_filter_threshold" json:"auto_filter_threshold"`
-	SimhashThreshold    int           `yaml:"simhash_threshold" json:"simhash_threshold"`
-	SimhashClusterLimit int           `yaml:"simhash_cluster_limit" json:"simhash_cluster_limit"`
-	H2Mode              bool          `yaml:"h2" json:"h2"`
-	H2ConcurrentStreams int           `yaml:"h2_streams" json:"h2_streams"`
-	TimingOracle        bool          `yaml:"time_oracle" json:"time_oracle"`
-	TimeOracleK         float64       `yaml:"time_k" json:"time_k"`
-	TimeOracleN         int           `yaml:"time_n" json:"time_n"`
-	TimeTrim            bool          `yaml:"time_trim" json:"time_trim"`
-	Harvest             bool          `yaml:"harvest" json:"harvest"`
-	HarvestJS           bool          `yaml:"harvest_js" json:"harvest_js"`
-	HarvestAPI          bool          `yaml:"harvest_api" json:"harvest_api"`
-	EvasionLimit        int           `yaml:"evasion_limit" json:"evasion_limit"`
-	MaxRetries          int           `yaml:"max_retries" json:"max_retries"`
-	DryRun              bool          `yaml:"dry_run" json:"dry_run"`
-	EagleFile           string        `yaml:"eagle_file" json:"eagle_file"`
-	Resume              bool          `yaml:"resume" json:"resume"`
-	ResumeFile          string        `yaml:"resume_file" json:"resume_file"`
-	Calibrate           bool          `yaml:"calibrate" json:"calibrate"`
-	ProxyFile           string        `yaml:"proxy_file" json:"proxy_file"`
-	ProxyOut            string        `yaml:"proxy_out" json:"proxy_out"`
-	PluginMatch         string        `yaml:"plugin_match" json:"plugin_match"`
-	PluginMutate        string        `yaml:"plugin_mutate" json:"plugin_mutate"`
-	NoTUI               bool          `yaml:"no_tui" json:"no_tui"`
-	Verbose             bool          `yaml:"verbose" json:"verbose"`
+	Target              string              `yaml:"target" json:"target"`
+	Wordlist            string              `yaml:"wordlist" json:"wordlist"`
+	Threads             int                 `yaml:"threads" json:"threads"`
+	Delay               time.Duration       `yaml:"delay" json:"delay"`
+	RPS                 int                 `yaml:"rps" json:"rps"`
+	UserAgent           string              `yaml:"user_agent" json:"user_agent"`
+	Headers             []string            `yaml:"headers" json:"headers"`
+	AuthMatrix          map[string][]string `yaml:"auth_matrix" json:"auth_matrix"`
+	Cookie              string              `yaml:"cookie" json:"cookie"`
+	Methods             string              `yaml:"methods" json:"methods"`
+	Body                string              `yaml:"body" json:"body"`
+	Follow              bool                `yaml:"follow" json:"follow"`
+	MaxRedirects        int                 `yaml:"max_redirects" json:"max_redirects"`
+	Timeout             time.Duration       `yaml:"timeout" json:"timeout"`
+	Insecure            bool                `yaml:"insecure" json:"insecure"`
+	MatchCodes          string              `yaml:"match_codes" json:"match_codes"`
+	FilterSizes         string              `yaml:"filter_sizes" json:"filter_sizes"`
+	Extensions          string              `yaml:"extensions" json:"extensions"`
+	MatchRegex          string              `yaml:"match_regex" json:"match_regex"`
+	FilterRegex         string              `yaml:"filter_regex" json:"filter_regex"`
+	FilterWords         int                 `yaml:"filter_words" json:"filter_words"`
+	FilterLines         int                 `yaml:"filter_lines" json:"filter_lines"`
+	MatchWords          int                 `yaml:"match_words" json:"match_words"`
+	MatchLines          int                 `yaml:"match_lines" json:"match_lines"`
+	RTMin               time.Duration       `yaml:"rt_min" json:"rt_min"`
+	RTMax               time.Duration       `yaml:"rt_max" json:"rt_max"`
+	OutputFormat        string              `yaml:"output_format" json:"output_format"`
+	OutputFile          string              `yaml:"output_file" json:"output_file"`
+	ReportFile          string              `yaml:"report_file" json:"report_file"`
+	ReportFormat        string              `yaml:"report_format" json:"report_format"`
+	SaveRaw             bool                `yaml:"save_raw" json:"save_raw"`
+	Recursive           bool                `yaml:"recursive" json:"recursive"`
+	MaxDepth            int                 `yaml:"max_depth" json:"max_depth"`
+	Mutate              bool                `yaml:"mutate" json:"mutate"`
+	SmartAPI            bool                `yaml:"smart_api" json:"smart_api"`
+	AutoFilterThreshold int                 `yaml:"auto_filter_threshold" json:"auto_filter_threshold"`
+	SimhashThreshold    int                 `yaml:"simhash_threshold" json:"simhash_threshold"`
+	SimhashClusterLimit int                 `yaml:"simhash_cluster_limit" json:"simhash_cluster_limit"`
+	H2Mode              bool                `yaml:"h2" json:"h2"`
+	H2ConcurrentStreams int                 `yaml:"h2_streams" json:"h2_streams"`
+	TimingOracle        bool                `yaml:"time_oracle" json:"time_oracle"`
+	TimeOracleK         float64             `yaml:"time_k" json:"time_k"`
+	TimeOracleN         int                 `yaml:"time_n" json:"time_n"`
+	TimeTrim            bool                `yaml:"time_trim" json:"time_trim"`
+	Harvest             bool                `yaml:"harvest" json:"harvest"`
+	HarvestJS           bool                `yaml:"harvest_js" json:"harvest_js"`
+	HarvestAPI          bool                `yaml:"harvest_api" json:"harvest_api"`
+	EvasionLimit        int                 `yaml:"evasion_limit" json:"evasion_limit"`
+	MaxRetries          int                 `yaml:"max_retries" json:"max_retries"`
+	DryRun              bool                `yaml:"dry_run" json:"dry_run"`
+	EagleFile           string              `yaml:"eagle_file" json:"eagle_file"`
+	Resume              bool                `yaml:"resume" json:"resume"`
+	ResumeFile          string              `yaml:"resume_file" json:"resume_file"`
+	Calibrate           bool                `yaml:"calibrate" json:"calibrate"`
+	ProxyFile           string              `yaml:"proxy_file" json:"proxy_file"`
+	ProxyOut            string              `yaml:"proxy_out" json:"proxy_out"`
+	PluginMatch         string              `yaml:"plugin_match" json:"plugin_match"`
+	PluginMutate        string              `yaml:"plugin_mutate" json:"plugin_mutate"`
+	NoTUI               bool                `yaml:"no_tui" json:"no_tui"`
+	Verbose             bool                `yaml:"verbose" json:"verbose"`
+	AntiBotFallback     *bool               `yaml:"anti_bot_fallback" json:"anti_bot_fallback"`
 }
 
 func applyProfile(cfg *cliConfig, set map[string]bool) error {
@@ -114,6 +116,9 @@ func applyProfile(cfg *cliConfig, set map[string]bool) error {
 	}
 	if !set["H"] && len(p.Headers) > 0 {
 		cfg.Headers = p.Headers
+	}
+	if !set["auth"] && len(p.AuthMatrix) > 0 {
+		cfg.AuthMatrix = p.AuthMatrix
 	}
 	if !set["b"] && p.Cookie != "" {
 		cfg.Cookie = p.Cookie
@@ -270,6 +275,9 @@ func applyProfile(cfg *cliConfig, set map[string]bool) error {
 	}
 	if !set["v"] && p.Verbose {
 		cfg.Verbose = true
+	}
+	if !set["anti-bot-fallback"] && p.AntiBotFallback != nil {
+		cfg.AntiBotFallback = *p.AntiBotFallback
 	}
 	return nil
 }
