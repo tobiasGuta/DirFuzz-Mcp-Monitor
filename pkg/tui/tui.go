@@ -256,6 +256,23 @@ func renderEvasionSummary(rows []engine.EvasionScoreboardRow) string {
 	return sb.String()
 }
 
+func hasLabel(labels []string, target string) bool {
+	for _, label := range labels {
+		if strings.EqualFold(strings.TrimSpace(label), target) {
+			return true
+		}
+	}
+	return false
+}
+
+func anomalyRowStyle(r engine.Result) lipgloss.Style {
+	if r.IsEagleAlert {
+		// Slightly tint the full row to make drift alerts stand out while scrolling.
+		return lipgloss.NewStyle().Background(lipgloss.Color("#3a2632"))
+	}
+	return lipgloss.NewStyle()
+}
+
 type contentTypeRow struct {
 	label string
 	count int
@@ -432,6 +449,16 @@ func (m *Model) renderDashboardView() {
 	}
 
 	m.viewport.SetContent(strings.Join(dashboardSections, "\n\n"))
+}
+
+func (m *Model) toggleDashboardView() {
+	if m.state == StateDashboard {
+		m.state = StateList
+		m.renderListView()
+		return
+	}
+	m.state = StateDashboard
+	m.renderDashboardView()
 }
 
 func renderSparkline(values []int64, width int) string {
@@ -816,6 +843,13 @@ func (m *Model) initCommands() {
 				sb.WriteString(highlightStyle.Render(line) + " - " + mutedStyle.Render(cmd.Description) + "\n")
 			}
 			return sb.String()
+		}},
+		{Name: "metrics", Description: "Open or close the live dashboard", Args: "", Handler: func(m *Model, args string) string {
+			m.toggleDashboardView()
+			if m.state == StateDashboard {
+				return statusStyle.Render("[*] Dashboard opened")
+			}
+			return statusStyle.Render("[*] Dashboard closed")
 		}},
 		{Name: "spider", Description: "Toggle dynamic HTML/JS scraping", Args: "", Handler: func(m *Model, args string) string {
 			m.Engine.Config.RLock()
@@ -2116,13 +2150,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			output := m.commands[0].Handler(m, "")
 			m.appendCmd(output)
 		case "m":
-			if m.state == StateDashboard {
-				m.state = StateList
-				m.renderListView()
-			} else {
-				m.state = StateDashboard
-				m.renderDashboardView()
-			}
+			m.toggleDashboardView()
 			return m, nil
 		}
 	}
@@ -2377,6 +2405,8 @@ func formatResult(r engine.Result) string {
 		methodStr = "GET"
 	}
 
+	rowStyle := anomalyRowStyle(r)
+
 	statusColor := statusStyle
 	switch {
 	case r.StatusCode >= 200 && r.StatusCode < 300:
@@ -2419,7 +2449,11 @@ func formatResult(r engine.Result) string {
 		extras += mutedStyle.Render(fmt.Sprintf(" [%s]", r.ContentType))
 	}
 	if r.Duration > 0 {
-		extras += mutedStyle.Render(fmt.Sprintf(" [%s]", r.Duration.Round(time.Millisecond)))
+		durationStyle := mutedStyle
+		if hasLabel(r.Labels, "TIMING-ORACLE") {
+			durationStyle = lipgloss.NewStyle().Foreground(DraculaPink).Bold(true)
+		}
+		extras += durationStyle.Render(fmt.Sprintf(" [%s]", r.Duration.Round(time.Millisecond)))
 	}
 	if len(r.DiscoveredParams) > 0 {
 		extras += mutedStyle.Render(fmt.Sprintf(" [Params: %s]", strings.Join(r.DiscoveredParams, ",")))
@@ -2431,7 +2465,7 @@ func formatResult(r engine.Result) string {
 		extras += mutedStyle.Render(fmt.Sprintf(" [Conf: %s]", r.Confidence))
 	}
 
-	return fmt.Sprintf("%s %s %s %s %s %s%s",
+	return rowStyle.Render(fmt.Sprintf("%s %s %s %s %s %s%s",
 		statusColor.Render(fmt.Sprintf("[%d]", r.StatusCode)),
 		pinkStyle.Render(methodStr),
 		highlightStyle.Render(r.Path),
@@ -2439,7 +2473,7 @@ func formatResult(r engine.Result) string {
 		mutedStyle.Render(fmt.Sprintf("W:%d L:%d)", r.Words, r.Lines)),
 		extras,
 		"",
-	)
+	))
 }
 
 func (m *Model) View() string {
