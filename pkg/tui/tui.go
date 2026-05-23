@@ -2893,6 +2893,9 @@ func (m Model) Init() tea.Cmd {
 // ResultMsg wraps a result coming from the engine.
 type ResultMsg engine.Result
 
+// ResultStreamClosedMsg is sent when the engine result stream closes.
+type ResultStreamClosedMsg struct{}
+
 // LogEventMsg wraps a log event coming from the engine.
 type LogEventMsg engine.LogEvent
 
@@ -2969,7 +2972,7 @@ func (m Model) listenForResults() tea.Cmd {
 	return func() tea.Msg {
 		result, ok := <-m.resultsCh
 		if !ok {
-			return nil
+			return ResultStreamClosedMsg{}
 		}
 		return ResultMsg(result)
 	}
@@ -3227,6 +3230,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.dashboardDirty = true
 		cmds = append(cmds, m.listenForResults())
+
+	case ResultStreamClosedMsg:
+		m.quitting = true
+		return m, tea.Quit
 
 	case LogEventMsg:
 		event := engine.LogEvent(msg)

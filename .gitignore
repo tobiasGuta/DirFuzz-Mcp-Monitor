@@ -13,6 +13,8 @@ web/dist/
 web/build/
 wordlists/big.txt
 wordlists/actions.txt
+wordlists/directory-list-2.3-small.txt
+wordlists/common.txt
 
 # Go build artifacts
 *.test

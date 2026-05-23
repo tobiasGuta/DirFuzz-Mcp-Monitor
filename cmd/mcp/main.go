@@ -946,7 +946,15 @@ func runScan(
 	if opts.MaxDuration <= 0 {
 		opts.MaxDuration = engine.DefaultMaxScanDuration
 	}
-	scanCtx, cancel := context.WithTimeout(ctx, opts.MaxDuration)
+	var (
+		scanCtx context.Context
+		cancel  context.CancelFunc
+	)
+	if opts.MaxDuration > 0 {
+		scanCtx, cancel = context.WithTimeout(ctx, opts.MaxDuration)
+	} else {
+		scanCtx, cancel = context.WithCancel(ctx)
+	}
 	defer cancel()
 
 	eng.Start()

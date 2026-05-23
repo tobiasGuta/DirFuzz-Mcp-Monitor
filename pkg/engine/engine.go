@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -531,6 +532,7 @@ type Engine struct {
 	// Bounded hidden-parameter fuzzing queue + workers.
 	paramTaskChan chan ParamTask
 	paramTaskSeen sync.Map
+	paramTasksWg  sync.WaitGroup
 	// Cached immutable config snapshot read by workers.
 	configSnap atomic.Pointer[configSnapshot]
 	// Cached outbound HTTP clients for proxy replay to avoid creating a new
@@ -2222,6 +2224,9 @@ func (e *Engine) executeRequestWithRetry(ctx context.Context, targetURL string, 
 			}
 			return resp, nil
 		}
+		if isContextDoneError(ctx, err) {
+			return nil, err
+		}
 		e.emitLogEvent(LogLevelWarning, LogCategoryNetwork, EventRetryAttempt, fmt.Sprintf("request attempt %d failed: %v", attempt+1, err), map[string]interface{}{
 			"attempt":     attempt + 1,
 			"max_retries": retries,
@@ -2268,6 +2273,9 @@ func (e *Engine) executeH2RequestWithRetry(ctx context.Context, targetURL string
 		if err == nil {
 			return resp, nil
 		}
+		if isContextDoneError(ctx, err) {
+			return nil, err
+		}
 		e.emitLogEvent(LogLevelWarning, LogCategoryNetwork, EventRetryAttempt, fmt.Sprintf("h2 attempt %d failed: %v", attempt+1, err), map[string]interface{}{
 			"attempt":     attempt + 1,
 			"max_retries": retries,
@@ -2291,6 +2299,16 @@ func (e *Engine) executeH2RequestWithRetry(ctx context.Context, targetURL string
 		})
 	}
 	return resp, err
+}
+
+func isContextDoneError(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return ctx != nil && ctx.Err() != nil && errors.Is(err, ctx.Err())
 }
 
 func (e *Engine) executeH2Request(ctx context.Context, targetURL string, rawRequest []byte, timeout time.Duration) (*httpclient.RawResponse, error) {
@@ -3079,7 +3097,9 @@ func (e *Engine) worker(id int) {
 			}
 
 			if err != nil {
-				atomic.AddInt64(&e.CountConnErr, 1)
+				if !isContextDoneError(localCtx, err) {
+					atomic.AddInt64(&e.CountConnErr, 1)
+				}
 				if e.cleanupJob(shouldExit) {
 					return
 				}
@@ -3666,6 +3686,7 @@ func (e *Engine) Submit(job Job) {
 func (e *Engine) Wait() {
 	e.scannerWg.Wait()
 	e.activeJobs.Wait()
+	e.paramTasksWg.Wait()
 }
 
 // Shutdown requests a graceful stop and closes the result/log channels.

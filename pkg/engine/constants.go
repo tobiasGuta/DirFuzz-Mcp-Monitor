@@ -35,7 +35,7 @@ const (
 	DefaultHTTPTimeout     = 5 * time.Second
 	DefaultConnTimeout     = 3 * time.Second
 	DefaultReadTimeout     = 5 * time.Second
-	DefaultMaxScanDuration = 60 * time.Second
+	DefaultMaxScanDuration = 0
 )
 
 // ─── Worker Pool ─────────────────────────────────────────────────────────────

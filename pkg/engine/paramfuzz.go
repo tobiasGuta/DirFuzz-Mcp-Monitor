@@ -27,15 +27,19 @@ type paramBaseline struct {
 
 // ParamHit captures a hidden-parameter discovery result.
 type ParamHit struct {
-	Params      []string          `json:"params"`
-	ProbeURL    string            `json:"probe_url"`
-	StatusCode  int               `json:"status_code"`
-	Size        int               `json:"size"`
-	Words       int               `json:"words"`
-	Lines       int               `json:"lines"`
-	ContentType string            `json:"content_type,omitempty"`
-	Duration    time.Duration     `json:"duration,omitempty"`
-	Headers     map[string]string `json:"headers,omitempty"`
+	Params        []string          `json:"params"`
+	ProbeURL      string            `json:"probe_url"`
+	StatusCode    int               `json:"status_code"`
+	Size          int               `json:"size"`
+	Words         int               `json:"words"`
+	Lines         int               `json:"lines"`
+	ContentType   string            `json:"content_type,omitempty"`
+	Duration      time.Duration     `json:"duration,omitempty"`
+	Headers       map[string]string `json:"headers,omitempty"`
+	Request       string            `json:"request,omitempty"`
+	Response      string            `json:"response,omitempty"`
+	RequestBytes  []byte            `json:"-"`
+	ResponseBytes []byte            `json:"-"`
 }
 
 type ParamProbeFinding struct {
@@ -182,7 +186,10 @@ func (e *Engine) startParamFuzzWorkers(workerCount int) {
 
 func (e *Engine) paramFuzzWorker() {
 	for task := range e.paramTaskChan {
-		e.runParamTask(task)
+		func() {
+			defer e.paramTasksWg.Done()
+			e.runParamTask(task)
+		}()
 	}
 }
 
@@ -216,7 +223,7 @@ func shouldQueueParamFuzz(statusCode int, method string, bodySize int, bodyHash 
 		return false
 	}
 	switch statusCode {
-	case 200, 201, 202, 203, 204, 206, 301, 302, 303, 307, 308, 401, 403:
+	case 200, 201, 202, 203, 204, 206, 401, 403:
 		return true
 	default:
 		return false
@@ -233,10 +240,12 @@ func (e *Engine) enqueueParamTask(task ParamTask) bool {
 		return false
 	}
 
+	e.paramTasksWg.Add(1)
 	select {
 	case e.paramTaskChan <- task:
 		return true
 	default:
+		e.paramTasksWg.Done()
 		e.paramTaskSeen.Delete(key)
 		return false
 	}
@@ -288,6 +297,14 @@ func (e *Engine) runParamTask(task ParamTask) {
 		if len(hit.Headers) > 0 {
 			res.Headers = hit.Headers
 			res.Headers["Msg"] = msg
+		}
+		if hit.Request != "" || len(hit.RequestBytes) > 0 {
+			res.Request = hit.Request
+			res.RequestBytes = append([]byte(nil), hit.RequestBytes...)
+		}
+		if hit.Response != "" || len(hit.ResponseBytes) > 0 {
+			res.Response = hit.Response
+			res.ResponseBytes = append([]byte(nil), hit.ResponseBytes...)
 		}
 		e.handleResultNonBlocking(res)
 	}
@@ -446,7 +463,7 @@ func (e *Engine) probeParamSubset(
 		return ParamHit{}, false, nil
 	}
 
-	return ParamHit{
+	hit := ParamHit{
 		Params:      append([]string(nil), params...),
 		ProbeURL:    probeURL,
 		StatusCode:  resp.StatusCode,
@@ -456,7 +473,14 @@ func (e *Engine) probeParamSubset(
 		ContentType: contentType,
 		Duration:    resp.Duration,
 		Headers:     captureParamHeaders(resp.Headers),
-	}, true, nil
+	}
+	if snap != nil && snap.SaveRaw {
+		hit.Request = string(rawReq)
+		hit.Response = string(resp.Raw)
+		hit.RequestBytes = append([]byte(nil), rawReq...)
+		hit.ResponseBytes = append([]byte(nil), resp.Raw...)
+	}
+	return hit, true, nil
 }
 
 func buildParamProbeRequest(taskURL string, params []string, snap *configSnapshot) (string, []byte, error) {

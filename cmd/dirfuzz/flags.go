@@ -44,7 +44,7 @@ func parseFlags() cliConfig {
 	follow := flag.Bool("follow", false, "Follow HTTP redirects")
 	maxRedirects := flag.Int("max-redirects", engine.DefaultMaxRedirects, "Maximum redirects to follow")
 	timeout := flag.Duration("timeout", engine.DefaultHTTPTimeout, "Per-request timeout  (e.g. 5s)")
-	maxDuration := flag.Duration("max-duration", engine.DefaultMaxScanDuration, "Maximum total scan duration before shutdown (e.g. 60s)")
+	maxDuration := flag.Duration("max-duration", engine.DefaultMaxScanDuration, "Maximum total scan duration before shutdown (e.g. 60s, 0 = unlimited)")
 	insecure := flag.Bool("k", false, "Skip TLS certificate verification")
 
 	// ── Matching / filtering ─────────────────────────────────────────────────

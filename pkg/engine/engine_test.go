@@ -33,6 +33,29 @@ func TestBuildRequestSetsAcceptEncodingIdentity(t *testing.T) {
 	}
 }
 
+func TestExecuteRequestWithRetryDoesNotLogCanceledContextAsNetworkError(t *testing.T) {
+	eng := NewEngine(1, 100, 0.01)
+	defer eng.Shutdown()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	req := buildRequest(http.MethodGet, "/", "127.0.0.1", "DirFuzz/2.0", "", "")
+	_, err := eng.executeRequestWithRetry(ctx, "http://127.0.0.1/", req, time.Second, "")
+	if err == nil {
+		t.Fatal("expected canceled context error")
+	}
+	if !isContextDoneError(ctx, err) {
+		t.Fatalf("expected context cancellation error, got %v", err)
+	}
+
+	select {
+	case ev := <-eng.LogEvents:
+		t.Fatalf("expected no retry/network log for canceled context, got %s: %s", ev.Type, ev.Message)
+	default:
+	}
+}
+
 func TestClassify403(t *testing.T) {
 	tests := []struct {
 		name     string
