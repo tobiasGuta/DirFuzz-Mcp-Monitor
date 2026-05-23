@@ -2471,6 +2471,9 @@ func (m *Model) initCommands() {
 			harvest := m.Engine.Config.Harvest
 			harvestJS := m.Engine.Config.HarvestJS
 			harvestAPI := m.Engine.Config.HarvestAPI
+			harvestResponse := m.Engine.Config.HarvestResponse
+			harvestResponseDepth := m.Engine.Config.HarvestResponseDepth
+			harvestResponseFetch := m.Engine.Config.HarvestResponseFetch
 			evasionLimit := m.Engine.Config.EvasionLimit
 			maxRetries := m.Engine.Config.MaxRetries
 			saveRaw := m.Engine.Config.SaveRaw
@@ -2717,6 +2720,15 @@ func (m *Model) initCommands() {
 			}
 			if harvestAPI {
 				writeLine("  --harvest-api")
+			}
+			if harvestResponse {
+				writeLine("  --harvest-response")
+			}
+			if harvestResponseDepth != engine.DefaultHarvestResponseDepth {
+				writeLine(fmt.Sprintf("  --harvest-response-depth %d", harvestResponseDepth))
+			}
+			if harvestResponseFetch != engine.DefaultHarvestResponseFetch {
+				writeLine(fmt.Sprintf("  --harvest-response-fetch %d", harvestResponseFetch))
 			}
 			if evasionLimit != engine.DefaultEvasionLimit {
 				writeLine(fmt.Sprintf("  --evasion-limit %d", evasionLimit))

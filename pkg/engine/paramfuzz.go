@@ -66,109 +66,6 @@ type ParamProbeReport struct {
 
 const paramChunkSize = 50
 
-var defaultParamWordlist = []string{
-	"action",
-	"admin",
-	"api",
-	"auth",
-	"auth_token",
-	"callback",
-	"cmd",
-	"continue",
-	"controller",
-	"count",
-	"csrf",
-	"data",
-	"debug",
-	"destination",
-	"download",
-	"edit",
-	"email",
-	"endpoint",
-	"exec",
-	"export",
-	"file",
-	"filter",
-	"format",
-	"group",
-	"hash",
-	"height",
-	"host",
-	"id",
-	"include",
-	"index",
-	"input",
-	"item",
-	"lang",
-	"language",
-	"layout",
-	"limit",
-	"locale",
-	"login",
-	"logout",
-	"method",
-	"mode",
-	"module",
-	"name",
-	"next",
-	"nonce",
-	"object",
-	"offset",
-	"open",
-	"op",
-	"order",
-	"output",
-	"page",
-	"page_num",
-	"page_number",
-	"password",
-	"path",
-	"preview",
-	"print",
-	"p",
-	"query",
-	"q",
-	"range",
-	"redirect",
-	"redirect_to",
-	"ref",
-	"referrer",
-	"response",
-	"return",
-	"route",
-	"search",
-	"select",
-	"section",
-	"show",
-	"sort",
-	"source",
-	"state",
-	"status",
-	"start",
-	"step",
-	"style",
-	"submit",
-	"target",
-	"template",
-	"template_id",
-	"test",
-	"theme",
-	"time",
-	"token",
-	"type",
-	"uid",
-	"url",
-	"user",
-	"username",
-	"value",
-	"view",
-	"width",
-	"xml",
-	"yaml",
-	"x",
-	"y",
-}
-
 var paramProbeValues = []string{"a", "b", "c", "d", "e"}
 
 func (e *Engine) startParamFuzzWorkers(workerCount int) {
@@ -195,6 +92,10 @@ func (e *Engine) paramFuzzWorker() {
 
 func (e *Engine) queueParamFuzzFromResult(res Result, bodySize int, bodyHash uint64) {
 	if e == nil || res.URL == "" || res.IsAutoFilter {
+		return
+	}
+	snap := e.configSnap.Load()
+	if len(paramCandidates(nil, snap)) == 0 {
 		return
 	}
 	if !shouldQueueParamFuzz(res.StatusCode, res.Method, bodySize, bodyHash) {
@@ -332,10 +233,7 @@ func (e *Engine) FuzzParams(ctx context.Context, task ParamTask, customWordlist 
 		snap = e.configSnap.Load()
 	}
 
-	candidates := uniqueStrings(customWordlist)
-	if len(candidates) == 0 {
-		candidates = uniqueStrings(defaultParamWordlist)
-	}
+	candidates := paramCandidates(customWordlist, snap)
 	if len(candidates) == 0 {
 		return nil, nil
 	}
@@ -647,7 +545,10 @@ func (e *Engine) ProbeHiddenParams(ctx context.Context, targetURL, rawPath, meth
 		size:       bodySize,
 		hash:       bodyHash,
 	}
-	candidates := uniqueStrings(defaultParamWordlist)
+	candidates := paramCandidates(nil, snap)
+	if len(candidates) == 0 {
+		return report, nil
+	}
 	hits := e.discoverParamHits(ctx, task, candidates, baseline, snap)
 	for _, hit := range hits {
 		report.Findings = append(report.Findings, ParamProbeFinding{
@@ -663,6 +564,17 @@ func (e *Engine) ProbeHiddenParams(ctx context.Context, targetURL, rawPath, meth
 		})
 	}
 	return report, nil
+}
+
+func paramCandidates(customWordlist []string, snap *configSnapshot) []string {
+	candidates := uniqueStrings(customWordlist)
+	if len(candidates) > 0 {
+		return candidates
+	}
+	if snap == nil {
+		return nil
+	}
+	return uniqueStrings(snap.ParamWordlist)
 }
 
 func uniqueStrings(values []string) []string {

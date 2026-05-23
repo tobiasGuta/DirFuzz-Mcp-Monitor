@@ -16,6 +16,7 @@ DirFuzz is a memory-efficient, high-performance web security testing and directo
 - WAF and anti-bot handling, including optional headless fallback when challenge responses are detected.
 - Recursive scanning, wildcard calibration, timing-oracle enumeration, and route harvesting from JS/OpenAPI/GraphQL.
 - Hidden parameter fuzzing with chunked probes and bisection to isolate interesting parameters.
+- Harvesting from JavaScript, OpenAPI, GraphQL, and generic response bodies such as JSON endpoint lists.
 - Role-based auth matrix execution for comparing the same path across multiple header/cookie states.
 - Raw request/response capture with hex inspection and split-screen replay/diff workflows in the TUI.
 - Live system logs, a multi-tab metrics dashboard, log search/filter/export, and context-aware related logs in the TUI.
@@ -71,6 +72,29 @@ The fallback is enabled by default. You can disable it with `--anti-bot-fallback
 ```bash
 ./dirfuzz -u https://app.example.com -w wordlists/common.txt --harvest
 ```
+
+### Harvest endpoints from JSON API responses
+
+```bash
+./dirfuzz -u https://api.example.com/api/ -w wordlists/common.txt \
+  --harvest-response \
+  --harvest-response-depth 3 \
+  --harvest-response-fetch 100
+```
+
+This is useful for APIs that advertise child routes in ordinary responses, for example:
+
+```json
+{
+  "endpoints": [
+    "/api/user",
+    "/api/jobs",
+    "/api/applications"
+  ]
+}
+```
+
+`--harvest-response-depth` controls how many follow-up layers DirFuzz will inspect after the initial response, and `--harvest-response-fetch` caps how many follow-up API responses it will fetch during harvesting.
 
 ### Blind enumeration with the timing oracle
 
@@ -155,6 +179,9 @@ The diff view highlights deleted text in red on the left and added text in green
 - `--auth` is repeatable and accepts `role=Header: Value||Header2: Value2`.
 - `--swarm-provider lambda` expects a Lambda function name in `DIRFUZZ_SWARM_LAMBDA_FUNCTION`, `SWARM_LAMBDA_FUNCTION`, or `AWS_LAMBDA_FUNCTION_NAME`.
 - `--harvest-js` and `--harvest-api` let you narrow route harvesting to one source family.
+- `--harvest-response` narrows harvesting to generic HTTP response bodies, which is useful for JSON APIs that advertise child endpoints.
+- `--harvest-response-depth` and `--harvest-response-fetch` control how far response-driven harvesting follows discovered API endpoints and how many follow-up fetches it may spend.
+- Hidden parameter fuzzing is now opt-in through `--param-wordlist` (or `--param-wordlists`); when no parameter wordlist is provided, automatic param fuzzing stays off.
 - `--no-tui` is the best choice when you want machine-readable JSONL output.
 - `-e` accepts a comma-separated extension list such as `-e php,html,js`.
 
@@ -163,10 +190,11 @@ The diff view highlights deleted text in red on the left and added text in green
 1. Start with `--calibrate` and `-af` to suppress wildcard and soft-404 noise.
 2. Add `--harvest` to seed the queue with app-specific routes.
 3. Use `--save-raw` when you want hex, replay, or diff inspection.
-4. Enable `--anti-bot-fallback` on targets that present WAF or challenge behavior.
-5. Use `--auth` when you want to compare the same path across multiple roles.
-6. Turn on `--swarm` only for authorized distributed execution.
-7. Export with `--no-tui -o results.jsonl` when you want a clean JSONL stream.
+4. Add `--param-wordlist path/to/params.txt` when you want hidden parameter fuzzing during a scan.
+5. Enable `--anti-bot-fallback` on targets that present WAF or challenge behavior.
+6. Use `--auth` when you want to compare the same path across multiple roles.
+7. Turn on `--swarm` only for authorized distributed execution.
+8. Export with `--no-tui -o results.jsonl` when you want a clean JSONL stream.
 
 ## Monitoring and MCP
 
@@ -185,4 +213,4 @@ The included `docker-compose.yml` can build and run the monitoring workflow.
 
 - Normal scans are local and single-node by default.
 - Distributed execution only happens when `--swarm` is explicitly provided.
-- The TUI, raw capture, auth matrix, hidden parameter fuzzing, and replay/diff features all work without any extra setup beyond the relevant flags.
+- The TUI, raw capture, auth matrix, and replay/diff features work without extra setup; hidden parameter fuzzing requires `--param-wordlist`.

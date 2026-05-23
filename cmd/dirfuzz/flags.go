@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"os"
@@ -24,6 +25,8 @@ func parseFlags() cliConfig {
 	// ── Required ─────────────────────────────────────────────────────────────
 	target := flag.String("u", "", "Target URL to fuzz  (required)")
 	wordlist := flag.String("w", "", "Path to wordlist file  (required, unless -resume)")
+	paramWordlist := flag.String("param-wordlist", "", "Path to parameter wordlist; enables automatic parameter fuzzing when set")
+	flag.StringVar(paramWordlist, "param-wordlists", "", "Alias for --param-wordlist")
 	profile := flag.String("profile", "", "Path to YAML/JSON scan profile; explicit CLI flags override profile values")
 
 	// ── Workers / throttle ────────────────────────────────────────────────────
@@ -89,9 +92,12 @@ func parseFlags() cliConfig {
 	timeK := flag.Float64("time-k", engine.TimingOracleDefaultK, "Timing oracle sigma multiplier")
 	timeN := flag.Int("time-n", engine.TimingOracleDefaultRepeatN, "Timing oracle requests per path")
 	timeTrim := flag.Bool("time-trim", false, "Trim highest and lowest timing samples before analysis")
-	harvest := flag.Bool("harvest", false, "Harvest endpoints from JS, OpenAPI, and GraphQL before scanning")
+	harvest := flag.Bool("harvest", false, "Harvest endpoints from JS, OpenAPI, GraphQL, and generic response bodies before scanning")
 	harvestJS := flag.Bool("harvest-js", false, "Harvest endpoints from JavaScript only")
 	harvestAPI := flag.Bool("harvest-api", false, "Harvest endpoints from OpenAPI and GraphQL only")
+	harvestResponse := flag.Bool("harvest-response", false, "Harvest endpoints from generic HTTP responses, especially JSON API bodies")
+	harvestResponseDepth := flag.Int("harvest-response-depth", engine.DefaultHarvestResponseDepth, "Maximum follow-up depth for response-driven endpoint harvesting")
+	harvestResponseFetch := flag.Int("harvest-response-fetch", engine.DefaultHarvestResponseFetch, "Maximum number of follow-up response fetches for response-driven harvesting")
 	evasionLimit := flag.Int("evasion-limit", engine.DefaultEvasionLimit, "Max bypass techniques to try per path")
 	maxRetries := flag.Int("retry", 0, "Retry failed requests up to N times on connection error")
 	dryRun := flag.Bool("dry-run", false, "Estimate request volume and exit without sending traffic")
@@ -171,9 +177,10 @@ func parseFlags() cliConfig {
 	}
 
 	cfg := cliConfig{
-		Target:   *target,
-		Wordlist: *wordlist,
-		Profile:  *profile,
+		Target:        *target,
+		Wordlist:      *wordlist,
+		Profile:       *profile,
+		ParamWordlist: *paramWordlist,
 
 		Threads:     *threads,
 		Delay:       *delay,
@@ -211,28 +218,31 @@ func parseFlags() cliConfig {
 		ReportFormat: *reportFormat,
 		SaveRaw:      *saveRaw,
 
-		Recursive:           *recursive,
-		MaxDepth:            *maxDepth,
-		Mutate:              *mutate,
-		SmartAPI:            *smartAPI,
-		AutoFilterThreshold: *autoFilterThreshold,
-		SimhashThreshold:    *simhashThreshold,
-		SimhashClusterLimit: *simhashClusterLimit,
-		H2Mode:              *h2Mode,
-		H2ConcurrentStreams: *h2Streams,
-		TimingOracle:        *timeOracle,
-		TimeOracleK:         *timeK,
-		TimeOracleN:         *timeN,
-		TimeTrim:            *timeTrim,
-		Harvest:             *harvest,
-		HarvestJS:           *harvestJS,
-		HarvestAPI:          *harvestAPI,
-		EvasionLimit:        *evasionLimit,
-		MaxRetries:          *maxRetries,
-		DryRun:              *dryRun,
-		MaxWSFrames:         *maxWSFrames,
-		FourOhThreeBypass:   *fourOhThreeBypass,
-		AntiBotFallback:     *antiBotFallback,
+		Recursive:            *recursive,
+		MaxDepth:             *maxDepth,
+		Mutate:               *mutate,
+		SmartAPI:             *smartAPI,
+		AutoFilterThreshold:  *autoFilterThreshold,
+		SimhashThreshold:     *simhashThreshold,
+		SimhashClusterLimit:  *simhashClusterLimit,
+		H2Mode:               *h2Mode,
+		H2ConcurrentStreams:  *h2Streams,
+		TimingOracle:         *timeOracle,
+		TimeOracleK:          *timeK,
+		TimeOracleN:          *timeN,
+		TimeTrim:             *timeTrim,
+		Harvest:              *harvest,
+		HarvestJS:            *harvestJS,
+		HarvestAPI:           *harvestAPI,
+		HarvestResponse:      *harvestResponse,
+		HarvestResponseDepth: *harvestResponseDepth,
+		HarvestResponseFetch: *harvestResponseFetch,
+		EvasionLimit:         *evasionLimit,
+		MaxRetries:           *maxRetries,
+		DryRun:               *dryRun,
+		MaxWSFrames:          *maxWSFrames,
+		FourOhThreeBypass:    *fourOhThreeBypass,
+		AntiBotFallback:      *antiBotFallback,
 
 		EagleFile: *eagleFile,
 
@@ -272,6 +282,14 @@ func parseFlags() cliConfig {
 	}
 	if cfg.ReportFormat == "" && cfg.ReportFile != "" {
 		cfg.ReportFormat = inferReportFormat(cfg.ReportFile)
+	}
+	if cfg.ParamWordlist != "" {
+		words, err := loadWordlistEntries(cfg.ParamWordlist)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: loading --param-wordlist: %v\n", err)
+			os.Exit(1)
+		}
+		cfg.ParamWords = words
 	}
 
 	if *swarm {
@@ -396,6 +414,29 @@ func splitTrimmed(s string) []string {
 		}
 	}
 	return out
+}
+
+func loadWordlistEntries(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var entries []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(strings.TrimRight(scanner.Text(), "\r"))
+		if line == "" {
+			continue
+		}
+		entries = append(entries, line)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 // mustCSVInts wraps csvInts and exits on error.

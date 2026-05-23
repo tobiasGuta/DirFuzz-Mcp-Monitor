@@ -19,57 +19,61 @@ import (
 // SwarmWorkerConfig carries the scan settings that are safe to serialize to a
 // worker runtime.
 type SwarmWorkerConfig struct {
-	Threads             int                 `json:"threads"`
-	UserAgent           string              `json:"user_agent,omitempty"`
-	Headers             map[string]string   `json:"headers,omitempty"`
-	AuthMatrix          map[string][]string `json:"auth_matrix,omitempty"`
-	MatchCodes          []int               `json:"match_codes,omitempty"`
-	FilterSizes         []int               `json:"filter_sizes,omitempty"`
-	MatchRegex          string              `json:"match_regex,omitempty"`
-	FilterRegex         string              `json:"filter_regex,omitempty"`
-	Extensions          []string            `json:"extensions,omitempty"`
-	Methods             []string            `json:"methods,omitempty"`
-	Timeout             time.Duration       `json:"timeout,omitempty"`
-	Insecure            bool                `json:"insecure,omitempty"`
-	Delay               time.Duration       `json:"delay,omitempty"`
-	RPS                 int                 `json:"rps,omitempty"`
-	FollowRedirects     bool                `json:"follow_redirects,omitempty"`
-	MaxRedirects        int                 `json:"max_redirects,omitempty"`
-	RequestBody         string              `json:"request_body,omitempty"`
-	FilterWords         int                 `json:"filter_words,omitempty"`
-	FilterLines         int                 `json:"filter_lines,omitempty"`
-	MatchWords          int                 `json:"match_words,omitempty"`
-	MatchLines          int                 `json:"match_lines,omitempty"`
-	FilterRTMin         time.Duration       `json:"filter_rt_min,omitempty"`
-	FilterRTMax         time.Duration       `json:"filter_rt_max,omitempty"`
-	ProxyOut            string              `json:"proxy_out,omitempty"`
-	SaveRaw             bool                `json:"save_raw,omitempty"`
-	AntiBotFallback     bool                `json:"anti_bot_fallback,omitempty"`
-	AllowPrivateTargets bool                `json:"allow_private_targets,omitempty"`
-	Recursive           bool                `json:"recursive,omitempty"`
-	MaxDepth            int                 `json:"max_depth,omitempty"`
-	SmartAPI            bool                `json:"smart_api,omitempty"`
-	Mutate              bool                `json:"mutate,omitempty"`
-	AutoFilterThreshold int                 `json:"auto_filter_threshold,omitempty"`
-	SimhashThreshold    int                 `json:"simhash_threshold,omitempty"`
-	SimhashClusterLimit int                 `json:"simhash_cluster_limit,omitempty"`
-	H2Mode              bool                `json:"h2_mode,omitempty"`
-	H2ConcurrentStreams int                 `json:"h2_concurrent_streams,omitempty"`
-	TimingOracle        bool                `json:"timing_oracle,omitempty"`
-	TimeOracleK         float64             `json:"time_oracle_k,omitempty"`
-	TimeOracleN         int                 `json:"time_oracle_n,omitempty"`
-	TimeTrim            bool                `json:"time_trim,omitempty"`
-	Harvest             bool                `json:"harvest,omitempty"`
-	HarvestJS           bool                `json:"harvest_js,omitempty"`
-	HarvestAPI          bool                `json:"harvest_api,omitempty"`
-	EvasionLimit        int                 `json:"evasion_limit,omitempty"`
-	MaxRetries          int                 `json:"max_retries,omitempty"`
-	VerbTamper          bool                `json:"verb_tamper,omitempty"`
-	FourOhThreeBypass   bool                `json:"four_oh_three_bypass,omitempty"`
-	ProxyFile           string              `json:"proxy_file,omitempty"`
-	EagleFile           string              `json:"eagle_file,omitempty"`
-	PluginMatch         string              `json:"plugin_match,omitempty"`
-	PluginMutate        string              `json:"plugin_mutate,omitempty"`
+	Threads              int                 `json:"threads"`
+	UserAgent            string              `json:"user_agent,omitempty"`
+	Headers              map[string]string   `json:"headers,omitempty"`
+	AuthMatrix           map[string][]string `json:"auth_matrix,omitempty"`
+	MatchCodes           []int               `json:"match_codes,omitempty"`
+	FilterSizes          []int               `json:"filter_sizes,omitempty"`
+	MatchRegex           string              `json:"match_regex,omitempty"`
+	FilterRegex          string              `json:"filter_regex,omitempty"`
+	Extensions           []string            `json:"extensions,omitempty"`
+	Methods              []string            `json:"methods,omitempty"`
+	Timeout              time.Duration       `json:"timeout,omitempty"`
+	Insecure             bool                `json:"insecure,omitempty"`
+	Delay                time.Duration       `json:"delay,omitempty"`
+	RPS                  int                 `json:"rps,omitempty"`
+	FollowRedirects      bool                `json:"follow_redirects,omitempty"`
+	MaxRedirects         int                 `json:"max_redirects,omitempty"`
+	RequestBody          string              `json:"request_body,omitempty"`
+	FilterWords          int                 `json:"filter_words,omitempty"`
+	FilterLines          int                 `json:"filter_lines,omitempty"`
+	MatchWords           int                 `json:"match_words,omitempty"`
+	MatchLines           int                 `json:"match_lines,omitempty"`
+	FilterRTMin          time.Duration       `json:"filter_rt_min,omitempty"`
+	FilterRTMax          time.Duration       `json:"filter_rt_max,omitempty"`
+	ProxyOut             string              `json:"proxy_out,omitempty"`
+	SaveRaw              bool                `json:"save_raw,omitempty"`
+	AntiBotFallback      bool                `json:"anti_bot_fallback,omitempty"`
+	AllowPrivateTargets  bool                `json:"allow_private_targets,omitempty"`
+	Recursive            bool                `json:"recursive,omitempty"`
+	MaxDepth             int                 `json:"max_depth,omitempty"`
+	SmartAPI             bool                `json:"smart_api,omitempty"`
+	Mutate               bool                `json:"mutate,omitempty"`
+	AutoFilterThreshold  int                 `json:"auto_filter_threshold,omitempty"`
+	SimhashThreshold     int                 `json:"simhash_threshold,omitempty"`
+	SimhashClusterLimit  int                 `json:"simhash_cluster_limit,omitempty"`
+	H2Mode               bool                `json:"h2_mode,omitempty"`
+	H2ConcurrentStreams  int                 `json:"h2_concurrent_streams,omitempty"`
+	TimingOracle         bool                `json:"timing_oracle,omitempty"`
+	TimeOracleK          float64             `json:"time_oracle_k,omitempty"`
+	TimeOracleN          int                 `json:"time_oracle_n,omitempty"`
+	TimeTrim             bool                `json:"time_trim,omitempty"`
+	Harvest              bool                `json:"harvest,omitempty"`
+	HarvestJS            bool                `json:"harvest_js,omitempty"`
+	HarvestAPI           bool                `json:"harvest_api,omitempty"`
+	HarvestResponse      bool                `json:"harvest_response,omitempty"`
+	HarvestResponseDepth int                 `json:"harvest_response_depth,omitempty"`
+	HarvestResponseFetch int                 `json:"harvest_response_fetch,omitempty"`
+	ParamWordlist        []string            `json:"param_wordlist,omitempty"`
+	EvasionLimit         int                 `json:"evasion_limit,omitempty"`
+	MaxRetries           int                 `json:"max_retries,omitempty"`
+	VerbTamper           bool                `json:"verb_tamper,omitempty"`
+	FourOhThreeBypass    bool                `json:"four_oh_three_bypass,omitempty"`
+	ProxyFile            string              `json:"proxy_file,omitempty"`
+	EagleFile            string              `json:"eagle_file,omitempty"`
+	PluginMatch          string              `json:"plugin_match,omitempty"`
+	PluginMutate         string              `json:"plugin_mutate,omitempty"`
 }
 
 // SwarmWorkerRequest describes a single worker invocation.
@@ -304,6 +308,10 @@ func applySwarmConfig(e *Engine, cfg SwarmWorkerConfig) error {
 		c.Harvest = cfg.Harvest
 		c.HarvestJS = cfg.HarvestJS
 		c.HarvestAPI = cfg.HarvestAPI
+		c.HarvestResponse = cfg.HarvestResponse
+		c.HarvestResponseDepth = cfg.HarvestResponseDepth
+		c.HarvestResponseFetch = cfg.HarvestResponseFetch
+		c.ParamWordlist = append([]string(nil), cfg.ParamWordlist...)
 		c.EvasionLimit = cfg.EvasionLimit
 		c.MaxRetries = cfg.MaxRetries
 		c.VerbTamper = cfg.VerbTamper

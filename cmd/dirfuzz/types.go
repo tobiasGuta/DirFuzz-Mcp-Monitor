@@ -17,9 +17,11 @@ func (f *multiFlag) Set(s string) error { *f = append(*f, s); return nil }
 // It is built once in parseFlags() and passed to run().
 type cliConfig struct {
 	// ── Required ─────────────────────────────────────────────────────────────
-	Target   string
-	Wordlist string
-	Profile  string
+	Target        string
+	Wordlist      string
+	Profile       string
+	ParamWordlist string
+	ParamWords    []string
 
 	// ── Workers / throttle ────────────────────────────────────────────────────
 	Threads     int
@@ -62,33 +64,36 @@ type cliConfig struct {
 	SaveRaw      bool
 
 	// ── Scan modes ───────────────────────────────────────────────────────────
-	Recursive           bool
-	MaxDepth            int
-	Mutate              bool
-	SmartAPI            bool
-	AutoFilterThreshold int
-	SimhashThreshold    int
-	SimhashClusterLimit int
-	H2Mode              bool
-	H2ConcurrentStreams int
-	TimingOracle        bool
-	TimeOracleK         float64
-	TimeOracleN         int
-	TimeTrim            bool
-	Harvest             bool
-	HarvestJS           bool
-	HarvestAPI          bool
-	EvasionLimit        int
-	MaxRetries          int
-	DryRun              bool
-	MaxWSFrames         int
-	FourOhThreeBypass   bool
-	AntiBotFallback     bool
-	Swarm               bool
-	SwarmProvider       string
-	SwarmNodes          int
-	SwarmChunkSize      int
-	SwarmWorker         bool
+	Recursive            bool
+	MaxDepth             int
+	Mutate               bool
+	SmartAPI             bool
+	AutoFilterThreshold  int
+	SimhashThreshold     int
+	SimhashClusterLimit  int
+	H2Mode               bool
+	H2ConcurrentStreams  int
+	TimingOracle         bool
+	TimeOracleK          float64
+	TimeOracleN          int
+	TimeTrim             bool
+	Harvest              bool
+	HarvestJS            bool
+	HarvestAPI           bool
+	HarvestResponse      bool
+	HarvestResponseDepth int
+	HarvestResponseFetch int
+	EvasionLimit         int
+	MaxRetries           int
+	DryRun               bool
+	MaxWSFrames          int
+	FourOhThreeBypass    bool
+	AntiBotFallback      bool
+	Swarm                bool
+	SwarmProvider        string
+	SwarmNodes           int
+	SwarmChunkSize       int
+	SwarmWorker          bool
 
 	// ── Eagle mode (differential scan) ───────────────────────────────────────
 	EagleFile string // path to previous JSONL baseline

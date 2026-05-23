@@ -100,6 +100,10 @@ func run(cfg cliConfig) error {
 		c.Harvest = cfg.Harvest
 		c.HarvestJS = cfg.HarvestJS
 		c.HarvestAPI = cfg.HarvestAPI
+		c.HarvestResponse = cfg.HarvestResponse
+		c.HarvestResponseDepth = cfg.HarvestResponseDepth
+		c.HarvestResponseFetch = cfg.HarvestResponseFetch
+		c.ParamWordlist = append([]string(nil), cfg.ParamWords...)
 		c.EvasionLimit = cfg.EvasionLimit
 		c.MaxRetries = cfg.MaxRetries
 		c.VerbTamper = cfg.VerbTamper
@@ -251,16 +255,15 @@ func run(cfg cliConfig) error {
 	}
 
 	// ── 13. Harvest endpoints ────────────────────────────────────────────────
-	if cfg.Harvest || cfg.HarvestJS || cfg.HarvestAPI {
+	if cfg.Harvest || cfg.HarvestJS || cfg.HarvestAPI || cfg.HarvestResponse {
 		paths, err := eng.HarvestEndpoints(context.Background())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[!] Harvest warning: %v\n", err)
 		}
 		runID := atomic.LoadInt64(&eng.RunID)
 		for _, p := range paths {
-			eng.Submit(engine.Job{Path: p, Depth: 0, Method: "GET", RunID: runID})
+			eng.SubmitHarvestPath(p, runID, 1)
 		}
-		atomic.AddInt64(&eng.HarvestedPaths, int64(len(paths)))
 		fmt.Fprintf(os.Stderr, "[*] Harvested %d endpoint(s)\n", len(paths))
 	}
 

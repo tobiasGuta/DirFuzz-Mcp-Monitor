@@ -177,6 +177,87 @@ func TestExecuteAuthMatrixRequestsDetectsPrivilegeEscalation(t *testing.T) {
 	}
 }
 
+func TestLiveResponseHarvestQueuesDiscoveredEndpointsFromScanResults(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api":
+			http.Redirect(w, r, "/api/", http.StatusMovedPermanently)
+		case "/api/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"endpoints":["/api/user","/api/jobs"]}`))
+		case "/api/user":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"user-ok"}`))
+		case "/api/jobs":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"jobs-ok"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	wordlistPath := filepath.Join(tmpDir, "wordlist.txt")
+	if err := os.WriteFile(wordlistPath, []byte("api\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() failed: %v", err)
+	}
+
+	eng := NewEngine(4, 100, 0.01)
+	defer eng.Shutdown()
+
+	eng.Config.Lock()
+	eng.Config.AllowPrivateTargets = true
+	eng.Config.FollowRedirects = true
+	eng.Config.HarvestResponse = true
+	eng.Config.HarvestResponseDepth = 2
+	eng.Config.HarvestResponseFetch = 10
+	eng.Config.Methods = []string{http.MethodGet}
+	eng.Config.Unlock()
+	eng.RefreshConfigSnapshot()
+
+	if err := eng.SetTarget(server.URL); err != nil {
+		t.Fatalf("SetTarget() failed: %v", err)
+	}
+
+	eng.Start()
+	eng.KickoffScanner(wordlistPath, 0)
+	go func() {
+		eng.Wait()
+		eng.Shutdown()
+	}()
+
+	var seen []string
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case res, ok := <-eng.Results:
+			if !ok {
+				goto done
+			}
+			if res.IsAutoFilter {
+				continue
+			}
+			seen = append(seen, res.Path)
+			if containsString(seen, "api") && containsString(seen, "/api/user") && containsString(seen, "/api/jobs") {
+				eng.Shutdown()
+			}
+		case <-timeout:
+			t.Fatalf("timed out waiting for scan results; got %v", seen)
+		}
+	}
+
+done:
+	for _, want := range []string{"api", "/api/user", "/api/jobs"} {
+		if !containsString(seen, want) {
+			t.Fatalf("live response harvest missing %q in %v", want, seen)
+		}
+	}
+	if got := atomic.LoadInt64(&eng.HarvestedPaths); got < 2 {
+		t.Fatalf("HarvestedPaths = %d, want at least 2 live discoveries", got)
+	}
+}
+
 func TestDiscoverParamHitsBisectsHiddenParameters(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("debug") != "" || r.URL.Query().Get("preview") != "" {

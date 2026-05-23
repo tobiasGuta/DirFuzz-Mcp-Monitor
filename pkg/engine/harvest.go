@@ -25,13 +25,17 @@ const harvestBodyLimit = 2 * 1024 * 1024
 
 var (
 	harvestJSRe       = regexp.MustCompile(`(?i)(?:["'\x60]\s*(/[A-Za-z0-9_/\-.?&=%]{3,})|fetch\(\s*["']([^"']+)["']|axios\.\w+\(\s*["']([^"']+)["']|apiBase\s*=\s*["']([^"']+)["']|\b\d+:"([a-z0-9_/\-.]{3,})")`)
+	harvestPathRe     = regexp.MustCompile(`/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~:-]+)*)/?(?:\?[A-Za-z0-9._~!$&'()*+,;=:@%/?-]*)?`)
 	camelBoundaryRe   = regexp.MustCompile(`([a-z0-9])([A-Z])`)
 	acronymBoundaryRe = regexp.MustCompile(`([A-Z]+)([A-Z][a-z])`)
 )
 
 type harvestOptions struct {
-	js  bool
-	api bool
+	js                 bool
+	api                bool
+	response           bool
+	responseMaxDepth   int
+	responseMaxFetches int
 }
 
 type openAPISpec struct {
@@ -57,7 +61,7 @@ type graphqlIntrospection struct {
 // HarvestEndpoints fetches and parses discovery surfaces from the target and
 // returns a deduplicated list of discovered paths and keywords.
 func HarvestEndpoints(ctx context.Context, baseURL string, client *http.Client) []string {
-	return harvestEndpointsWithOptions(nil, ctx, baseURL, client, harvestOptions{js: true, api: true})
+	return harvestEndpointsWithOptions(nil, ctx, baseURL, client, harvestOptions{js: true, api: true, response: true})
 }
 
 // HarvestEndpoints builds the harvesting client from the engine config and
@@ -71,9 +75,11 @@ func (e *Engine) HarvestEndpoints(ctx context.Context) ([]string, error) {
 	}
 
 	e.Config.RLock()
-	enabled := e.Config.Harvest || e.Config.HarvestJS || e.Config.HarvestAPI
-	jsOnly := e.Config.HarvestJS
-	apiOnly := e.Config.HarvestAPI
+	enabled := e.Config.Harvest || e.Config.HarvestJS || e.Config.HarvestAPI || e.Config.HarvestResponse
+	harvestAll := e.Config.Harvest
+	jsMode := e.Config.HarvestJS
+	apiMode := e.Config.HarvestAPI
+	responseMode := e.Config.HarvestResponse
 	timeout := e.Config.Timeout
 	if timeout <= 0 {
 		timeout = DefaultHTTPTimeout
@@ -97,22 +103,22 @@ func (e *Engine) HarvestEndpoints(ctx context.Context) ([]string, error) {
 	}
 
 	opts := harvestOptions{
-		js:  !apiOnly,
-		api: !jsOnly,
+		js:                 harvestAll || jsMode,
+		api:                harvestAll || apiMode,
+		response:           harvestAll || responseMode,
+		responseMaxDepth:   e.Config.HarvestResponseDepth,
+		responseMaxFetches: e.Config.HarvestResponseFetch,
 	}
-	// Explicit sub-mode flags narrow the default full harvest. If both are set
-	// we keep both paths enabled.
-	if jsOnly {
+	if opts.responseMaxDepth <= 0 {
+		opts.responseMaxDepth = DefaultHarvestResponseDepth
+	}
+	if opts.responseMaxFetches <= 0 {
+		opts.responseMaxFetches = DefaultHarvestResponseFetch
+	}
+	if harvestAll && !jsMode && !apiMode && !responseMode {
 		opts.js = true
-		opts.api = false
-	}
-	if apiOnly {
 		opts.api = true
-		opts.js = false
-	}
-	if e.Config.Harvest && !jsOnly && !apiOnly {
-		opts.js = true
-		opts.api = true
+		opts.response = true
 	}
 	return harvestEndpointsWithOptions(e, ctx, baseURL, client, opts), nil
 }
@@ -152,31 +158,89 @@ func harvestEndpointsWithOptions(e *Engine, ctx context.Context, baseURL string,
 	}
 
 	discovered := make(map[string]struct{})
-	add := func(candidate string) {
-		if normalized := canonicalHarvestCandidate(base, candidate); normalized != "" {
-			if _, exists := discovered[normalized]; !exists && e != nil {
-				e.emitLogEvent(LogLevelInfo, LogCategoryDiscovery, EventHarvestDiscovery, fmt.Sprintf("discovered endpoint %s", normalized), map[string]interface{}{
-					"path": normalized,
-				})
+	queuedResponseTargets := make(map[string]struct{})
+	type responseHarvestTarget struct {
+		url   string
+		depth int
+	}
+	var responseQueue []responseHarvestTarget
+	add := func(candidate string) string {
+		normalized := canonicalHarvestCandidate(base, candidate)
+		if normalized == "" {
+			return ""
+		}
+		if _, exists := discovered[normalized]; !exists && e != nil {
+			e.emitLogEvent(LogLevelInfo, LogCategoryDiscovery, EventHarvestDiscovery, fmt.Sprintf("discovered endpoint %s", normalized), map[string]interface{}{
+				"path": normalized,
+			})
+		}
+		discovered[normalized] = struct{}{}
+		return normalized
+	}
+	enqueueResponseTarget := func(normalized string, depth int) {
+		if !opts.response || depth <= 0 || depth > opts.responseMaxDepth {
+			return
+		}
+		if targetURL := harvestResponseTargetURL(&resourceBase, normalized); targetURL != "" {
+			if _, seen := queuedResponseTargets[targetURL]; !seen {
+				queuedResponseTargets[targetURL] = struct{}{}
+				responseQueue = append(responseQueue, responseHarvestTarget{url: targetURL, depth: depth})
 			}
-			discovered[normalized] = struct{}{}
 		}
 	}
 
-	if opts.js {
-		if rootBody, _, err := fetchHarvestBody(ctx, client, baseURL, nil); err == nil {
-			scriptURLs := collectScriptSrcs(e, rootBody, &resourceBase)
-			for _, scriptURL := range scriptURLs {
-				if scriptBody, _, err := fetchHarvestBody(ctx, client, scriptURL, nil); err == nil {
-					for _, candidate := range extractJSHarvestCandidates(scriptBody) {
-						add(candidate)
+	if opts.js || opts.response {
+		if rootBody, rootResp, err := fetchHarvestBody(ctx, client, baseURL, nil); err == nil {
+			if opts.response {
+				contentType := ""
+				if rootResp != nil {
+					contentType = rootResp.Header.Get("Content-Type")
+				}
+				for _, candidate := range extractResponseHarvestCandidates(rootBody, contentType) {
+					if normalized := add(candidate); normalized != "" {
+						enqueueResponseTarget(normalized, 1)
 					}
 				}
 			}
-			if e != nil {
-				e.emitLogEvent(LogLevelSuccess, LogCategoryDiscovery, EventHarvestJSAnalysisComplete, fmt.Sprintf("JS analysis completed with %d script URL(s)", len(scriptURLs)), map[string]interface{}{
-					"script_urls": len(scriptURLs),
-				})
+			if opts.js {
+				scriptURLs := collectScriptSrcs(e, rootBody, &resourceBase)
+				for _, scriptURL := range scriptURLs {
+					if scriptBody, _, err := fetchHarvestBody(ctx, client, scriptURL, nil); err == nil {
+						for _, candidate := range extractJSHarvestCandidates(scriptBody) {
+							add(candidate)
+						}
+					}
+				}
+				if e != nil {
+					e.emitLogEvent(LogLevelSuccess, LogCategoryDiscovery, EventHarvestJSAnalysisComplete, fmt.Sprintf("JS analysis completed with %d script URL(s)", len(scriptURLs)), map[string]interface{}{
+						"script_urls": len(scriptURLs),
+					})
+				}
+			}
+		}
+	}
+
+	if opts.response {
+		processed := 0
+		for len(responseQueue) > 0 && processed < opts.responseMaxFetches {
+			target := responseQueue[0]
+			responseQueue = responseQueue[1:]
+			if target.depth > opts.responseMaxDepth {
+				continue
+			}
+
+			body, resp, err := fetchHarvestBody(ctx, client, target.url, nil)
+			processed++
+			if err != nil || resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				continue
+			}
+
+			contentType := resp.Header.Get("Content-Type")
+			candidates := extractResponseHarvestCandidates(body, contentType)
+			for _, candidate := range candidates {
+				if normalized := add(candidate); normalized != "" && target.depth < opts.responseMaxDepth {
+					enqueueResponseTarget(normalized, target.depth+1)
+				}
 			}
 		}
 	}
@@ -210,6 +274,42 @@ func harvestEndpointsWithOptions(e *Engine, ctx context.Context, baseURL string,
 	}
 	sort.Strings(out)
 	return out
+}
+
+func (e *Engine) queueResponseHarvestFromResult(job Job, requestURL string, finalRedirectURL string, contentType string, body []byte) {
+	if e == nil || len(body) == 0 {
+		return
+	}
+
+	snap := e.configSnap.Load()
+	if snap == nil || !snap.HarvestResponse {
+		return
+	}
+
+	maxDepth := snap.HarvestResponseDepth
+	if maxDepth <= 0 {
+		maxDepth = DefaultHarvestResponseDepth
+	}
+	if job.HarvestDepth >= maxDepth {
+		return
+	}
+
+	baseURL := strings.TrimSpace(finalRedirectURL)
+	if baseURL == "" {
+		baseURL = strings.TrimSpace(requestURL)
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return
+	}
+
+	for _, candidate := range extractResponseHarvestCandidates(body, contentType) {
+		normalized := canonicalHarvestCandidate(base, candidate)
+		if normalized == "" {
+			continue
+		}
+		e.SubmitHarvestPath(normalized, job.RunID, job.HarvestDepth+1)
+	}
 }
 
 func fetchHarvestBody(ctx context.Context, client *http.Client, target string, body io.Reader) ([]byte, *http.Response, error) {
@@ -343,6 +443,85 @@ func extractGraphQLHarvestCandidates(e *Engine, body []byte) []string {
 		}
 	}
 	return out
+}
+
+func extractResponseHarvestCandidates(body []byte, contentType string) []string {
+	if len(body) == 0 {
+		return nil
+	}
+
+	if looksLikeJSONContent(contentType, body) {
+		if candidates := extractJSONHarvestCandidates(body); len(candidates) > 0 {
+			return dedupeHarvestVariants(candidates)
+		}
+	}
+
+	matches := harvestPathRe.FindAllString(string(body), -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	return dedupeHarvestVariants(matches)
+}
+
+func looksLikeJSONContent(contentType string, body []byte) bool {
+	contentType = strings.ToLower(strings.TrimSpace(contentType))
+	if strings.Contains(contentType, "json") {
+		return true
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return false
+	}
+	return trimmed[0] == '{' || trimmed[0] == '['
+}
+
+func extractJSONHarvestCandidates(body []byte) []string {
+	var payload any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil
+	}
+
+	var out []string
+	var walk func(any)
+	walk = func(value any) {
+		switch typed := value.(type) {
+		case map[string]any:
+			for _, child := range typed {
+				walk(child)
+			}
+		case []any:
+			for _, child := range typed {
+				walk(child)
+			}
+		case string:
+			for _, candidate := range harvestPathRe.FindAllString(typed, -1) {
+				out = append(out, candidate)
+			}
+		}
+	}
+	walk(payload)
+	return out
+}
+
+func harvestResponseTargetURL(base *url.URL, candidate string) string {
+	if base == nil || candidate == "" || !strings.HasPrefix(candidate, "/") {
+		return ""
+	}
+	if !looksLikeResponseEndpoint(candidate) {
+		return ""
+	}
+	return resolveHarvestURL(base, candidate)
+}
+
+func looksLikeResponseEndpoint(candidate string) bool {
+	lower := strings.ToLower(candidate)
+	return strings.Contains(lower, "/api/") ||
+		strings.HasPrefix(lower, "/api") ||
+		strings.Contains(lower, "/v1/") ||
+		strings.Contains(lower, "/v2/") ||
+		strings.Contains(lower, "/v3/") ||
+		strings.Contains(lower, "/rest/") ||
+		strings.Contains(lower, "/graphql")
 }
 
 func openAPIHarvestPaths(base *url.URL) []string {

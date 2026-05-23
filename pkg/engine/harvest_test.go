@@ -14,7 +14,7 @@ func TestHarvestEndpointsFull(t *testing.T) {
 		switch r.URL.Path {
 		case "/":
 			w.Header().Set("Content-Type", "text/html")
-			_, _ = w.Write([]byte(`<html><head><script src="/assets/app.js"></script></head><body>ok</body></html>`))
+			_, _ = w.Write([]byte(`<html><head><script src="/assets/app.js"></script></head><body>{"endpoints":["/api/user","/api/jobs","/api/applications"]}</body></html>`))
 		case "/assets/app.js":
 			w.Header().Set("Content-Type", "application/javascript")
 			_, _ = w.Write([]byte(`
@@ -56,6 +56,9 @@ func TestHarvestEndpointsFull(t *testing.T) {
 	want := []string{
 		"/admin/panel",
 		"/api",
+		"/api/applications",
+		"/api/jobs",
+		"/api/user",
 		"/api/v1/users",
 		"/orders",
 		"/reports/list",
@@ -84,7 +87,7 @@ func TestHarvestEndpointsModes(t *testing.T) {
 		switch r.URL.Path {
 		case "/":
 			w.Header().Set("Content-Type", "text/html")
-			_, _ = w.Write([]byte(`<script src="/bundle.js"></script>`))
+			_, _ = w.Write([]byte(`<html><head><script src="/bundle.js"></script></head><body>{"endpoints":["/api/from-response"]}</body></html>`))
 		case "/bundle.js":
 			_, _ = w.Write([]byte(`fetch("/api/from-js")`))
 		case "/openapi.json":
@@ -113,6 +116,89 @@ func TestHarvestEndpointsModes(t *testing.T) {
 	}
 	if containsString(apiOnly, "/api/from-js") {
 		t.Fatalf("api-only harvest leaked JS candidates: %v", apiOnly)
+	}
+
+	responseOnly := harvestEndpointsWithOptions(nil, context.Background(), srv.URL, client, harvestOptions{
+		response:           true,
+		responseMaxDepth:   DefaultHarvestResponseDepth,
+		responseMaxFetches: DefaultHarvestResponseFetch,
+	})
+	if !containsString(responseOnly, "/api/from-response") {
+		t.Fatalf("response-only harvest missing JSON response endpoint: %v", responseOnly)
+	}
+	if containsString(responseOnly, "/api/from-js") || containsString(responseOnly, "/api/from-spec") || containsString(responseOnly, "GraphUser") {
+		t.Fatalf("response-only harvest leaked non-response candidates: %v", responseOnly)
+	}
+}
+
+func TestHarvestResponseFollowsDiscoveredAPIEndpoints(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"endpoints":["/api/jobs"]}`))
+		case "/api/jobs":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"endpoints":["/api/applications"]}`))
+		case "/api/applications":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"endpoints":["/api/applications/detail"]}`))
+		case "/api/applications/detail":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	got := harvestEndpointsWithOptions(nil, context.Background(), srv.URL, client, harvestOptions{
+		response:           true,
+		responseMaxDepth:   DefaultHarvestResponseDepth,
+		responseMaxFetches: DefaultHarvestResponseFetch,
+	})
+
+	for _, want := range []string{"/api/jobs", "/api/applications", "/api/applications/detail"} {
+		if !containsString(got, want) {
+			t.Fatalf("response follow-up harvest missing %q in %v", want, got)
+		}
+	}
+}
+
+func TestHarvestResponseHonorsDepthLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"endpoints":["/api/jobs"]}`))
+		case "/api/jobs":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"endpoints":["/api/applications"]}`))
+		case "/api/applications":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"endpoints":["/api/applications/detail"]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	got := harvestEndpointsWithOptions(nil, context.Background(), srv.URL, client, harvestOptions{
+		response:           true,
+		responseMaxDepth:   1,
+		responseMaxFetches: DefaultHarvestResponseFetch,
+	})
+
+	if !containsString(got, "/api/jobs") {
+		t.Fatalf("depth-limited harvest missing first hop endpoint: %v", got)
+	}
+	if !containsString(got, "/api/applications") {
+		t.Fatalf("depth-limited harvest missing endpoint discovered from first follow-up: %v", got)
+	}
+	if containsString(got, "/api/applications/detail") {
+		t.Fatalf("depth-limited harvest exceeded configured depth: %v", got)
 	}
 }
 

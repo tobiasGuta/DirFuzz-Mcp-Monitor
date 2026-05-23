@@ -99,117 +99,125 @@ type SizeRange struct {
 // Config holds all runtime configuration for the engine.
 type Config struct {
 	sync.RWMutex
-	UserAgent           string
-	Headers             map[string]string
-	MatchCodes          map[int]bool
-	FilterSizes         map[int]bool
-	FilterSizeRanges    []SizeRange // NEW: filter responses whose size falls in any of these ranges
-	MatchContentTypes   []string    // NEW: only surface responses whose Content-Type contains one of these strings
-	FilterContentTypes  []string    // NEW: discard responses whose Content-Type contains any of these strings
-	MatchRegex          string
-	FilterRegex         string
-	Extensions          []string
-	Methods             []string
-	AuthMatrix          map[string][]string
-	SmartAPI            bool
-	Mutate              bool
-	Recursive           bool
-	MaxDepth            int
-	IsPaused            bool
-	Delay               time.Duration
-	MaxWorkers          int
-	FollowRedirects     bool
-	MaxRedirects        int
-	AllowPrivateTargets bool
-	RequestBody         string
-	FilterWords         int
-	FilterLines         int
-	MatchWords          int
-	MatchLines          int
-	OutputFormat        string
-	FilterRTMin         time.Duration
-	FilterRTMax         time.Duration
-	ProxyOut            string
-	WordlistPath        string
-	OutputFile          string
-	Timeout             time.Duration
-	Insecure            bool
-	AntiBotFallback     bool
-	AutoFilterThreshold int
-	SimhashThreshold    int
-	SimhashClusterLimit int
-	H2Mode              bool
-	H2ConcurrentStreams int
-	TimingOracle        bool
-	TimeOracleK         float64
-	TimeOracleN         int
-	TimeTrim            bool
-	Harvest             bool
-	HarvestJS           bool
-	HarvestAPI          bool
-	EvasionLimit        int
-	MaxRetries          int
-	SaveRaw             bool // NEW: include raw request/response bytes in Result
-	WAFEvasion          bool
-	VerbTamper          bool
-	FourOhThreeBypass   bool // retry 403s with path and header bypass techniques
-	Spidering           bool // NEW: dynamic HTML/JS scraping
-	WebhookURL          string
-	WebhookOnNew        bool
-	WebhookOnDrift      bool
+	UserAgent            string
+	Headers              map[string]string
+	MatchCodes           map[int]bool
+	FilterSizes          map[int]bool
+	FilterSizeRanges     []SizeRange // NEW: filter responses whose size falls in any of these ranges
+	MatchContentTypes    []string    // NEW: only surface responses whose Content-Type contains one of these strings
+	FilterContentTypes   []string    // NEW: discard responses whose Content-Type contains any of these strings
+	MatchRegex           string
+	FilterRegex          string
+	Extensions           []string
+	Methods              []string
+	AuthMatrix           map[string][]string
+	SmartAPI             bool
+	Mutate               bool
+	Recursive            bool
+	MaxDepth             int
+	IsPaused             bool
+	Delay                time.Duration
+	MaxWorkers           int
+	FollowRedirects      bool
+	MaxRedirects         int
+	AllowPrivateTargets  bool
+	RequestBody          string
+	FilterWords          int
+	FilterLines          int
+	MatchWords           int
+	MatchLines           int
+	OutputFormat         string
+	FilterRTMin          time.Duration
+	FilterRTMax          time.Duration
+	ProxyOut             string
+	WordlistPath         string
+	OutputFile           string
+	Timeout              time.Duration
+	Insecure             bool
+	AntiBotFallback      bool
+	AutoFilterThreshold  int
+	SimhashThreshold     int
+	SimhashClusterLimit  int
+	H2Mode               bool
+	H2ConcurrentStreams  int
+	TimingOracle         bool
+	TimeOracleK          float64
+	TimeOracleN          int
+	TimeTrim             bool
+	Harvest              bool
+	HarvestJS            bool
+	HarvestAPI           bool
+	HarvestResponse      bool
+	HarvestResponseDepth int
+	HarvestResponseFetch int
+	ParamWordlist        []string
+	EvasionLimit         int
+	MaxRetries           int
+	SaveRaw              bool // NEW: include raw request/response bytes in Result
+	WAFEvasion           bool
+	VerbTamper           bool
+	FourOhThreeBypass    bool // retry 403s with path and header bypass techniques
+	Spidering            bool // NEW: dynamic HTML/JS scraping
+	WebhookURL           string
+	WebhookOnNew         bool
+	WebhookOnDrift       bool
 }
 
 // configSnapshot is an immutable view of the frequently-read configuration
 // fields used by workers. Workers load a pointer to this snapshot once per
 // job to avoid repeatedly allocating and copying maps on hot paths.
 type configSnapshot struct {
-	MaxWorkers          int
-	IsPaused            bool
-	UserAgent           string
-	Headers             map[string]string
-	MatchCodes          map[int]bool
-	FilterSizes         map[int]bool
-	FilterSizeRanges    []SizeRange
-	MatchContentTypes   []string
-	FilterContentTypes  []string
-	FollowRedirects     bool
-	MaxRedirects        int
-	RequestBody         string
-	FilterWords         int
-	FilterLines         int
-	MatchWords          int
-	MatchLines          int
-	FilterRTMin         time.Duration
-	FilterRTMax         time.Duration
-	ProxyOut            string
-	Timeout             time.Duration
-	SaveRaw             bool
-	AntiBotFallback     bool
-	AuthMatrix          map[string][]string
-	Methods             []string
-	SmartAPI            bool
-	Extensions          []string
-	AutoFilterThreshold int
-	SimhashThreshold    int
-	SimhashClusterLimit int
-	H2Mode              bool
-	H2ConcurrentStreams int
-	TimingOracle        bool
-	TimeOracleK         float64
-	TimeOracleN         int
-	TimeTrim            bool
-	Harvest             bool
-	HarvestJS           bool
-	HarvestAPI          bool
-	EvasionLimit        int
-	Mutate              bool
-	Recursive           bool
-	MaxDepth            int
-	WordlistPath        string
-	WAFEvasion          bool
-	VerbTamper          bool
-	FourOhThreeBypass   bool
-	Spidering           bool
+	MaxWorkers           int
+	IsPaused             bool
+	UserAgent            string
+	Headers              map[string]string
+	MatchCodes           map[int]bool
+	FilterSizes          map[int]bool
+	FilterSizeRanges     []SizeRange
+	MatchContentTypes    []string
+	FilterContentTypes   []string
+	FollowRedirects      bool
+	MaxRedirects         int
+	RequestBody          string
+	FilterWords          int
+	FilterLines          int
+	MatchWords           int
+	MatchLines           int
+	FilterRTMin          time.Duration
+	FilterRTMax          time.Duration
+	ProxyOut             string
+	Timeout              time.Duration
+	SaveRaw              bool
+	AntiBotFallback      bool
+	AuthMatrix           map[string][]string
+	Methods              []string
+	SmartAPI             bool
+	Extensions           []string
+	AutoFilterThreshold  int
+	SimhashThreshold     int
+	SimhashClusterLimit  int
+	H2Mode               bool
+	H2ConcurrentStreams  int
+	TimingOracle         bool
+	TimeOracleK          float64
+	TimeOracleN          int
+	TimeTrim             bool
+	Harvest              bool
+	HarvestJS            bool
+	HarvestAPI           bool
+	HarvestResponse      bool
+	HarvestResponseDepth int
+	HarvestResponseFetch int
+	ParamWordlist        []string
+	EvasionLimit         int
+	Mutate               bool
+	Recursive            bool
+	MaxDepth             int
+	WordlistPath         string
+	WAFEvasion           bool
+	VerbTamper           bool
+	FourOhThreeBypass    bool
+	Spidering            bool
 	// HeadersTemplate is the pre-built header block (with any {PAYLOAD}
 	// placeholders intact) that workers can quickly clone and substitute
 	// the payload into without reconstructing the header map each job.
@@ -222,6 +230,7 @@ type configSnapshot struct {
 type Job struct {
 	Path         string
 	Depth        int
+	HarvestDepth int
 	Method       string
 	RunID        int64
 	ExtraHeaders map[string]string
@@ -910,53 +919,56 @@ func (e *Engine) getLimiter(host string) *rate.Limiter {
 func (e *Engine) buildAndStoreConfigSnapshot() {
 	e.Config.RLock()
 	s := &configSnapshot{
-		MaxWorkers:          e.Config.MaxWorkers,
-		IsPaused:            e.Config.IsPaused,
-		UserAgent:           e.Config.UserAgent,
-		Headers:             make(map[string]string, len(e.Config.Headers)),
-		MatchCodes:          make(map[int]bool, len(e.Config.MatchCodes)),
-		FilterSizes:         make(map[int]bool, len(e.Config.FilterSizes)),
-		FilterSizeRanges:    make([]SizeRange, len(e.Config.FilterSizeRanges)),
-		MatchContentTypes:   make([]string, len(e.Config.MatchContentTypes)),
-		FilterContentTypes:  make([]string, len(e.Config.FilterContentTypes)),
-		FollowRedirects:     e.Config.FollowRedirects,
-		MaxRedirects:        e.Config.MaxRedirects,
-		RequestBody:         e.Config.RequestBody,
-		FilterWords:         e.Config.FilterWords,
-		FilterLines:         e.Config.FilterLines,
-		MatchWords:          e.Config.MatchWords,
-		MatchLines:          e.Config.MatchLines,
-		FilterRTMin:         e.Config.FilterRTMin,
-		FilterRTMax:         e.Config.FilterRTMax,
-		ProxyOut:            e.Config.ProxyOut,
-		Timeout:             e.Config.Timeout,
-		SaveRaw:             e.Config.SaveRaw,
-		AntiBotFallback:     e.Config.AntiBotFallback,
-		AuthMatrix:          make(map[string][]string, len(e.Config.AuthMatrix)),
-		Methods:             make([]string, len(e.Config.Methods)),
-		SmartAPI:            e.Config.SmartAPI,
-		Extensions:          make([]string, len(e.Config.Extensions)),
-		AutoFilterThreshold: e.Config.AutoFilterThreshold,
-		SimhashThreshold:    e.Config.SimhashThreshold,
-		SimhashClusterLimit: e.Config.SimhashClusterLimit,
-		H2Mode:              e.Config.H2Mode,
-		H2ConcurrentStreams: e.Config.H2ConcurrentStreams,
-		TimingOracle:        e.Config.TimingOracle,
-		TimeOracleK:         e.Config.TimeOracleK,
-		TimeOracleN:         e.Config.TimeOracleN,
-		TimeTrim:            e.Config.TimeTrim,
-		Harvest:             e.Config.Harvest,
-		HarvestJS:           e.Config.HarvestJS,
-		HarvestAPI:          e.Config.HarvestAPI,
-		EvasionLimit:        e.Config.EvasionLimit,
-		Mutate:              e.Config.Mutate,
-		Recursive:           e.Config.Recursive,
-		MaxDepth:            e.Config.MaxDepth,
-		WordlistPath:        e.Config.WordlistPath,
-		WAFEvasion:          e.Config.WAFEvasion,
-		VerbTamper:          e.Config.VerbTamper,
-		FourOhThreeBypass:   e.Config.FourOhThreeBypass,
-		Spidering:           e.Config.Spidering,
+		MaxWorkers:           e.Config.MaxWorkers,
+		IsPaused:             e.Config.IsPaused,
+		UserAgent:            e.Config.UserAgent,
+		Headers:              make(map[string]string, len(e.Config.Headers)),
+		MatchCodes:           make(map[int]bool, len(e.Config.MatchCodes)),
+		FilterSizes:          make(map[int]bool, len(e.Config.FilterSizes)),
+		FilterSizeRanges:     make([]SizeRange, len(e.Config.FilterSizeRanges)),
+		MatchContentTypes:    make([]string, len(e.Config.MatchContentTypes)),
+		FilterContentTypes:   make([]string, len(e.Config.FilterContentTypes)),
+		FollowRedirects:      e.Config.FollowRedirects,
+		MaxRedirects:         e.Config.MaxRedirects,
+		RequestBody:          e.Config.RequestBody,
+		FilterWords:          e.Config.FilterWords,
+		FilterLines:          e.Config.FilterLines,
+		MatchWords:           e.Config.MatchWords,
+		MatchLines:           e.Config.MatchLines,
+		FilterRTMin:          e.Config.FilterRTMin,
+		FilterRTMax:          e.Config.FilterRTMax,
+		ProxyOut:             e.Config.ProxyOut,
+		Timeout:              e.Config.Timeout,
+		SaveRaw:              e.Config.SaveRaw,
+		AntiBotFallback:      e.Config.AntiBotFallback,
+		AuthMatrix:           make(map[string][]string, len(e.Config.AuthMatrix)),
+		Methods:              make([]string, len(e.Config.Methods)),
+		SmartAPI:             e.Config.SmartAPI,
+		Extensions:           make([]string, len(e.Config.Extensions)),
+		AutoFilterThreshold:  e.Config.AutoFilterThreshold,
+		SimhashThreshold:     e.Config.SimhashThreshold,
+		SimhashClusterLimit:  e.Config.SimhashClusterLimit,
+		H2Mode:               e.Config.H2Mode,
+		H2ConcurrentStreams:  e.Config.H2ConcurrentStreams,
+		TimingOracle:         e.Config.TimingOracle,
+		TimeOracleK:          e.Config.TimeOracleK,
+		TimeOracleN:          e.Config.TimeOracleN,
+		TimeTrim:             e.Config.TimeTrim,
+		Harvest:              e.Config.Harvest,
+		HarvestJS:            e.Config.HarvestJS,
+		HarvestAPI:           e.Config.HarvestAPI,
+		HarvestResponse:      e.Config.HarvestResponse,
+		HarvestResponseDepth: e.Config.HarvestResponseDepth,
+		HarvestResponseFetch: e.Config.HarvestResponseFetch,
+		EvasionLimit:         e.Config.EvasionLimit,
+		Mutate:               e.Config.Mutate,
+		Recursive:            e.Config.Recursive,
+		MaxDepth:             e.Config.MaxDepth,
+		WordlistPath:         e.Config.WordlistPath,
+		WAFEvasion:           e.Config.WAFEvasion,
+		VerbTamper:           e.Config.VerbTamper,
+		FourOhThreeBypass:    e.Config.FourOhThreeBypass,
+		Spidering:            e.Config.Spidering,
 	}
 	// Honor User-Agent header override: worker formerly extracted UA from
 	// headers if present and removed it from the header map.
@@ -999,6 +1011,7 @@ func (e *Engine) buildAndStoreConfigSnapshot() {
 	}
 	copy(s.Methods, e.Config.Methods)
 	copy(s.Extensions, e.Config.Extensions)
+	s.ParamWordlist = append(s.ParamWordlist, e.Config.ParamWordlist...)
 	e.Config.RUnlock()
 	e.SimhashThreshold = s.SimhashThreshold
 	e.SimhashClusterLimit = s.SimhashClusterLimit
@@ -1515,9 +1528,6 @@ func (e *Engine) StartWordlistScanner(ctx context.Context, runID int64, path str
 		return
 	}
 	defer file.Close()
-
-	atomic.StoreInt64(&e.ProcessedLines, 0)
-	atomic.StoreInt64(&e.TotalLines, 0)
 
 	lineNum := int64(0)
 	scanner := bufio.NewScanner(file)
@@ -2756,49 +2766,53 @@ func (e *Engine) worker(id int) {
 					// Fallback to original locking behavior if snapshot still missing.
 					e.Config.RLock()
 					local := &configSnapshot{
-						MaxWorkers:          e.Config.MaxWorkers,
-						IsPaused:            e.Config.IsPaused,
-						UserAgent:           e.Config.UserAgent,
-						Headers:             make(map[string]string, len(e.Config.Headers)),
-						MatchCodes:          make(map[int]bool, len(e.Config.MatchCodes)),
-						FilterSizes:         make(map[int]bool, len(e.Config.FilterSizes)),
-						FilterSizeRanges:    make([]SizeRange, len(e.Config.FilterSizeRanges)),
-						MatchContentTypes:   make([]string, len(e.Config.MatchContentTypes)),
-						FilterContentTypes:  make([]string, len(e.Config.FilterContentTypes)),
-						FollowRedirects:     e.Config.FollowRedirects,
-						MaxRedirects:        e.Config.MaxRedirects,
-						RequestBody:         e.Config.RequestBody,
-						FilterWords:         e.Config.FilterWords,
-						FilterLines:         e.Config.FilterLines,
-						MatchWords:          e.Config.MatchWords,
-						MatchLines:          e.Config.MatchLines,
-						FilterRTMin:         e.Config.FilterRTMin,
-						FilterRTMax:         e.Config.FilterRTMax,
-						ProxyOut:            e.Config.ProxyOut,
-						Timeout:             e.Config.Timeout,
-						SaveRaw:             e.Config.SaveRaw,
-						AutoFilterThreshold: e.Config.AutoFilterThreshold,
-						SimhashThreshold:    e.Config.SimhashThreshold,
-						SimhashClusterLimit: e.Config.SimhashClusterLimit,
-						H2Mode:              e.Config.H2Mode,
-						H2ConcurrentStreams: e.Config.H2ConcurrentStreams,
-						TimingOracle:        e.Config.TimingOracle,
-						TimeOracleK:         e.Config.TimeOracleK,
-						TimeOracleN:         e.Config.TimeOracleN,
-						TimeTrim:            e.Config.TimeTrim,
-						Harvest:             e.Config.Harvest,
-						HarvestJS:           e.Config.HarvestJS,
-						HarvestAPI:          e.Config.HarvestAPI,
-						EvasionLimit:        e.Config.EvasionLimit,
-						Mutate:              e.Config.Mutate,
-						Recursive:           e.Config.Recursive,
-						MaxDepth:            e.Config.MaxDepth,
-						WordlistPath:        e.Config.WordlistPath,
-						WAFEvasion:          e.Config.WAFEvasion,
-						VerbTamper:          e.Config.VerbTamper,
-						FourOhThreeBypass:   e.Config.FourOhThreeBypass,
-						Spidering:           e.Config.Spidering,
-						AuthMatrix:          make(map[string][]string, len(e.Config.AuthMatrix)),
+						MaxWorkers:           e.Config.MaxWorkers,
+						IsPaused:             e.Config.IsPaused,
+						UserAgent:            e.Config.UserAgent,
+						Headers:              make(map[string]string, len(e.Config.Headers)),
+						MatchCodes:           make(map[int]bool, len(e.Config.MatchCodes)),
+						FilterSizes:          make(map[int]bool, len(e.Config.FilterSizes)),
+						FilterSizeRanges:     make([]SizeRange, len(e.Config.FilterSizeRanges)),
+						MatchContentTypes:    make([]string, len(e.Config.MatchContentTypes)),
+						FilterContentTypes:   make([]string, len(e.Config.FilterContentTypes)),
+						FollowRedirects:      e.Config.FollowRedirects,
+						MaxRedirects:         e.Config.MaxRedirects,
+						RequestBody:          e.Config.RequestBody,
+						FilterWords:          e.Config.FilterWords,
+						FilterLines:          e.Config.FilterLines,
+						MatchWords:           e.Config.MatchWords,
+						MatchLines:           e.Config.MatchLines,
+						FilterRTMin:          e.Config.FilterRTMin,
+						FilterRTMax:          e.Config.FilterRTMax,
+						ProxyOut:             e.Config.ProxyOut,
+						Timeout:              e.Config.Timeout,
+						SaveRaw:              e.Config.SaveRaw,
+						AutoFilterThreshold:  e.Config.AutoFilterThreshold,
+						SimhashThreshold:     e.Config.SimhashThreshold,
+						SimhashClusterLimit:  e.Config.SimhashClusterLimit,
+						H2Mode:               e.Config.H2Mode,
+						H2ConcurrentStreams:  e.Config.H2ConcurrentStreams,
+						TimingOracle:         e.Config.TimingOracle,
+						TimeOracleK:          e.Config.TimeOracleK,
+						TimeOracleN:          e.Config.TimeOracleN,
+						TimeTrim:             e.Config.TimeTrim,
+						Harvest:              e.Config.Harvest,
+						HarvestJS:            e.Config.HarvestJS,
+						HarvestAPI:           e.Config.HarvestAPI,
+						HarvestResponse:      e.Config.HarvestResponse,
+						HarvestResponseDepth: e.Config.HarvestResponseDepth,
+						HarvestResponseFetch: e.Config.HarvestResponseFetch,
+						ParamWordlist:        append([]string(nil), e.Config.ParamWordlist...),
+						EvasionLimit:         e.Config.EvasionLimit,
+						Mutate:               e.Config.Mutate,
+						Recursive:            e.Config.Recursive,
+						MaxDepth:             e.Config.MaxDepth,
+						WordlistPath:         e.Config.WordlistPath,
+						WAFEvasion:           e.Config.WAFEvasion,
+						VerbTamper:           e.Config.VerbTamper,
+						FourOhThreeBypass:    e.Config.FourOhThreeBypass,
+						Spidering:            e.Config.Spidering,
+						AuthMatrix:           make(map[string][]string, len(e.Config.AuthMatrix)),
 					}
 					ua := local.UserAgent
 					for k, v := range e.Config.Headers {
@@ -3439,6 +3453,7 @@ func (e *Engine) worker(id int) {
 			}
 
 			e.queueParamFuzzFromResult(result, bodySize, bodyHash)
+			e.queueResponseHarvestFromResult(job, fullURL, finalRedirectURL, contentType, resp.Body)
 
 			// Spidering / dynamic link extraction
 			if spidering && len(resp.Body) > 0 && resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -3679,6 +3694,25 @@ func (e *Engine) Submit(job Job) {
 	case <-sc.ctx.Done():
 		e.activeJobs.Done()
 	}
+}
+
+// SubmitHarvestPath adds a harvested path to the active scan and counts it in
+// the progress metrics so harvested discoveries show up as part of the run.
+func (e *Engine) SubmitHarvestPath(path string, runID int64, harvestDepth int) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return
+	}
+
+	atomic.AddInt64(&e.TotalLines, 1)
+	atomic.AddInt64(&e.HarvestedPaths, 1)
+	e.Submit(Job{
+		Path:         path,
+		Depth:        0,
+		HarvestDepth: harvestDepth,
+		Method:       http.MethodGet,
+		RunID:        runID,
+	})
 }
 
 // ─── Lifecycle ────────────────────────────────────────────────────────────────

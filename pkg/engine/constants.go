@@ -88,6 +88,12 @@ const (
 	ResultsChannelSize  = DefaultWorkerCount * 10
 )
 
+// ─── Harvesting ───────────────────────────────────────────────────────────────
+const (
+	DefaultHarvestResponseDepth = 2
+	DefaultHarvestResponseFetch = 32
+)
+
 // ─── Mutation ─────────────────────────────────────────────────────────────────
 const (
 	DefaultMutations = ".bak,.old,.save,~,.swp"
