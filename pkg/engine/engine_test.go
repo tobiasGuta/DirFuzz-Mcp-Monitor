@@ -290,6 +290,7 @@ func TestDiscoverParamHitsBisectsHiddenParameters(t *testing.T) {
 		ParamTask{URL: server.URL, BaselineStatusCode: baseResp.StatusCode, BaselineSize: baseSize, BaselineHash: baseHash},
 		[]string{"foo", "debug", "bar", "preview"},
 		paramBaseline{statusCode: baseResp.StatusCode, size: baseSize, hash: baseHash},
+		nil,
 		eng.configSnap.Load(),
 	)
 

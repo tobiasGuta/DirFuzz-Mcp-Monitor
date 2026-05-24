@@ -1,12 +1,16 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	"golang.org/x/net/html"
 )
 
 // ParamTask describes a hidden-parameter fuzzing target.
@@ -17,9 +21,16 @@ type ParamTask struct {
 	BaselineStatusCode  int
 	BaselineSize        int
 	BaselineContentType string
+	CandidateHints      []string
 }
 
 type paramBaseline struct {
+	statusCode int
+	size       int
+	hash       uint64
+}
+
+type paramResponseFingerprint struct {
 	statusCode int
 	size       int
 	hash       uint64
@@ -67,6 +78,20 @@ type ParamProbeReport struct {
 const paramChunkSize = 50
 
 var paramProbeValues = []string{"a", "b", "c", "d", "e"}
+var paramControlNames = []string{
+	"__dirfuzz_control",
+	"__dirfuzz_probe",
+}
+
+var (
+	paramHintPatternRes = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)[?&]([a-zA-Z][a-zA-Z0-9_.-]{0,63})=`),
+		regexp.MustCompile(`(?i)\b([a-zA-Z][a-zA-Z0-9_.-]{0,63})\s+parameter\b`),
+		regexp.MustCompile(`(?i)\bparameter\s+([a-zA-Z][a-zA-Z0-9_.-]{0,63})\b`),
+		regexp.MustCompile(`(?i)\bprovide\s+[?&]?([a-zA-Z][a-zA-Z0-9_.-]{0,63})=?\s+parameter\b`),
+		regexp.MustCompile(`(?i)\bmissing\s+(?:required\s+)?parameter\s+[\"'` + "`" + `]?([a-zA-Z][a-zA-Z0-9_.-]{0,63})[\"'` + "`" + `]?\b`),
+	}
+)
 
 func (e *Engine) startParamFuzzWorkers(workerCount int) {
 	if e == nil || e.paramTaskChan == nil || workerCount <= 0 {
@@ -90,12 +115,16 @@ func (e *Engine) paramFuzzWorker() {
 	}
 }
 
-func (e *Engine) queueParamFuzzFromResult(res Result, bodySize int, bodyHash uint64) {
+func (e *Engine) queueParamFuzzFromResult(res Result, effectiveURL string, bodySize int, bodyHash uint64, contentType string, body []byte) {
 	if e == nil || res.URL == "" || res.IsAutoFilter {
 		return
 	}
+	if strings.TrimSpace(effectiveURL) == "" {
+		effectiveURL = res.URL
+	}
 	snap := e.configSnap.Load()
-	if len(paramCandidates(nil, snap)) == 0 {
+	hints := extractParamHints(effectiveURL, contentType, body)
+	if len(paramCandidates(nil, snap, hints)) == 0 {
 		return
 	}
 	if !shouldQueueParamFuzz(res.StatusCode, res.Method, bodySize, bodyHash) {
@@ -103,11 +132,13 @@ func (e *Engine) queueParamFuzzFromResult(res Result, bodySize int, bodyHash uin
 	}
 
 	task := ParamTask{
-		URL:                res.URL,
-		Method:             res.Method,
-		BaselineHash:       bodyHash,
-		BaselineStatusCode: res.StatusCode,
-		BaselineSize:       bodySize,
+		URL:                 effectiveURL,
+		Method:              res.Method,
+		BaselineHash:        bodyHash,
+		BaselineStatusCode:  res.StatusCode,
+		BaselineSize:        bodySize,
+		BaselineContentType: contentType,
+		CandidateHints:      hints,
 	}
 	if task.Method == "" {
 		task.Method = "GET"
@@ -136,7 +167,10 @@ func (e *Engine) enqueueParamTask(task ParamTask) bool {
 		return false
 	}
 
-	key := strings.ToLower(task.URL)
+	key := paramTaskIdentity(task)
+	if key == "" {
+		key = strings.ToLower(strings.TrimSpace(task.URL))
+	}
 	if _, loaded := e.paramTaskSeen.LoadOrStore(key, struct{}{}); loaded {
 		return false
 	}
@@ -233,11 +267,6 @@ func (e *Engine) FuzzParams(ctx context.Context, task ParamTask, customWordlist 
 		snap = e.configSnap.Load()
 	}
 
-	candidates := paramCandidates(customWordlist, snap)
-	if len(candidates) == 0 {
-		return nil, nil
-	}
-
 	baseline := paramBaseline{
 		statusCode: task.BaselineStatusCode,
 		size:       task.BaselineSize,
@@ -274,7 +303,7 @@ func (e *Engine) FuzzParams(ctx context.Context, task ParamTask, customWordlist 
 		if err != nil || resp == nil {
 			return nil, err
 		}
-		bodySize, _, _, _, bodyHash := computeResponseMetrics(resp, task.Method)
+		bodySize, _, _, contentType, bodyHash := computeResponseMetrics(resp, task.Method)
 		baseline = paramBaseline{
 			statusCode: resp.StatusCode,
 			size:       bodySize,
@@ -283,9 +312,19 @@ func (e *Engine) FuzzParams(ctx context.Context, task ParamTask, customWordlist 
 		task.BaselineStatusCode = resp.StatusCode
 		task.BaselineSize = bodySize
 		task.BaselineHash = bodyHash
+		task.BaselineContentType = contentType
+		if len(task.CandidateHints) == 0 {
+			task.CandidateHints = extractParamHints(task.URL, contentType, resp.Body)
+		}
 	}
 
-	return e.discoverParamHits(ctx, task, candidates, baseline, snap), nil
+	candidates := paramCandidates(customWordlist, snap, task.CandidateHints)
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	controls := e.paramNoiseControls(ctx, task, candidates, snap)
+	return e.discoverParamHits(ctx, task, candidates, baseline, controls, snap), nil
 }
 
 func (e *Engine) discoverParamHits(
@@ -293,6 +332,7 @@ func (e *Engine) discoverParamHits(
 	task ParamTask,
 	candidates []string,
 	baseline paramBaseline,
+	controls []paramResponseFingerprint,
 	snap *configSnapshot,
 ) []ParamHit {
 	if len(candidates) == 0 {
@@ -305,12 +345,12 @@ func (e *Engine) discoverParamHits(
 			if end > len(candidates) {
 				end = len(candidates)
 			}
-			hits = append(hits, e.discoverParamHits(ctx, task, candidates[start:end], baseline, snap)...)
+			hits = append(hits, e.discoverParamHits(ctx, task, candidates[start:end], baseline, controls, snap)...)
 		}
 		return hits
 	}
 
-	hit, matched, err := e.probeParamSubset(ctx, task, candidates, baseline, snap)
+	hit, matched, err := e.probeParamSubset(ctx, task, candidates, baseline, controls, snap)
 	if err != nil || !matched {
 		return nil
 	}
@@ -321,8 +361,8 @@ func (e *Engine) discoverParamHits(
 	}
 
 	mid := len(candidates) / 2
-	left := e.discoverParamHits(ctx, task, candidates[:mid], baseline, snap)
-	right := e.discoverParamHits(ctx, task, candidates[mid:], baseline, snap)
+	left := e.discoverParamHits(ctx, task, candidates[:mid], baseline, controls, snap)
+	right := e.discoverParamHits(ctx, task, candidates[mid:], baseline, controls, snap)
 	return append(left, right...)
 }
 
@@ -331,6 +371,7 @@ func (e *Engine) probeParamSubset(
 	task ParamTask,
 	params []string,
 	baseline paramBaseline,
+	controls []paramResponseFingerprint,
 	snap *configSnapshot,
 ) (ParamHit, bool, error) {
 	if len(params) == 0 {
@@ -360,6 +401,9 @@ func (e *Engine) probeParamSubset(
 	if !responseDiffersFromBaseline(baseline, resp.StatusCode, bodySize, bodyHash) {
 		return ParamHit{}, false, nil
 	}
+	if responseMatchesParamControls(controls, resp.StatusCode, bodySize, bodyHash) {
+		return ParamHit{}, false, nil
+	}
 
 	hit := ParamHit{
 		Params:      append([]string(nil), params...),
@@ -379,6 +423,78 @@ func (e *Engine) probeParamSubset(
 		hit.ResponseBytes = append([]byte(nil), resp.Raw...)
 	}
 	return hit, true, nil
+}
+
+func (e *Engine) paramNoiseControls(
+	ctx context.Context,
+	task ParamTask,
+	candidates []string,
+	snap *configSnapshot,
+) []paramResponseFingerprint {
+	if e == nil || task.URL == "" {
+		return nil
+	}
+
+	controlParams := chooseParamControlNames(task.URL, candidates)
+	if len(controlParams) == 0 {
+		return nil
+	}
+
+	timeout := DefaultHTTPTimeout
+	proxyOut := ""
+	if snap != nil {
+		if snap.Timeout > 0 {
+			timeout = snap.Timeout
+		}
+		proxyOut = snap.ProxyOut
+	}
+
+	controls := make([]paramResponseFingerprint, 0, len(controlParams))
+	for _, controlParam := range controlParams {
+		probeURL, rawReq, err := buildParamProbeRequest(task.URL, []string{controlParam}, snap)
+		if err != nil {
+			continue
+		}
+		resp, err := e.executeRequestWithRetry(ctx, probeURL, rawReq, timeout, proxyOut)
+		if err != nil || resp == nil {
+			continue
+		}
+		bodySize, _, _, _, bodyHash := computeResponseMetrics(resp, "GET")
+		controls = append(controls, paramResponseFingerprint{
+			statusCode: resp.StatusCode,
+			size:       bodySize,
+			hash:       bodyHash,
+		})
+	}
+	return controls
+}
+
+func chooseParamControlNames(taskURL string, candidates []string) []string {
+	used := make(map[string]struct{}, len(candidates)+4)
+	for _, candidate := range candidates {
+		candidate = strings.ToLower(strings.TrimSpace(candidate))
+		if candidate != "" {
+			used[candidate] = struct{}{}
+		}
+	}
+	if parsed, err := url.Parse(taskURL); err == nil {
+		for key := range parsed.Query() {
+			key = strings.ToLower(strings.TrimSpace(key))
+			if key != "" {
+				used[key] = struct{}{}
+			}
+		}
+	}
+
+	controls := make([]string, 0, len(paramControlNames))
+	for _, name := range paramControlNames {
+		key := strings.ToLower(name)
+		if _, exists := used[key]; exists {
+			continue
+		}
+		controls = append(controls, name)
+	}
+	return controls
 }
 
 func buildParamProbeRequest(taskURL string, params []string, snap *configSnapshot) (string, []byte, error) {
@@ -425,6 +541,15 @@ func responseDiffersFromBaseline(baseline paramBaseline, statusCode, size int, b
 	}
 	if bodyHash != baseline.hash {
 		return true
+	}
+	return false
+}
+
+func responseMatchesParamControls(controls []paramResponseFingerprint, statusCode, size int, bodyHash uint64) bool {
+	for _, control := range controls {
+		if control.statusCode == statusCode && control.size == size && control.hash == bodyHash {
+			return true
+		}
 	}
 	return false
 }
@@ -528,28 +653,33 @@ func (e *Engine) ProbeHiddenParams(ctx context.Context, targetURL, rawPath, meth
 	if err != nil || resp == nil {
 		return report, err
 	}
-	bodySize, _, _, _, bodyHash := computeResponseMetrics(resp, method)
+	bodySize, _, _, contentType, bodyHash := computeResponseMetrics(resp, method)
 	report.BaselineStatusCode = resp.StatusCode
 	report.BaselineSizeBytes = bodySize
 	report.BaselineHash = bodyHash
 
 	task := ParamTask{
-		URL:                parsed.String(),
-		Method:             method,
-		BaselineHash:       bodyHash,
-		BaselineStatusCode: resp.StatusCode,
-		BaselineSize:       bodySize,
+		URL:                 parsed.String(),
+		Method:              method,
+		BaselineHash:        bodyHash,
+		BaselineStatusCode:  resp.StatusCode,
+		BaselineSize:        bodySize,
+		BaselineContentType: contentType,
 	}
 	baseline := paramBaseline{
 		statusCode: resp.StatusCode,
 		size:       bodySize,
 		hash:       bodyHash,
 	}
-	candidates := paramCandidates(nil, snap)
+	if len(task.CandidateHints) == 0 {
+		task.CandidateHints = extractParamHints(task.URL, task.BaselineContentType, resp.Body)
+	}
+	candidates := paramCandidates(nil, snap, task.CandidateHints)
 	if len(candidates) == 0 {
 		return report, nil
 	}
-	hits := e.discoverParamHits(ctx, task, candidates, baseline, snap)
+	controls := e.paramNoiseControls(ctx, task, candidates, snap)
+	hits := e.discoverParamHits(ctx, task, candidates, baseline, controls, snap)
 	for _, hit := range hits {
 		report.Findings = append(report.Findings, ParamProbeFinding{
 			Params:      append([]string(nil), hit.Params...),
@@ -566,15 +696,131 @@ func (e *Engine) ProbeHiddenParams(ctx context.Context, targetURL, rawPath, meth
 	return report, nil
 }
 
-func paramCandidates(customWordlist []string, snap *configSnapshot) []string {
-	candidates := uniqueStrings(customWordlist)
-	if len(candidates) > 0 {
-		return candidates
+func paramCandidates(customWordlist []string, snap *configSnapshot, hints []string) []string {
+	baseCandidates := uniqueStrings(customWordlist)
+	if len(baseCandidates) == 0 && snap != nil {
+		baseCandidates = uniqueStrings(snap.ParamWordlist)
 	}
-	if snap == nil {
+	if len(baseCandidates) == 0 {
 		return nil
 	}
-	return uniqueStrings(snap.ParamWordlist)
+	return uniqueStrings(append(baseCandidates, hints...))
+}
+
+func paramTaskIdentity(task ParamTask) string {
+	rawURL := strings.TrimSpace(task.URL)
+	if rawURL == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return strings.ToLower(strings.TrimSpace(task.Method)) + "|" + strings.ToLower(rawURL)
+	}
+
+	queryKeys := make([]string, 0, len(parsed.Query()))
+	for key := range parsed.Query() {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key != "" {
+			queryKeys = append(queryKeys, key)
+		}
+	}
+	sort.Strings(queryKeys)
+
+	canonicalPath := parsed.EscapedPath()
+	if canonicalPath == "" {
+		canonicalPath = "/"
+	}
+
+	return strings.ToLower(strings.TrimSpace(task.Method)) + "|" +
+		strings.ToLower(parsed.Scheme) + "|" +
+		strings.ToLower(parsed.Host) + "|" +
+		strings.ToLower(canonicalPath) + "|" +
+		strings.Join(queryKeys, ",")
+}
+
+func extractParamHints(targetURL string, contentType string, body []byte) []string {
+	if len(body) == 0 {
+		return nil
+	}
+
+	var hints []string
+	hints = append(hints, extractParamHintsFromURL(targetURL)...)
+	hints = append(hints, extractParamHintsFromText(string(body))...)
+	hints = append(hints, extractParamHintsFromHTML(body)...)
+	return uniqueStrings(hints)
+}
+
+func extractParamHintsFromURL(targetURL string) []string {
+	parsed, err := url.Parse(strings.TrimSpace(targetURL))
+	if err != nil {
+		return nil
+	}
+	query := parsed.Query()
+	if len(query) == 0 {
+		return nil
+	}
+	hints := make([]string, 0, len(query))
+	for key := range query {
+		hints = append(hints, key)
+	}
+	return hints
+}
+
+func extractParamHintsFromText(text string) []string {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	var hints []string
+	for _, pattern := range paramHintPatternRes {
+		matches := pattern.FindAllStringSubmatch(text, -1)
+		for _, match := range matches {
+			if len(match) > 1 {
+				hints = append(hints, match[1])
+			}
+		}
+	}
+	return hints
+}
+
+func extractParamHintsFromHTML(body []byte) []string {
+	doc, err := html.Parse(bytes.NewReader(body))
+	if err != nil {
+		return nil
+	}
+
+	var hints []string
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node == nil {
+			return
+		}
+		if node.Type == html.ElementNode {
+			switch strings.ToLower(node.Data) {
+			case "input", "select", "textarea", "button":
+				if name := htmlAttr(node, "name"); name != "" {
+					hints = append(hints, name)
+				}
+			case "form", "a", "link":
+				hints = append(hints, extractParamHintsFromURL(htmlAttr(node, "action"))...)
+				hints = append(hints, extractParamHintsFromURL(htmlAttr(node, "href"))...)
+			}
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(doc)
+	return hints
+}
+
+func htmlAttr(node *html.Node, key string) string {
+	for _, attr := range node.Attr {
+		if strings.EqualFold(attr.Key, key) {
+			return strings.TrimSpace(attr.Val)
+		}
+	}
+	return ""
 }
 
 func uniqueStrings(values []string) []string {

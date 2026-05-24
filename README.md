@@ -182,6 +182,8 @@ The diff view highlights deleted text in red on the left and added text in green
 - `--harvest-response` narrows harvesting to generic HTTP response bodies, which is useful for JSON APIs that advertise child endpoints.
 - `--harvest-response-depth` and `--harvest-response-fetch` control how far response-driven harvesting follows discovered API endpoints and how many follow-up fetches it may spend.
 - Hidden parameter fuzzing is now opt-in through `--param-wordlist` (or `--param-wordlists`); when no parameter wordlist is provided, automatic param fuzzing stays off.
+- When hidden parameter fuzzing is enabled, DirFuzz now augments the supplied parameter wordlist with hints extracted from response text, error messages, forms, and links.
+- Parameter probes are compared against neutral control parameters so pages that change for any query string are not reported as discovered parameters.
 - `--no-tui` is the best choice when you want machine-readable JSONL output.
 - `-e` accepts a comma-separated extension list such as `-e php,html,js`.
 

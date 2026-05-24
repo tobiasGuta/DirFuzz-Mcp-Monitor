@@ -5,6 +5,10 @@ This file tracks user-facing fixes and noteworthy updates. Keep future bugfix no
 ## 2026-05-23
 - Removed the built-in hidden-parameter brute-force list and made parameter fuzzing opt-in through `--param-wordlist` / `--param-wordlists`.
 - Disabled automatic parameter fuzzing when no parameter wordlist is provided.
+- Added smart parameter hint extraction from response text, error messages, HTML forms, and links to augment configured parameter wordlists.
+- Deduplicated hidden-parameter probes across repeated URLs that differ only by query values, such as multiple `jobs.php?id=*` findings.
+- Fixed redirect-followed parameter fuzzing to probe the final canonical URL instead of the pre-redirect URL, reducing `301` false positives on paths like `/api`.
+- Added neutral control probes for hidden-parameter fuzzing to suppress pages that change generically for any query string.
 - Added `--harvest-response` for generic response-driven endpoint discovery, including JSON API bodies that list child endpoints.
 - Added `--harvest-response-depth` and `--harvest-response-fetch` to tune bounded follow-up crawling for response-driven harvesting.
 - Made live scan responses feed response-harvest discoveries back into the active queue, so paths revealed by endpoints like `/api/` are scanned during the same run.

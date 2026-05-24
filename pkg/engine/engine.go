@@ -3452,7 +3452,11 @@ func (e *Engine) worker(id int) {
 				}
 			}
 
-			e.queueParamFuzzFromResult(result, bodySize, bodyHash)
+			paramFuzzURL := fullURL
+			if finalRedirectURL != "" {
+				paramFuzzURL = finalRedirectURL
+			}
+			e.queueParamFuzzFromResult(result, paramFuzzURL, bodySize, bodyHash, contentType, resp.Body)
 			e.queueResponseHarvestFromResult(job, fullURL, finalRedirectURL, contentType, resp.Body)
 
 			// Spidering / dynamic link extraction
