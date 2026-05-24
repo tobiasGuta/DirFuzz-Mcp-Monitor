@@ -542,6 +542,8 @@ type Engine struct {
 	paramTaskChan chan ParamTask
 	paramTaskSeen sync.Map
 	paramHitSeen  sync.Map
+	paramHintsSeen sync.Map
+	phpParamTargets sync.Map
 	paramTasksWg  sync.WaitGroup
 	// Cached immutable config snapshot read by workers.
 	configSnap atomic.Pointer[configSnapshot]

@@ -131,6 +131,9 @@ func (e *Engine) queueParamFuzzFromResult(res Result, effectiveURL string, bodyS
 	}
 	snap := e.configSnap.Load()
 	hints := extractParamHints(effectiveURL, contentType, body)
+	if isPHPParamTarget(effectiveURL) {
+		hints = append(hints, e.globalParamHints()...)
+	}
 	if len(paramCandidates(nil, snap, hints)) == 0 {
 		return
 	}
@@ -150,6 +153,7 @@ func (e *Engine) queueParamFuzzFromResult(res Result, effectiveURL string, bodyS
 	if task.Method == "" {
 		task.Method = "GET"
 	}
+	e.rememberPHPParamTarget(task)
 	e.enqueueParamTask(task)
 }
 
@@ -174,12 +178,16 @@ func (e *Engine) enqueueParamTask(task ParamTask) bool {
 		return false
 	}
 
-	key := paramTaskIdentity(task)
+	key := paramTaskQueueIdentity(task)
 	if key == "" {
 		key = strings.ToLower(strings.TrimSpace(task.URL))
 	}
 	if _, loaded := e.paramTaskSeen.LoadOrStore(key, struct{}{}); loaded {
 		return false
+	}
+	baseKey := paramTaskIdentity(task)
+	if baseKey != "" && baseKey != key {
+		e.paramTaskSeen.Store(baseKey, struct{}{})
 	}
 
 	e.paramTasksWg.Add(1)
@@ -189,6 +197,9 @@ func (e *Engine) enqueueParamTask(task ParamTask) bool {
 	default:
 		e.paramTasksWg.Done()
 		e.paramTaskSeen.Delete(key)
+		if baseKey != "" && baseKey != key {
+			e.paramTaskSeen.Delete(baseKey)
+		}
 		return false
 	}
 }
@@ -215,6 +226,10 @@ func (e *Engine) runParamTask(task ParamTask) {
 	for _, hit := range hits {
 		if len(hit.Params) == 0 {
 			continue
+		}
+		newParams := e.rememberGlobalParamHints(hit.Params)
+		if len(newParams) > 0 {
+			e.queueKnownPHPTargetsForParams(newParams)
 		}
 		if !e.markParamHitSeen(hit) {
 			continue
@@ -265,6 +280,65 @@ func (e *Engine) markParamHitSeen(hit ParamHit) bool {
 	}
 	_, loaded := e.paramHitSeen.LoadOrStore(key, struct{}{})
 	return !loaded
+}
+
+func (e *Engine) rememberGlobalParamHints(params []string) []string {
+	if e == nil {
+		return nil
+	}
+	var added []string
+	for _, param := range uniqueStrings(params) {
+		if !isLikelyParamHint(param) {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(param))
+		if _, loaded := e.paramHintsSeen.LoadOrStore(key, param); loaded {
+			continue
+		}
+		added = append(added, param)
+	}
+	return added
+}
+
+func (e *Engine) globalParamHints() []string {
+	if e == nil {
+		return nil
+	}
+	var hints []string
+	e.paramHintsSeen.Range(func(_, value any) bool {
+		if hint, ok := value.(string); ok && hint != "" {
+			hints = append(hints, hint)
+		}
+		return true
+	})
+	return uniqueStrings(hints)
+}
+
+func (e *Engine) rememberPHPParamTarget(task ParamTask) {
+	if e == nil || task.URL == "" || !isPHPParamTarget(task.URL) {
+		return
+	}
+	key := phpParamTargetIdentity(task.URL, task.Method)
+	if key == "" {
+		return
+	}
+	e.phpParamTargets.Store(key, task)
+}
+
+func (e *Engine) queueKnownPHPTargetsForParams(params []string) {
+	if e == nil || len(params) == 0 {
+		return
+	}
+	params = uniqueStrings(params)
+	e.phpParamTargets.Range(func(_, value any) bool {
+		task, ok := value.(ParamTask)
+		if !ok || task.URL == "" {
+			return true
+		}
+		task.CandidateHints = uniqueStrings(append(task.CandidateHints, params...))
+		e.enqueueParamTask(task)
+		return true
+	})
 }
 
 // FuzzParams runs hidden-parameter discovery against task.URL using either a
@@ -777,7 +851,6 @@ func paramTaskIdentity(task ParamTask) string {
 		}
 	}
 	sort.Strings(queryKeys)
-
 	canonicalPath := parsed.EscapedPath()
 	if canonicalPath == "" {
 		canonicalPath = "/"
@@ -788,6 +861,45 @@ func paramTaskIdentity(task ParamTask) string {
 		strings.ToLower(parsed.Host) + "|" +
 		strings.ToLower(canonicalPath) + "|" +
 		strings.Join(queryKeys, ",")
+}
+
+func paramTaskQueueIdentity(task ParamTask) string {
+	base := paramTaskIdentity(task)
+	if base == "" {
+		return ""
+	}
+	hintKeys := make([]string, 0, len(task.CandidateHints))
+	for _, hint := range task.CandidateHints {
+		hint = strings.ToLower(strings.TrimSpace(hint))
+		if hint != "" {
+			hintKeys = append(hintKeys, hint)
+		}
+	}
+	sort.Strings(hintKeys)
+	return base + "|" + strings.Join(uniqueStrings(hintKeys), ",")
+}
+
+func phpParamTargetIdentity(rawURL string, method string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return strings.ToLower(strings.TrimSpace(method)) + "|" + strings.ToLower(strings.TrimSpace(rawURL))
+	}
+	path := parsed.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	return strings.ToLower(strings.TrimSpace(method)) + "|" +
+		strings.ToLower(parsed.Scheme) + "|" +
+		strings.ToLower(parsed.Host) + "|" +
+		strings.ToLower(path)
+}
+
+func isPHPParamTarget(rawURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	return strings.HasSuffix(strings.ToLower(parsed.EscapedPath()), ".php")
 }
 
 func paramHitIdentity(hit ParamHit) string {

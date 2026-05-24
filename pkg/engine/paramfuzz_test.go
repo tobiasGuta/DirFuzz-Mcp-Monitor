@@ -208,6 +208,31 @@ func TestMarkParamHitSeenSuppressesDuplicateProbeResults(t *testing.T) {
 	}
 }
 
+func TestLearnedParamsAreQueuedForKnownPHPTargets(t *testing.T) {
+	engine := NewEngine(1, 100, 0.01)
+	defer engine.Shutdown()
+
+	task := ParamTask{
+		URL:                "http://example.com/info.php",
+		Method:             http.MethodGet,
+		BaselineStatusCode: http.StatusOK,
+		BaselineSize:       2000,
+		BaselineHash:       123,
+	}
+	engine.rememberPHPParamTarget(task)
+
+	added := engine.rememberGlobalParamHints([]string{"id"})
+	if len(added) != 1 || !strings.EqualFold(added[0], "id") {
+		t.Fatalf("expected id to be learned once, got %v", added)
+	}
+	engine.queueKnownPHPTargetsForParams(added)
+
+	task.CandidateHints = []string{"id"}
+	if _, ok := engine.paramTaskSeen.Load(paramTaskQueueIdentity(task)); !ok {
+		t.Fatal("expected learned id parameter to queue a known PHP target")
+	}
+}
+
 func TestFuzzParamsMergesResponseHintsIntoConfiguredWordlist(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
