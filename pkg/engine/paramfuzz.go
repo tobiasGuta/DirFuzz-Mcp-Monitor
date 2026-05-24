@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"regexp"
 	"sort"
@@ -78,6 +79,7 @@ type ParamProbeReport struct {
 const paramChunkSize = 50
 
 var paramProbeValues = []string{"a", "b", "c", "d", "e"}
+var numericParamProbeValues = []string{"1", "2", "3", "4", "5"}
 var paramControlNames = []string{
 	"__dirfuzz_control",
 	"__dirfuzz_probe",
@@ -90,6 +92,11 @@ var (
 		regexp.MustCompile(`(?i)\bparameter\s+([a-zA-Z][a-zA-Z0-9_.-]{0,63})\b`),
 		regexp.MustCompile(`(?i)\bprovide\s+[?&]?([a-zA-Z][a-zA-Z0-9_.-]{0,63})=?\s+parameter\b`),
 		regexp.MustCompile(`(?i)\bmissing\s+(?:required\s+)?parameter\s+[\"'` + "`" + `]?([a-zA-Z][a-zA-Z0-9_.-]{0,63})[\"'` + "`" + `]?\b`),
+	}
+	paramHintStopwords = map[string]struct{}{
+		"a": {}, "an": {}, "and": {}, "auth": {}, "authentication": {}, "in": {}, "is": {},
+		"log": {}, "login": {}, "missing": {}, "or": {}, "parameter": {}, "please": {},
+		"provide": {}, "required": {}, "the": {}, "to": {}, "valid": {}, "value": {},
 	}
 )
 
@@ -209,6 +216,9 @@ func (e *Engine) runParamTask(task ParamTask) {
 		if len(hit.Params) == 0 {
 			continue
 		}
+		if !e.markParamHitSeen(hit) {
+			continue
+		}
 		msg := fmt.Sprintf("hidden parameters discovered: %s", strings.Join(hit.Params, ","))
 		res := Result{
 			Path:             hit.ProbeURL,
@@ -243,6 +253,18 @@ func (e *Engine) runParamTask(task ParamTask) {
 		}
 		e.handleResultNonBlocking(res)
 	}
+}
+
+func (e *Engine) markParamHitSeen(hit ParamHit) bool {
+	if e == nil {
+		return false
+	}
+	key := paramHitIdentity(hit)
+	if key == "" {
+		return true
+	}
+	_, loaded := e.paramHitSeen.LoadOrStore(key, struct{}{})
+	return !loaded
 }
 
 // FuzzParams runs hidden-parameter discovery against task.URL using either a
@@ -401,6 +423,9 @@ func (e *Engine) probeParamSubset(
 	if !responseDiffersFromBaseline(baseline, resp.StatusCode, bodySize, bodyHash) {
 		return ParamHit{}, false, nil
 	}
+	if !isUsefulParamProbeTransition(baseline, resp.StatusCode) {
+		return ParamHit{}, false, nil
+	}
 	if responseMatchesParamControls(controls, resp.StatusCode, bodySize, bodyHash) {
 		return ParamHit{}, false, nil
 	}
@@ -508,7 +533,7 @@ func buildParamProbeRequest(taskURL string, params []string, snap *configSnapsho
 		if param == "" {
 			continue
 		}
-		query.Set(param, paramProbeValues[i%len(paramProbeValues)])
+		query.Set(param, paramProbeValue(param, i))
 	}
 	u.RawQuery = query.Encode()
 
@@ -543,6 +568,32 @@ func responseDiffersFromBaseline(baseline paramBaseline, statusCode, size int, b
 		return true
 	}
 	return false
+}
+
+func isUsefulParamProbeTransition(baseline paramBaseline, statusCode int) bool {
+	if statusCode == http.StatusNotFound {
+		return false
+	}
+	return true
+}
+
+func paramProbeValue(param string, index int) string {
+	if looksIdentifierParam(param) {
+		return numericParamProbeValues[index%len(numericParamProbeValues)]
+	}
+	return paramProbeValues[index%len(paramProbeValues)]
+}
+
+func looksIdentifierParam(param string) bool {
+	param = strings.ToLower(strings.TrimSpace(param))
+	if param == "" {
+		return false
+	}
+	return param == "id" ||
+		strings.HasSuffix(param, "_id") ||
+		strings.HasSuffix(param, "-id") ||
+		strings.HasSuffix(param, ".id") ||
+		strings.HasSuffix(param, "id")
 }
 
 func responseMatchesParamControls(controls []paramResponseFingerprint, statusCode, size int, bodyHash uint64) bool {
@@ -739,6 +790,29 @@ func paramTaskIdentity(task ParamTask) string {
 		strings.Join(queryKeys, ",")
 }
 
+func paramHitIdentity(hit ParamHit) string {
+	rawURL := strings.TrimSpace(hit.ProbeURL)
+	if rawURL == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "get|" + strings.ToLower(rawURL) + "|" + strings.ToLower(strings.Join(uniqueStrings(hit.Params), ","))
+	}
+
+	query := parsed.Query()
+	parsed.RawQuery = query.Encode()
+	parsed.Fragment = ""
+
+	return "get|" +
+		strings.ToLower(parsed.Scheme) + "|" +
+		strings.ToLower(parsed.Host) + "|" +
+		parsed.EscapedPath() + "|" +
+		parsed.RawQuery + "|" +
+		strings.ToLower(strings.Join(uniqueStrings(hit.Params), ","))
+}
+
 func extractParamHints(targetURL string, contentType string, body []byte) []string {
 	if len(body) == 0 {
 		return nil
@@ -762,7 +836,9 @@ func extractParamHintsFromURL(targetURL string) []string {
 	}
 	hints := make([]string, 0, len(query))
 	for key := range query {
-		hints = append(hints, key)
+		if isLikelyParamHint(key) {
+			hints = append(hints, key)
+		}
 	}
 	return hints
 }
@@ -775,7 +851,7 @@ func extractParamHintsFromText(text string) []string {
 	for _, pattern := range paramHintPatternRes {
 		matches := pattern.FindAllStringSubmatch(text, -1)
 		for _, match := range matches {
-			if len(match) > 1 {
+			if len(match) > 1 && isLikelyParamHint(match[1]) {
 				hints = append(hints, match[1])
 			}
 		}
@@ -798,7 +874,7 @@ func extractParamHintsFromHTML(body []byte) []string {
 		if node.Type == html.ElementNode {
 			switch strings.ToLower(node.Data) {
 			case "input", "select", "textarea", "button":
-				if name := htmlAttr(node, "name"); name != "" {
+				if name := htmlAttr(node, "name"); isLikelyParamHint(name) {
 					hints = append(hints, name)
 				}
 			case "form", "a", "link":
@@ -821,6 +897,17 @@ func htmlAttr(node *html.Node, key string) string {
 		}
 	}
 	return ""
+}
+
+func isLikelyParamHint(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return false
+	}
+	if _, blocked := paramHintStopwords[value]; blocked {
+		return false
+	}
+	return true
 }
 
 func uniqueStrings(values []string) []string {

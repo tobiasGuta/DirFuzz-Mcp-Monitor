@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -196,7 +197,7 @@ func harvestEndpointsWithOptions(e *Engine, ctx context.Context, baseURL string,
 				if rootResp != nil {
 					contentType = rootResp.Header.Get("Content-Type")
 				}
-				for _, candidate := range extractResponseHarvestCandidates(rootBody, contentType) {
+				for _, candidate := range responseHarvestCandidatesForTarget(baseURL, rootBody, contentType) {
 					if normalized := add(candidate); normalized != "" {
 						enqueueResponseTarget(normalized, 1)
 					}
@@ -231,12 +232,12 @@ func harvestEndpointsWithOptions(e *Engine, ctx context.Context, baseURL string,
 
 			body, resp, err := fetchHarvestBody(ctx, client, target.url, nil)
 			processed++
-			if err != nil || resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			if err != nil || resp == nil || !shouldProcessHarvestResponseStatus(resp.StatusCode) {
 				continue
 			}
 
 			contentType := resp.Header.Get("Content-Type")
-			candidates := extractResponseHarvestCandidates(body, contentType)
+			candidates := responseHarvestCandidatesForTarget(target.url, body, contentType)
 			for _, candidate := range candidates {
 				if normalized := add(candidate); normalized != "" && target.depth < opts.responseMaxDepth {
 					enqueueResponseTarget(normalized, target.depth+1)
@@ -303,7 +304,7 @@ func (e *Engine) queueResponseHarvestFromResult(job Job, requestURL string, fina
 		return
 	}
 
-	for _, candidate := range extractResponseHarvestCandidates(body, contentType) {
+	for _, candidate := range responseHarvestCandidatesForTarget(baseURL, body, contentType) {
 		normalized := canonicalHarvestCandidate(base, candidate)
 		if normalized == "" {
 			continue
@@ -461,6 +462,67 @@ func extractResponseHarvestCandidates(body []byte, contentType string) []string 
 		return nil
 	}
 	return dedupeHarvestVariants(matches)
+}
+
+func responseHarvestCandidatesForTarget(targetURL string, body []byte, contentType string) []string {
+	candidates := extractResponseHarvestCandidates(body, contentType)
+	hints := extractResponseParamHints(targetURL, contentType, body)
+	if len(hints) == 0 {
+		return candidates
+	}
+	if hinted := buildHarvestCandidateWithParams(targetURL, hints); hinted != "" {
+		candidates = append(candidates, hinted)
+	}
+	return dedupeHarvestVariants(candidates)
+}
+
+func shouldProcessHarvestResponseStatus(statusCode int) bool {
+	if statusCode >= 200 && statusCode < 300 {
+		return true
+	}
+	switch statusCode {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusBadRequest:
+		return true
+	default:
+		return false
+	}
+}
+
+func extractResponseParamHints(targetURL string, contentType string, body []byte) []string {
+	if len(body) == 0 || !shouldHarvestResponseParamHints(targetURL, contentType, body) {
+		return nil
+	}
+	return uniqueStrings(extractParamHintsFromText(string(body)))
+}
+
+func shouldHarvestResponseParamHints(targetURL string, contentType string, body []byte) bool {
+	if isStaticHarvestAsset(targetURL) {
+		return false
+	}
+	if looksLikeJSONContent(contentType, body) {
+		return true
+	}
+
+	mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(contentType))
+	if err != nil {
+		mediaType = strings.ToLower(strings.TrimSpace(contentType))
+	}
+	mediaType = strings.ToLower(mediaType)
+	return mediaType == "text/plain"
+}
+
+func isStaticHarvestAsset(targetURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(targetURL))
+	if err != nil {
+		return false
+	}
+	lowerPath := strings.ToLower(parsed.EscapedPath())
+	for _, ext := range []string{".js", ".css", ".gif", ".png", ".jpg", ".jpeg", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".map"} {
+		if strings.HasSuffix(lowerPath, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 func looksLikeJSONContent(contentType string, body []byte) bool {
@@ -659,6 +721,9 @@ func canonicalHarvestCandidate(base *url.URL, candidate string) string {
 			}
 		}
 	}
+	if normalizedQuery := normalizeHarvestQuery(candidate); normalizedQuery != "" {
+		candidate = normalizedQuery
+	}
 	if strings.Contains(candidate, "/") && !strings.HasPrefix(candidate, "/") {
 		candidate = "/" + candidate
 	}
@@ -669,6 +734,58 @@ func canonicalHarvestCandidate(base *url.URL, candidate string) string {
 		return ""
 	}
 	return candidate
+}
+
+func buildHarvestCandidateWithParams(targetURL string, hints []string) string {
+	parsed, err := url.Parse(strings.TrimSpace(targetURL))
+	if err != nil {
+		return ""
+	}
+
+	path := parsed.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+
+	query := parsed.Query()
+	for _, hint := range hints {
+		hint = strings.TrimSpace(hint)
+		if hint == "" {
+			continue
+		}
+		query.Set(hint, "")
+	}
+	encoded := query.Encode()
+	if encoded == "" {
+		return path
+	}
+	return path + "?" + encoded
+}
+
+func normalizeHarvestQuery(candidate string) string {
+	parts := strings.SplitN(candidate, "?", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+
+	parsed, err := url.Parse(candidate)
+	if err != nil {
+		return ""
+	}
+
+	query := parsed.Query()
+	if len(query) == 0 {
+		return strings.TrimSuffix(candidate, "?")
+	}
+	for key := range query {
+		query.Set(key, "")
+	}
+
+	path := parsed.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	return path + "?" + query.Encode()
 }
 
 func keywordVariants(raw string) []string {

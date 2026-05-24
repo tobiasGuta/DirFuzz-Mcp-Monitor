@@ -541,6 +541,7 @@ type Engine struct {
 	// Bounded hidden-parameter fuzzing queue + workers.
 	paramTaskChan chan ParamTask
 	paramTaskSeen sync.Map
+	paramHitSeen  sync.Map
 	paramTasksWg  sync.WaitGroup
 	// Cached immutable config snapshot read by workers.
 	configSnap atomic.Pointer[configSnapshot]

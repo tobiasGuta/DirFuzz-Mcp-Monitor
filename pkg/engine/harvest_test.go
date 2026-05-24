@@ -202,6 +202,119 @@ func TestHarvestResponseHonorsDepthLimit(t *testing.T) {
 	}
 }
 
+func TestHarvestResponseNormalizesQueryValuesAndDedupeKeys(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"endpoints":["/jobs.php?id=9","/jobs.php?id=10","/jobs.php?id=2"]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	got := harvestEndpointsWithOptions(nil, context.Background(), srv.URL, client, harvestOptions{
+		response:           true,
+		responseMaxDepth:   DefaultHarvestResponseDepth,
+		responseMaxFetches: DefaultHarvestResponseFetch,
+	})
+
+	if !containsString(got, "/jobs.php?id=") {
+		t.Fatalf("expected normalized query candidate in %v", got)
+	}
+	for _, unexpected := range []string{"/jobs.php?id=9", "/jobs.php?id=10", "/jobs.php?id=2"} {
+		if containsString(got, unexpected) {
+			t.Fatalf("expected query values to be normalized away, but found %q in %v", unexpected, got)
+		}
+	}
+}
+
+func TestHarvestResponseAppliesHintedParamToOwningEndpoint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"endpoints":["/api/user"]}`))
+		case "/api/user":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"error":"Authentication required. Provide ?id= parameter or log in."}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	got := harvestEndpointsWithOptions(nil, context.Background(), srv.URL, client, harvestOptions{
+		response:           true,
+		responseMaxDepth:   DefaultHarvestResponseDepth,
+		responseMaxFetches: DefaultHarvestResponseFetch,
+	})
+
+	for _, want := range []string{"/api/user", "/api/user?id="} {
+		if !containsString(got, want) {
+			t.Fatalf("expected harvested response candidate %q in %v", want, got)
+		}
+	}
+}
+
+func TestHarvestResponseFollowUpParsesUnauthorizedBodiesForParamHints(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"endpoints":["/api/user"]}`))
+		case "/api/user":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"Authentication required. Provide ?id= parameter or log in."}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	got := harvestEndpointsWithOptions(nil, context.Background(), srv.URL, client, harvestOptions{
+		response:           true,
+		responseMaxDepth:   DefaultHarvestResponseDepth,
+		responseMaxFetches: DefaultHarvestResponseFetch,
+	})
+
+	for _, want := range []string{"/api/user", "/api/user?id="} {
+		if !containsString(got, want) {
+			t.Fatalf("expected unauthorized follow-up harvest candidate %q in %v", want, got)
+		}
+	}
+}
+
+func TestHarvestResponseDoesNotTurnHTMLFormsIntoHarvestedQueryStrings(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/register.php":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<html><body><form><input name="name"><input name="email"><input name="password"><input name="confirm_password"></form></body></html>`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	got := responseHarvestCandidatesForTarget(srv.URL+"/register.php", []byte(`<html><body><form><input name="name"><input name="email"><input name="password"><input name="confirm_password"></form></body></html>`), "text/html")
+	if containsString(got, "/register.php?confirm_password=&email=&name=&password=") {
+		t.Fatalf("did not expect HTML form fields to be harvested as query params: %v", got)
+	}
+}
+
+func TestHarvestResponseDoesNotTurnStaticAssetsIntoHarvestedQueryStrings(t *testing.T) {
+	got := responseHarvestCandidatesForTarget("http://example.com/includes/bootstrap.bundle.min.js", []byte(`Provide ?id= parameter; t.delegationSelector = true;`), "application/javascript")
+	if len(got) != 0 {
+		t.Fatalf("did not expect static assets to harvest param hints, got %v", got)
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, v := range values {
 		if strings.EqualFold(v, want) || v == want {

@@ -186,6 +186,28 @@ func TestEnqueueParamTaskDedupesByQueryKeysNotValues(t *testing.T) {
 	}
 }
 
+func TestParamHitIdentityDedupesEquivalentProbeURLs(t *testing.T) {
+	first := ParamHit{ProbeURL: "http://example.com/jobs.php?id=1", Params: []string{"id"}}
+	second := ParamHit{ProbeURL: "http://example.com/jobs.php?id=1", Params: []string{"id"}}
+
+	if got, want := paramHitIdentity(first), paramHitIdentity(second); got != want {
+		t.Fatalf("expected identical hit identity for duplicate probe URLs, got %q vs %q", got, want)
+	}
+}
+
+func TestMarkParamHitSeenSuppressesDuplicateProbeResults(t *testing.T) {
+	engine := NewEngine(1, 100, 0.01)
+	defer engine.Shutdown()
+
+	hit := ParamHit{ProbeURL: "http://example.com/jobs.php?id=1", Params: []string{"id"}}
+	if !engine.markParamHitSeen(hit) {
+		t.Fatal("expected first param hit to be marked as new")
+	}
+	if engine.markParamHitSeen(hit) {
+		t.Fatal("expected duplicate param hit to be suppressed")
+	}
+}
+
 func TestFuzzParamsMergesResponseHintsIntoConfiguredWordlist(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -213,6 +235,62 @@ func TestFuzzParamsMergesResponseHintsIntoConfiguredWordlist(t *testing.T) {
 	}
 	if len(hits[0].Params) != 1 || !strings.EqualFold(hits[0].Params[0], "id") {
 		t.Fatalf("expected id param hit from response hint, got %+v", hits[0].Params)
+	}
+}
+
+func TestFuzzParamsUsesNumericProbeValuesForIdentifierParams(t *testing.T) {
+	probeURL, _, err := buildParamProbeRequest("http://example.com/api/user", []string{"id", "user_id", "token"}, nil)
+	if err != nil {
+		t.Fatalf("buildParamProbeRequest returned error: %v", err)
+	}
+	if !strings.Contains(probeURL, "id=1") {
+		t.Fatalf("expected id to use numeric probe value, got %s", probeURL)
+	}
+	if !strings.Contains(probeURL, "user_id=2") {
+		t.Fatalf("expected user_id to use numeric probe value, got %s", probeURL)
+	}
+	if !strings.Contains(probeURL, "token=c") {
+		t.Fatalf("expected non-id param to use generic probe value, got %s", probeURL)
+	}
+}
+
+func TestFuzzParamsSuppressesNotFoundProbeTransitions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Has("id") {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"Authentication required. Provide ?id= parameter or log in."}`))
+	}))
+	defer server.Close()
+
+	engine := NewEngine(1, 100, 0.01)
+	engine.Config.ParamWordlist = []string{"unused"}
+	engine.buildAndStoreConfigSnapshot()
+
+	hits, err := engine.FuzzParams(context.Background(), ParamTask{
+		URL:    server.URL + "/api/user",
+		Method: http.MethodGet,
+	}, nil)
+	if err != nil {
+		t.Fatalf("FuzzParams returned error: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("expected 404 probe transition to be suppressed, got %+v", hits)
+	}
+}
+
+func TestExtractParamHintsFromTextSkipsCommonStopwords(t *testing.T) {
+	hints := extractParamHintsFromText(`Authentication required. Provide ?id= parameter or log in.`)
+	if !containsStringIgnoreCase(hints, "id") {
+		t.Fatalf("expected id hint in %v", hints)
+	}
+	for _, blocked := range []string{"or", "log", "in", "parameter"} {
+		if containsStringIgnoreCase(hints, blocked) {
+			t.Fatalf("did not expect stopword %q in %v", blocked, hints)
+		}
 	}
 }
 
