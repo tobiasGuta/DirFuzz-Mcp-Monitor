@@ -493,8 +493,11 @@ func prepareControllerEngine(eng *engine.Engine, cfg cliConfig) error {
 		c.HarvestJS = cfg.HarvestJS
 		c.HarvestAPI = cfg.HarvestAPI
 		c.HarvestResponse = cfg.HarvestResponse
+		c.HarvestPassive = cfg.HarvestPassive
+		c.HarvestSourceMaps = cfg.HarvestSourceMaps
 		c.HarvestResponseDepth = cfg.HarvestResponseDepth
 		c.HarvestResponseFetch = cfg.HarvestResponseFetch
+		c.HarvestOTXKey = cfg.HarvestOTXKey
 		c.ParamWordlist = append([]string(nil), cfg.ParamWords...)
 		c.EvasionLimit = cfg.EvasionLimit
 		c.MaxRetries = cfg.MaxRetries
@@ -542,6 +545,13 @@ func prepareControllerEngine(eng *engine.Engine, cfg cliConfig) error {
 		if err := eng.LoadProxies(cfg.ProxyFile); err != nil {
 			return fmt.Errorf("loading proxy list: %w", err)
 		}
+	}
+	if cfg.OOB {
+		eng.UpdateConfig(func(c *engine.Config) {
+			c.OOBEnabled = true
+			c.InteractshServer = cfg.OOBServer
+			c.InteractshToken = cfg.OOBToken
+		})
 	}
 	if cfg.ProxyOut != "" && cfg.Insecure {
 		fmt.Fprintf(os.Stderr, "[!] Warning: --proxy-out is using insecure TLS verification because --insecure is enabled\n")

@@ -3,6 +3,11 @@
 This file tracks user-facing fixes and noteworthy updates. Keep future bugfix notes here instead of scattering them across other Markdown docs. Add new entries with the date they were made.
 
 ## 2026-05-25
+- Added bounded asynchronous 401/403 bypass micro-tasks that try standard path normalization and IP-spoofing headers, and emit labeled `[BYPASS: ...]` findings when a permutation returns a successful response.
+- Added JavaScript source map harvesting so `.js` responses can discover hidden routes from `SourceMap` / `X-SourceMap` headers or `sourceMappingURL` directives and feed them back into the fuzzing queue.
+- Replaced the monitor's hardcoded Slack/Discord webhook formatter with ProjectDiscovery-style notify provider config loading, so alerts can go through Slack, Discord, Telegram, Pushover, Teams, Gotify, Google Chat, SMTP, or custom webhooks from a standard `provider-config.yaml`.
+- Added passive route harvesting from the Wayback Machine, Common Crawl, and AlienVault OTX with per-source timeouts so slow archives cannot hang the scan loop.
+- Added optional Interactsh-based OOB payload generation with `--oob`, plus monitor-side polling and webhook alerts for blind SSRF/command-injection style hits.
 - Removed `403` from the recursive wildcard shortcut so access-controlled directories are not silently pruned during recursion.
 - Fixed recursive scanning noise where child routes such as `api/api`, `api/api/user`, and `api/user/api` could be reported when they returned the same response fingerprint as an already-seen parent or canonical route.
 - Added default-on recursive pruning through `--recursive-prune` to report low-value static/resource branches once, then avoid spending recursive depth under paths like `includes/fonts`.

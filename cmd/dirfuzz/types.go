@@ -43,6 +43,9 @@ type cliConfig struct {
 	MaxRedirects int
 	Timeout      time.Duration
 	Insecure     bool
+	OOB          bool
+	OOBServer    string
+	OOBToken     string
 
 	// ── Matching / filtering ─────────────────────────────────────────────────
 	MatchCodes  string // comma-separated, e.g. "200,301,403"
@@ -84,8 +87,11 @@ type cliConfig struct {
 	HarvestJS            bool
 	HarvestAPI           bool
 	HarvestResponse      bool
+	HarvestPassive       bool
+	HarvestSourceMaps    bool
 	HarvestResponseDepth int
 	HarvestResponseFetch int
+	HarvestOTXKey        string
 	EvasionLimit         int
 	MaxRetries           int
 	DryRun               bool

@@ -64,6 +64,7 @@ type SwarmWorkerConfig struct {
 	HarvestJS            bool                `json:"harvest_js,omitempty"`
 	HarvestAPI           bool                `json:"harvest_api,omitempty"`
 	HarvestResponse      bool                `json:"harvest_response,omitempty"`
+	HarvestSourceMaps    bool                `json:"harvest_sourcemaps,omitempty"`
 	HarvestResponseDepth int                 `json:"harvest_response_depth,omitempty"`
 	HarvestResponseFetch int                 `json:"harvest_response_fetch,omitempty"`
 	ParamWordlist        []string            `json:"param_wordlist,omitempty"`
@@ -314,6 +315,7 @@ func applySwarmConfig(e *Engine, cfg SwarmWorkerConfig) error {
 		c.HarvestJS = cfg.HarvestJS
 		c.HarvestAPI = cfg.HarvestAPI
 		c.HarvestResponse = cfg.HarvestResponse
+		c.HarvestSourceMaps = cfg.HarvestSourceMaps
 		c.HarvestResponseDepth = cfg.HarvestResponseDepth
 		c.HarvestResponseFetch = cfg.HarvestResponseFetch
 		c.ParamWordlist = append([]string(nil), cfg.ParamWordlist...)

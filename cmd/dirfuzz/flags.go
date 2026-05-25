@@ -49,6 +49,9 @@ func parseFlags() cliConfig {
 	timeout := flag.Duration("timeout", engine.DefaultHTTPTimeout, "Per-request timeout  (e.g. 5s)")
 	maxDuration := flag.Duration("max-duration", engine.DefaultMaxScanDuration, "Maximum total scan duration before shutdown (e.g. 60s, 0 = unlimited)")
 	insecure := flag.Bool("k", false, "Skip TLS certificate verification")
+	oob := flag.Bool("oob", false, "Enable out-of-band Interactsh payload generation and polling")
+	oobServer := flag.String("oob-server", "", "Interactsh server URL(s) to use for OOB payloads")
+	oobToken := flag.String("oob-token", "", "Interactsh authentication token")
 
 	// ── Matching / filtering ─────────────────────────────────────────────────
 	matchCodes := flag.String("mc", defaultMatchCodes, "Status codes to treat as hits, comma-separated")
@@ -97,8 +100,11 @@ func parseFlags() cliConfig {
 	harvestJS := flag.Bool("harvest-js", false, "Harvest endpoints from JavaScript only")
 	harvestAPI := flag.Bool("harvest-api", false, "Harvest endpoints from OpenAPI and GraphQL only")
 	harvestResponse := flag.Bool("harvest-response", false, "Harvest endpoints from generic HTTP responses, especially JSON API bodies")
+	harvestPassive := flag.Bool("harvest-passive", false, "Harvest passive URLs from Wayback, Common Crawl, and AlienVault OTX before scanning")
+	harvestSourceMaps := flag.Bool("harvest-sourcemaps", false, "Harvest routes from JavaScript source maps when .js responses expose one")
 	harvestResponseDepth := flag.Int("harvest-response-depth", engine.DefaultHarvestResponseDepth, "Maximum follow-up depth for response-driven endpoint harvesting")
 	harvestResponseFetch := flag.Int("harvest-response-fetch", engine.DefaultHarvestResponseFetch, "Maximum number of follow-up response fetches for response-driven harvesting")
+	harvestOTXKey := flag.String("harvest-otx-key", "", "AlienVault OTX API key for passive URL harvesting")
 	evasionLimit := flag.Int("evasion-limit", engine.DefaultEvasionLimit, "Max bypass techniques to try per path")
 	maxRetries := flag.Int("retry", 0, "Retry failed requests up to N times on connection error")
 	dryRun := flag.Bool("dry-run", false, "Estimate request volume and exit without sending traffic")
@@ -199,6 +205,9 @@ func parseFlags() cliConfig {
 		MaxRedirects: *maxRedirects,
 		Timeout:      *timeout,
 		Insecure:     *insecure,
+		OOB:          *oob,
+		OOBServer:    *oobServer,
+		OOBToken:     *oobToken,
 
 		MatchCodes:  *matchCodes,
 		FilterSizes: *filterSizes,
@@ -237,8 +246,11 @@ func parseFlags() cliConfig {
 		HarvestJS:            *harvestJS,
 		HarvestAPI:           *harvestAPI,
 		HarvestResponse:      *harvestResponse,
+		HarvestPassive:       *harvest || *harvestPassive,
+		HarvestSourceMaps:    *harvestSourceMaps,
 		HarvestResponseDepth: *harvestResponseDepth,
 		HarvestResponseFetch: *harvestResponseFetch,
+		HarvestOTXKey:        *harvestOTXKey,
 		EvasionLimit:         *evasionLimit,
 		MaxRetries:           *maxRetries,
 		DryRun:               *dryRun,

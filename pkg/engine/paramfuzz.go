@@ -134,7 +134,7 @@ func (e *Engine) queueParamFuzzFromResult(res Result, effectiveURL string, bodyS
 	if isPHPParamTarget(effectiveURL) {
 		hints = append(hints, e.globalParamHints()...)
 	}
-	if len(paramCandidates(nil, snap, hints)) == 0 {
+	if len(e.paramCandidates(nil, snap, hints)) == 0 {
 		return
 	}
 	if !shouldQueueParamFuzz(res.StatusCode, res.Method, bodySize, bodyHash) {
@@ -414,7 +414,7 @@ func (e *Engine) FuzzParams(ctx context.Context, task ParamTask, customWordlist 
 		}
 	}
 
-	candidates := paramCandidates(customWordlist, snap, task.CandidateHints)
+	candidates := e.paramCandidates(customWordlist, snap, task.CandidateHints)
 	if len(candidates) == 0 {
 		return nil, nil
 	}
@@ -799,7 +799,7 @@ func (e *Engine) ProbeHiddenParams(ctx context.Context, targetURL, rawPath, meth
 	if len(task.CandidateHints) == 0 {
 		task.CandidateHints = extractParamHints(task.URL, task.BaselineContentType, resp.Body)
 	}
-	candidates := paramCandidates(nil, snap, task.CandidateHints)
+	candidates := e.paramCandidates(nil, snap, task.CandidateHints)
 	if len(candidates) == 0 {
 		return report, nil
 	}
@@ -821,7 +821,7 @@ func (e *Engine) ProbeHiddenParams(ctx context.Context, targetURL, rawPath, meth
 	return report, nil
 }
 
-func paramCandidates(customWordlist []string, snap *configSnapshot, hints []string) []string {
+func (e *Engine) paramCandidates(customWordlist []string, snap *configSnapshot, hints []string) []string {
 	baseCandidates := uniqueStrings(customWordlist)
 	if len(baseCandidates) == 0 && snap != nil {
 		baseCandidates = uniqueStrings(snap.ParamWordlist)
@@ -829,7 +829,13 @@ func paramCandidates(customWordlist []string, snap *configSnapshot, hints []stri
 	if len(baseCandidates) == 0 {
 		return nil
 	}
-	return uniqueStrings(append(baseCandidates, hints...))
+	candidates := append(baseCandidates, hints...)
+	if e != nil {
+		if payload := e.InteractshURL(); payload != "" {
+			candidates = append(candidates, payload)
+		}
+	}
+	return uniqueStrings(candidates)
 }
 
 func paramTaskIdentity(task ParamTask) string {

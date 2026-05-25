@@ -1,4 +1,3 @@
-admin
 login
 api
 index
@@ -8,3 +7,4 @@ sitemap.xml
 .git
 backup
 config
+admin

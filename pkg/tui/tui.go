@@ -3858,16 +3858,28 @@ func (m *Model) updateDetailView() {
 
 	if selectedHit != nil {
 		reqContent = "No raw request available. Use --save-raw to include raw request/response; set follow redirects or disable body filters if using HEAD."
+		if selectedHit.Note != "" {
+			reqContent = selectedHit.Note + "\n\n" + reqContent
+		}
 		if selectedHit.Request != "" {
 			reqContent = selectedHit.Request
+			if selectedHit.Note != "" {
+				reqContent = selectedHit.Note + "\n\n" + reqContent
+			}
 			if isBinaryString(reqContent) {
 				reqContent = fmt.Sprintf("[Binary request: %d bytes]\nUse --save-raw to persist to disk.", len(selectedHit.Request))
 			}
 		}
 
 		resContent = "No raw response available. Use --save-raw to include raw request/response."
+		if selectedHit.Note != "" {
+			resContent = selectedHit.Note + "\n\n" + resContent
+		}
 		if selectedHit.Response != "" {
 			resContent = selectedHit.Response
+			if selectedHit.Note != "" {
+				resContent = selectedHit.Note + "\n\n" + resContent
+			}
 			if isBinaryString(resContent) {
 				ctype := selectedHit.ContentType
 				if ctype == "" {

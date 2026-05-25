@@ -31,6 +31,7 @@ import (
 	"dirfuzz/pkg/netutil"
 
 	"github.com/bits-and-blooms/bloom/v3"
+	interactclient "github.com/projectdiscovery/interactsh/pkg/client"
 	"golang.org/x/time/rate"
 )
 
@@ -132,6 +133,9 @@ type Config struct {
 	FilterRTMin          time.Duration
 	FilterRTMax          time.Duration
 	ProxyOut             string
+	OOBEnabled           bool
+	InteractshServer     string
+	InteractshToken      string
 	WordlistPath         string
 	OutputFile           string
 	Timeout              time.Duration
@@ -150,8 +154,11 @@ type Config struct {
 	HarvestJS            bool
 	HarvestAPI           bool
 	HarvestResponse      bool
+	HarvestPassive       bool
+	HarvestSourceMaps    bool
 	HarvestResponseDepth int
 	HarvestResponseFetch int
+	HarvestOTXKey        string
 	ParamWordlist        []string
 	EvasionLimit         int
 	MaxRetries           int
@@ -208,8 +215,11 @@ type configSnapshot struct {
 	HarvestJS            bool
 	HarvestAPI           bool
 	HarvestResponse      bool
+	HarvestPassive       bool
+	HarvestSourceMaps    bool
 	HarvestResponseDepth int
 	HarvestResponseFetch int
+	HarvestOTXKey        string
 	ParamWordlist        []string
 	EvasionLimit         int
 	Mutate               bool
@@ -269,6 +279,7 @@ type Result struct {
 	Response         string            `json:"response,omitempty"` // only populated when SaveRaw=true
 	RequestBytes     []byte            `json:"-"`
 	ResponseBytes    []byte            `json:"-"`
+	Note             string            `json:"note,omitempty"`
 	ContentDrift     bool              `json:"content_drift,omitempty"`
 	OldSize          int               `json:"old_size,omitempty"`
 	OldWords         int               `json:"old_words,omitempty"`
@@ -533,6 +544,12 @@ type Engine struct {
 	matchPlugin  *PluginMatcher
 	mutatePlugin *PluginMutator
 
+	// Out-of-band interaction client for blind vulnerability detection.
+	InteractshClient      *interactclient.Client
+	InteractshPayload     string
+	interactshClientOwned bool
+	interactshMu          sync.RWMutex
+
 	// Scope domain for recursion
 	scopeDomain string
 
@@ -542,6 +559,10 @@ type Engine struct {
 
 	// Bounded concurrency for recursive wordlist scanners
 	recursiveSem chan struct{}
+	// Bounded concurrency for source-map harvesting tasks.
+	sourceMapSem chan struct{}
+	// Bounded concurrency for 403/401 bypass micro-tasks.
+	bypassSem chan struct{}
 
 	// Bounded outbound proxy replay queue + workers
 	replayCh chan replayTask
@@ -886,6 +907,10 @@ func NewEngine(numWorkers int, expectedItems uint, falsePositiveRate float64) *E
 
 	// Create bounded replay queue and start workers.
 	replayCh := make(chan replayTask, ReplayQueueSize)
+	sourceMapConcurrency := numWorkers
+	if sourceMapConcurrency < 1 {
+		sourceMapConcurrency = 1
+	}
 
 	e := &Engine{
 		jobs:          make(chan Job, DefaultJobQueueSize),
@@ -932,6 +957,8 @@ func NewEngine(numWorkers int, expectedItems uint, falsePositiveRate float64) *E
 		lastTick:          time.Now().UnixNano(),
 		autoThrottle:      true,
 		recursiveSem:      make(chan struct{}, MaxConcurrentRecursions),
+		sourceMapSem:      make(chan struct{}, sourceMapConcurrency),
+		bypassSem:         make(chan struct{}, 20),
 		replayCh:          replayCh,
 		workerStopCh:      make(chan struct{}),
 	}
@@ -1153,8 +1180,11 @@ func (e *Engine) buildAndStoreConfigSnapshot() {
 		HarvestJS:            e.Config.HarvestJS,
 		HarvestAPI:           e.Config.HarvestAPI,
 		HarvestResponse:      e.Config.HarvestResponse,
+		HarvestPassive:       e.Config.HarvestPassive,
+		HarvestSourceMaps:    e.Config.HarvestSourceMaps,
 		HarvestResponseDepth: e.Config.HarvestResponseDepth,
 		HarvestResponseFetch: e.Config.HarvestResponseFetch,
+		HarvestOTXKey:        e.Config.HarvestOTXKey,
 		EvasionLimit:         e.Config.EvasionLimit,
 		Mutate:               e.Config.Mutate,
 		Recursive:            e.Config.Recursive,
@@ -1701,6 +1731,10 @@ func (e *Engine) KickoffScanner(path string, startLine int64) {
 	e.AddScanner()
 	sc := e.scannerCtx.Load()
 	if sc != nil {
+		if e.shouldRunPassiveHarvest() {
+			e.AddScanner()
+			go e.StartPassiveHarvesting(sc.ctx, atomic.LoadInt64(&e.RunID), e.BaseURL())
+		}
 		go e.StartWordlistScanner(sc.ctx, atomic.LoadInt64(&e.RunID), path, startLine)
 	}
 }
@@ -2234,6 +2268,9 @@ func (e *Engine) NumWorkers() int {
 func (e *Engine) Start() {
 	e.workerLock.Lock()
 	defer e.workerLock.Unlock()
+	if err := e.ensureInteractshClient(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to initialize interactsh client: %v\n", err)
+	}
 	now := time.Now().UTC().UnixNano()
 	e.startedAtUnix.CompareAndSwap(0, now)
 	e.isRunning.Store(true)
@@ -3027,6 +3064,7 @@ func (e *Engine) worker(id int) {
 						HarvestResponse:      e.Config.HarvestResponse,
 						HarvestResponseDepth: e.Config.HarvestResponseDepth,
 						HarvestResponseFetch: e.Config.HarvestResponseFetch,
+						HarvestSourceMaps:    e.Config.HarvestSourceMaps,
 						ParamWordlist:        append([]string(nil), e.Config.ParamWordlist...),
 						EvasionLimit:         e.Config.EvasionLimit,
 						Mutate:               e.Config.Mutate,
@@ -3098,8 +3136,8 @@ func (e *Engine) worker(id int) {
 			wordlistPath := snap.WordlistPath
 			wafEvasion := snap.WAFEvasion
 			verbTamper := snap.VerbTamper
-			fourOhThreeBypass := snap.FourOhThreeBypass
 			spidering := snap.Spidering
+			harvestSourceMaps := snap.HarvestSourceMaps
 
 			shouldExit := id >= snap.MaxWorkers
 
@@ -3396,6 +3434,17 @@ func (e *Engine) worker(id int) {
 				continue
 			}
 
+			if harvestSourceMaps && resp.StatusCode >= 200 && resp.StatusCode < 300 && e.shouldHarvestSourceMap(parsedURL.Path, contentType) {
+				sourceMapURL := ExtractSourceMapURL(resp.HeaderMap, resp.Body)
+				if sourceMapURL != "" {
+					baseURL := fullURL
+					if finalRedirectURL != "" {
+						baseURL = finalRedirectURL
+					}
+					e.scheduleSourceMapHarvest(localCtx, baseURL, sourceMapURL, snap, job.RunID, job.HarvestDepth+1)
+				}
+			}
+
 			// 403 classification.
 			forbidden403Type := ""
 			var bypassTechniqueLabel string
@@ -3411,7 +3460,7 @@ func (e *Engine) worker(id int) {
 				}
 				forbidden403Type = Classify403(classifyBody, classifyHeaders)
 
-				if wafEvasion || fourOhThreeBypass {
+				if wafEvasion {
 					detectedWAFVendor := "unknown"
 					wafRes := FingerprintWAF(classifyBody, classifyHeaders, resp.StatusCode, int64(resp.Duration.Milliseconds()))
 					if wafRes.Detected {
@@ -3544,6 +3593,11 @@ func (e *Engine) worker(id int) {
 					}
 					continue
 				}
+			}
+
+			if snap.FourOhThreeBypass && (resp.StatusCode == 403 || resp.StatusCode == 401) && bodySize >= 0 {
+				bypassCtx := context.WithValue(localCtx, bypassBaselineSizeKey{}, bodySize)
+				e.schedule403BypassTask(bypassCtx, fullURL, reqPath, successfulMethod, headers, snap)
 			}
 
 			// Capture interesting headers.
@@ -3993,6 +4047,12 @@ func (e *Engine) Shutdown() {
 		// jobs will be submitted.
 		e.scannerWg.Wait()
 
+		// Wait for any in-flight work spawned by scanners, including source-map
+		// harvesters, before closing the jobs channel. This avoids closing the
+		// queue while auxiliary harvest goroutines are still trying to submit
+		// follow-up paths.
+		e.activeJobs.Wait()
+
 		// Now that producers are stopped, it's safe to close the jobs channel.
 		// This will signal the worker goroutines to exit their range loop
 		// once they have finished processing all queued jobs.
@@ -4000,6 +4060,8 @@ func (e *Engine) Shutdown() {
 
 		// Wait for all worker goroutines to finish.
 		e.wg.Wait()
+
+		e.closeInteractshClient()
 
 		// Drain and stop the hidden-parameter worker pool after the main
 		// directory scan workers have finished submitting tasks.

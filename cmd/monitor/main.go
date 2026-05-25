@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,7 +11,6 @@ import (
 	"io"
 	"log/slog"
 	"math/rand"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -26,6 +24,9 @@ import (
 	"time"
 
 	"dirfuzz/pkg/engine"
+
+	interactclient "github.com/projectdiscovery/interactsh/pkg/client"
+	notifyclient "github.com/projectdiscovery/notify/pkg/client"
 )
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
@@ -48,21 +49,27 @@ const (
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 type monitorConfig struct {
-	Target              string
-	Wordlist            string
-	DiscordWebhook      string
-	StateFile           string
-	ScanInterval        time.Duration
-	Jitter              time.Duration
-	Workers             int
-	MatchCodes          []int
-	Methods             []string
-	Headers             map[string]string
-	Extensions          []string
-	AllowPrivateTargets bool
-	SaveRaw             bool
-	NormalizeRegex      string
-	LogLevel            slog.Level
+	Target               string
+	Wordlist             string
+	DiscordWebhook       string
+	NotifyProviderConfig string
+	StateFile            string
+	ScanInterval         time.Duration
+	Jitter               time.Duration
+	Workers              int
+	MatchCodes           []int
+	Methods              []string
+	Headers              map[string]string
+	Extensions           []string
+	AllowPrivateTargets  bool
+	SaveRaw              bool
+	HarvestPassive       bool
+	OTXAPIKey            string
+	OOB                  bool
+	InteractshServer     string
+	InteractshToken      string
+	NormalizeRegex       string
+	LogLevel             slog.Level
 }
 
 func main() {
@@ -78,8 +85,36 @@ func main() {
 		logger.Error("failed to prepare state directory", "state_file", cfg.StateFile, "error", err)
 		os.Exit(1)
 	}
-	if cfg.DiscordWebhook == "" {
-		logger.Info("DISCORD_WEBHOOK not set; findings will be logged but not sent to Discord")
+	notifyClient, notifyConfigPath, err := newNotifyClient(cfg)
+	if err != nil {
+		logger.Error("failed to initialize notify client", "error", err)
+		os.Exit(1)
+	}
+	if notifyClient == nil {
+		logger.Info("notify is disabled; no provider-config.yaml found and no legacy webhook fallback configured")
+	} else {
+		logger.Info("notify client ready", "provider_config", notifyConfigPath)
+	}
+	var oobClient *interactclient.Client
+	var oobPayload string
+	if cfg.OOB {
+		var err error
+		oobClient, err = engine.NewInteractshClient(cfg.InteractshServer, cfg.InteractshToken)
+		if err != nil {
+			logger.Error("failed to initialize interactsh client", "error", err)
+			os.Exit(1)
+		}
+		oobPayload = oobClient.URL()
+		if err := startOOBPolling(oobClient, cfg, logger, notifyClient); err != nil {
+			logger.Error("failed to start interactsh polling", "error", err)
+			_ = oobClient.Close()
+			os.Exit(1)
+		}
+		defer func() {
+			_ = oobClient.StopPolling()
+			_ = oobClient.Close()
+		}()
+		logger.Info("interactsh out-of-band monitoring enabled", "payload", oobPayload)
 	}
 
 	logger.Info("monitor started",
@@ -129,7 +164,7 @@ func main() {
 		}
 
 		cycleStart := time.Now()
-		interestingCount, err := runScanCycle(cfg, logger, &engineMu, &currentEngine, shutdownRequested.Load)
+		interestingCount, err := runScanCycle(cfg, logger, &engineMu, &currentEngine, shutdownRequested.Load, notifyClient, oobClient, oobPayload)
 		if err != nil {
 			logger.Error("scan cycle failed", "error", err)
 		} else {
@@ -183,6 +218,9 @@ func runScanCycle(
 	engineMu *sync.Mutex,
 	currentEngine **engine.Engine,
 	shutdownRequested func() bool,
+	notifyClient *notifyclient.Client,
+	oobClient *interactclient.Client,
+	oobPayload string,
 ) (int, error) {
 	logger.Info("starting scan cycle")
 
@@ -191,6 +229,9 @@ func runScanCycle(
 	}
 
 	eng := engine.NewEngine(cfg.Workers, engine.DefaultBloomFilterSize, engine.DefaultBloomFilterFP)
+	if oobClient != nil {
+		eng.SetInteractshClient(oobClient, oobPayload, false)
+	}
 	if len(cfg.Methods) > 0 {
 		eng.UpdateConfig(func(c *engine.Config) {
 			c.Methods = append([]string(nil), cfg.Methods...)
@@ -237,6 +278,12 @@ func runScanCycle(
 	if cfg.SaveRaw {
 		eng.UpdateConfig(func(c *engine.Config) {
 			c.SaveRaw = true
+		})
+	}
+	if cfg.HarvestPassive {
+		eng.UpdateConfig(func(c *engine.Config) {
+			c.HarvestPassive = true
+			c.HarvestOTXKey = cfg.OTXAPIKey
 		})
 	}
 
@@ -346,9 +393,12 @@ func runScanCycle(
 	interesting := findInteresting(results, previous, curHashes)
 	logFindings(logger, interesting)
 
-	if len(interesting) > 0 && cfg.DiscordWebhook != "" {
-		if err := postDiscordWebhook(context.Background(), logger, cfg.DiscordWebhook, cfg.Target, cfg.ScanInterval, interesting); err != nil {
-			logger.Error("failed to send discord webhook", "error", err)
+	if len(interesting) > 0 && notifyClient != nil {
+		message := formatFindingNotification(cfg.Target, cfg.ScanInterval, interesting)
+		if message != "" {
+			if err := notifyClient.Send(message); err != nil {
+				logger.Error("failed to send notify message", "error", err)
+			}
 		}
 	}
 
@@ -501,184 +551,6 @@ func logFindings(logger *slog.Logger, findings []finding) {
 
 // ─── Discord ─────────────────────────────────────────────────────────────────
 
-type discordField struct {
-	Name   string `json:"name"`
-	Value  string `json:"value"`
-	Inline bool   `json:"inline"`
-}
-
-type discordFooter struct {
-	Text string `json:"text"`
-}
-
-type discordEmbed struct {
-	Title       string         `json:"title"`
-	Description string         `json:"description,omitempty"`
-	Color       int            `json:"color"`
-	Fields      []discordField `json:"fields"`
-	Footer      discordFooter  `json:"footer"`
-}
-
-type discordPayload struct {
-	Embeds []discordEmbed `json:"embeds"`
-}
-
-func postDiscordWebhook(ctx context.Context, logger *slog.Logger, webhook, target string, interval time.Duration, findings []finding) error {
-	if len(findings) == 0 {
-		return nil
-	}
-
-	color := 16776960
-	for _, f := range findings {
-		if f.NewStatus == http.StatusOK {
-			color = 15158332
-			break
-		}
-	}
-
-	fields := make([]discordField, 0, min(25, len(findings)+2))
-	fields = append(fields, discordField{
-		Name:   "📋 Target",
-		Value:  target,
-		Inline: false,
-	})
-	maxDetailFields := len(findings)
-	if len(findings) > 24 {
-		maxDetailFields = 23
-	}
-
-	ordered := make([]finding, 0, len(findings))
-	for _, f := range findings {
-		if f.Type == findingStatusChange {
-			ordered = append(ordered, f)
-		}
-	}
-	for _, f := range findings {
-		if f.Type == findingContentChange {
-			ordered = append(ordered, f)
-		}
-	}
-	for _, f := range findings {
-		if f.Type == findingBodySizeChange {
-			ordered = append(ordered, f)
-		}
-	}
-	for _, f := range findings {
-		if f.Type == findingNewEndpoint {
-			ordered = append(ordered, f)
-		}
-	}
-
-	for _, f := range ordered[:maxDetailFields] {
-		switch f.Type {
-		case findingStatusChange:
-			fields = append(fields, discordField{
-				Name:   "⚡ Status Change",
-				Value:  fmt.Sprintf("`%s` was `%d` → now `%d`", f.Path, f.OldStatus, f.NewStatus),
-				Inline: false,
-			})
-		case findingContentChange:
-			oldShort := f.OldHash
-			if len(oldShort) > 8 {
-				oldShort = oldShort[:8]
-			}
-			newShort := f.NewHash
-			if len(newShort) > 8 {
-				newShort = newShort[:8]
-			}
-			fields = append(fields, discordField{
-				Name:   "⚠️ Content Change",
-				Value:  fmt.Sprintf("`%s` changed (hash `%s` → `%s`)", f.Path, oldShort, newShort),
-				Inline: false,
-			})
-		case findingBodySizeChange:
-			fields = append(fields, discordField{
-				Name:   "🔀 Body Size Change",
-				Value:  fmt.Sprintf("`%s` size `%d` → `%d`", f.Path, f.OldSize, f.NewSize),
-				Inline: false,
-			})
-		case findingNewEndpoint:
-			fields = append(fields, discordField{
-				Name:   "🆕 New Endpoint",
-				Value:  fmt.Sprintf("`%s` returned `%d`", f.Path, f.NewStatus),
-				Inline: false,
-			})
-		}
-	}
-
-	if len(findings) > 24 {
-		fields = append(fields, discordField{
-			Name:   fmt.Sprintf("+ %d more findings", len(findings)-23),
-			Value:  "check STATE_FILE",
-			Inline: false,
-		})
-	}
-
-	payload := discordPayload{
-		Embeds: []discordEmbed{
-			{
-				Title:       "🔍 DirFuzz Monitor — Changes Detected",
-				Description: fmt.Sprintf("🎯 Target: %s", target),
-				Color:       color,
-				Fields:      fields,
-				Footer: discordFooter{
-					Text: fmt.Sprintf("Scan completed at %s | Next scan in %s", time.Now().Format(time.RFC3339), interval.String()),
-				},
-			},
-		},
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal discord payload: %w", err)
-	}
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	backoff := webhookInitialBackoff
-
-	for attempt := 1; attempt <= maxWebhookAttempts; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhook, bytes.NewReader(body))
-		if err != nil {
-			return fmt.Errorf("build discord request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := client.Do(req)
-		if err == nil {
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				return nil
-			}
-			err = fmt.Errorf("discord webhook returned status %d", resp.StatusCode)
-		}
-
-		if attempt == maxWebhookAttempts {
-			return fmt.Errorf("discord webhook delivery failed after %d attempt(s): %w", maxWebhookAttempts, err)
-		}
-
-		logger.Error("discord webhook delivery failed; retrying",
-			"attempt", attempt,
-			"max_attempts", maxWebhookAttempts,
-			"error", err,
-			"retry_in", backoff.String(),
-		)
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backoff):
-		}
-
-		if backoff < webhookMaxBackoff {
-			backoff *= 2
-			if backoff > webhookMaxBackoff {
-				backoff = webhookMaxBackoff
-			}
-		}
-	}
-	return fmt.Errorf("discord webhook delivery failed")
-}
-
 // ─── State persistence ───────────────────────────────────────────────────────
 
 func persistState(path string, results []engine.Result, logger *slog.Logger, normalizeRe *regexp.Regexp, precomputedHashes map[string]string, isShutdown bool) error {
@@ -815,6 +687,7 @@ func loadConfigFromEnv() (monitorConfig, error) {
 	cfg.Target = strings.TrimSpace(os.Getenv("TARGET"))
 	cfg.Wordlist = strings.TrimSpace(os.Getenv("WORDLIST"))
 	cfg.DiscordWebhook = strings.TrimSpace(os.Getenv("DISCORD_WEBHOOK"))
+	cfg.NotifyProviderConfig = strings.TrimSpace(os.Getenv("NOTIFY_PROVIDER_CONFIG"))
 
 	if cfg.Target == "" {
 		return monitorConfig{}, errors.New("TARGET is required")
@@ -899,6 +772,39 @@ func loadConfigFromEnv() (monitorConfig, error) {
 		default:
 			return monitorConfig{}, fmt.Errorf("invalid ALLOW_PRIVATE_TARGETS value %q, expected true/false/1/0/yes/no", allowPrivateRaw)
 		}
+	}
+
+	harvestPassiveRaw := strings.ToLower(strings.TrimSpace(os.Getenv("HARVEST_PASSIVE")))
+	if harvestPassiveRaw != "" {
+		switch harvestPassiveRaw {
+		case "1", "true", "yes":
+			cfg.HarvestPassive = true
+		case "0", "false", "no":
+			cfg.HarvestPassive = false
+		default:
+			return monitorConfig{}, fmt.Errorf("invalid HARVEST_PASSIVE value %q, expected true/false/1/0/yes/no", harvestPassiveRaw)
+		}
+	}
+	cfg.OTXAPIKey = strings.TrimSpace(os.Getenv("OTX_API_KEY"))
+	if cfg.OTXAPIKey != "" {
+		cfg.HarvestPassive = true
+	}
+
+	oobRaw := strings.ToLower(strings.TrimSpace(os.Getenv("OOB")))
+	if oobRaw != "" {
+		switch oobRaw {
+		case "1", "true", "yes":
+			cfg.OOB = true
+		case "0", "false", "no":
+			cfg.OOB = false
+		default:
+			return monitorConfig{}, fmt.Errorf("invalid OOB value %q, expected true/false/1/0/yes/no", oobRaw)
+		}
+	}
+	cfg.InteractshServer = strings.TrimSpace(os.Getenv("INTERACTSH_SERVER"))
+	cfg.InteractshToken = strings.TrimSpace(os.Getenv("INTERACTSH_TOKEN"))
+	if cfg.InteractshServer != "" || cfg.InteractshToken != "" {
+		cfg.OOB = true
 	}
 
 	return cfg, nil
