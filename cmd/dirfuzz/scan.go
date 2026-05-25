@@ -134,7 +134,7 @@ func run(cfg cliConfig) error {
 
 	// ── 6. Lua plugins ────────────────────────────────────────────────────────
 	if cfg.PluginMatch != "" {
-		pm, err := engine.NewPluginMatcher(cfg.PluginMatch)
+		pm, err := engine.NewPluginMatcher(cfg.PluginMatch, cfg.Timeout)
 		if err != nil {
 			return fmt.Errorf("plugin-match: %w", err)
 		}
@@ -142,7 +142,7 @@ func run(cfg cliConfig) error {
 		eng.SetMatchPlugin(pm)
 	}
 	if cfg.PluginMutate != "" {
-		pm, err := engine.NewPluginMutator(cfg.PluginMutate)
+		pm, err := engine.NewPluginMutator(cfg.PluginMutate, cfg.Timeout)
 		if err != nil {
 			return fmt.Errorf("plugin-mutate: %w", err)
 		}
@@ -155,6 +155,9 @@ func run(cfg cliConfig) error {
 		if err := eng.LoadProxies(cfg.ProxyFile); err != nil {
 			return fmt.Errorf("loading proxy list: %w", err)
 		}
+	}
+	if cfg.ProxyOut != "" && cfg.Insecure {
+		fmt.Fprintf(os.Stderr, "[!] Warning: --proxy-out is using insecure TLS verification because --insecure is enabled\n")
 	}
 
 	// ── 8. Eagle mode ─────────────────────────────────────────────────────────
@@ -232,7 +235,7 @@ func run(cfg cliConfig) error {
 	)
 
 	if cfg.OutputFile != "" {
-		f, err := os.Create(cfg.OutputFile)
+		f, err := os.OpenFile(cfg.OutputFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 		if err != nil {
 			return fmt.Errorf("creating output file %s: %w", cfg.OutputFile, err)
 		}

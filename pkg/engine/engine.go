@@ -1664,6 +1664,9 @@ func (e *Engine) ChangeWordlist(path string) error {
 	atomic.StoreInt64(&e.AutoFilterSuppressed, 0)
 	atomic.StoreInt64(&e.SimhashSuppressed, 0)
 
+	// Let any jobs already handed to workers finish before we drain the queue.
+	// This avoids racing a worker's activeJobs.Done() against drainJobs().
+	e.activeJobs.Wait()
 	e.drainJobs()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1969,7 +1972,7 @@ func (e *Engine) saveResumeState(wordlist string, lineNum int64, persistBloom bo
 		fmt.Fprintf(os.Stderr, "Warning: failed to marshal resume state: %v\n", err)
 		return
 	}
-	if err := os.WriteFile(e.ResumeFile, data, 0644); err != nil {
+	if err := os.WriteFile(e.ResumeFile, data, 0600); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to write resume file: %v\n", err)
 	}
 	if persistBloom {
@@ -1995,7 +1998,7 @@ func (e *Engine) saveBloomResumeState() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0600)
 }
 
 func (e *Engine) loadBloomResumeState() error {
@@ -2124,7 +2127,7 @@ func (e *Engine) AutoCalibrate() error {
 	}
 
 	if consistent && first != nil && first.statusCode > 0 {
-		fmt.Printf("[+] Wildcard detected! Status: %d, normalised body hash consistent — filtering size: %d\n",
+		fmt.Fprintf(os.Stderr, "[+] Wildcard detected! Status: %d, normalised body hash consistent — filtering size: %d\n",
 			first.statusCode, first.bodySize)
 		e.AddFilterSize(first.bodySize)
 	}
@@ -2202,11 +2205,11 @@ func (e *Engine) checkRecursiveWildcard(dirPath string) bool {
 		// on unknown children, recursing below it will amplify network errors.
 		return true
 	}
-	// Treat 200, 403 and common redirect responses as wildcard indicators.
+	// Treat permissive and redirect responses as wildcard indicators.
 	// Some servers redirect unknown paths (e.g. /*) with 301/302 — these
 	// should be treated as wildcard directories to avoid unbounded
 	// recursive scanning.
-	if resp.StatusCode == 200 || resp.StatusCode == 403 || resp.StatusCode == 301 || resp.StatusCode == 302 {
+	if resp.StatusCode == 200 || resp.StatusCode == 301 || resp.StatusCode == 302 {
 		return true
 	}
 	return false
@@ -3628,7 +3631,7 @@ func (e *Engine) worker(id int) {
 				bodyStr = string(resp.Body)
 			}
 			if e.matchPlugin != nil && bypassTechniqueLabel == "" {
-				matched, labels, confidence := e.matchPlugin.Match(resp.StatusCode, bodySize, wordCount, lineCount, bodyStr, contentType)
+				matched, labels, confidence := e.matchPlugin.Match(resp.StatusCode, bodySize, wordCount, lineCount, bodyStr, contentType, requestTimeout)
 				if !matched {
 					if e.cleanupJob(shouldExit) {
 						return
@@ -3902,7 +3905,7 @@ func (e *Engine) getReplayClient(proxyAddr string) *http.Client {
 
 	transport := &http.Transport{
 		Proxy:           http.ProxyURL(proxyURL),
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: e.Config.Insecure},
 	}
 	client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
 

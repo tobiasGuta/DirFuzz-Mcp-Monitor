@@ -100,7 +100,10 @@ func runSwarm(cfg cliConfig) error {
 		return err
 	}
 
-	results, warnings, err := executeSwarm(reqCtx, provider, cfg, workerCfg, cfg.Target, wordlistPath, startLine)
+	swCtx, cancel := context.WithCancel(reqCtx)
+	defer cancel()
+
+	results, warnings, err := executeSwarm(swCtx, cancel, provider, cfg, workerCfg, cfg.Target, wordlistPath, startLine)
 	if err != nil {
 		return err
 	}
@@ -219,6 +222,7 @@ func buildSwarmWorkerConfig(cfg cliConfig) (engine.SwarmWorkerConfig, error) {
 
 func executeSwarm(
 	ctx context.Context,
+	cancel context.CancelFunc,
 	provider engine.SwarmProvider,
 	cfg cliConfig,
 	workerCfg engine.SwarmWorkerConfig,
@@ -337,6 +341,7 @@ func executeSwarm(
 		select {
 		case err := <-errCh:
 			if err != nil {
+				cancel()
 				return nil, nil, err
 			}
 		case batch, ok := <-resultCh:
@@ -359,7 +364,7 @@ func writeSwarmOutput(cfg cliConfig, results []engine.Result) error {
 	)
 
 	if cfg.OutputFile != "" {
-		f, err := os.Create(cfg.OutputFile)
+		f, err := os.OpenFile(cfg.OutputFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 		if err != nil {
 			return fmt.Errorf("creating output file %s: %w", cfg.OutputFile, err)
 		}
@@ -518,7 +523,7 @@ func prepareControllerEngine(eng *engine.Engine, cfg cliConfig) error {
 	}
 
 	if cfg.PluginMatch != "" {
-		pm, err := engine.NewPluginMatcher(cfg.PluginMatch)
+		pm, err := engine.NewPluginMatcher(cfg.PluginMatch, cfg.Timeout)
 		if err != nil {
 			return fmt.Errorf("plugin-match: %w", err)
 		}
@@ -526,7 +531,7 @@ func prepareControllerEngine(eng *engine.Engine, cfg cliConfig) error {
 		eng.SetMatchPlugin(pm)
 	}
 	if cfg.PluginMutate != "" {
-		pm, err := engine.NewPluginMutator(cfg.PluginMutate)
+		pm, err := engine.NewPluginMutator(cfg.PluginMutate, cfg.Timeout)
 		if err != nil {
 			return fmt.Errorf("plugin-mutate: %w", err)
 		}
@@ -537,6 +542,9 @@ func prepareControllerEngine(eng *engine.Engine, cfg cliConfig) error {
 		if err := eng.LoadProxies(cfg.ProxyFile); err != nil {
 			return fmt.Errorf("loading proxy list: %w", err)
 		}
+	}
+	if cfg.ProxyOut != "" && cfg.Insecure {
+		fmt.Fprintf(os.Stderr, "[!] Warning: --proxy-out is using insecure TLS verification because --insecure is enabled\n")
 	}
 	if cfg.EagleFile != "" {
 		if err := eng.LoadPreviousScan(cfg.EagleFile); err != nil {

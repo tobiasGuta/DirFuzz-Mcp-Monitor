@@ -94,6 +94,30 @@ func TestCheckRecursiveWildcardFailsClosedOnEmptyResponse(t *testing.T) {
 	}
 }
 
+func TestCheckRecursiveWildcardDoesNotTreat403AsWildcard(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	eng := NewEngine(1, 100, 0.01)
+	defer eng.Shutdown()
+	eng.Config.Lock()
+	eng.Config.AllowPrivateTargets = true
+	eng.Config.Unlock()
+	eng.RefreshConfigSnapshot()
+	if err := eng.SetTarget(server.URL); err != nil {
+		t.Fatalf("SetTarget() failed: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	eng.scannerCtx.Store(&scannerContext{ctx: ctx, cancel: cancel})
+
+	if eng.checkRecursiveWildcard("/jobs.php") {
+		t.Fatal("expected recursive wildcard check to ignore 403 responses")
+	}
+}
+
 func TestRecursiveMirrorReferencePaths(t *testing.T) {
 	got := recursiveMirrorReferencePaths("/api/api/user?debug=1")
 	want := []string{"api/api", "api", "api/user"}

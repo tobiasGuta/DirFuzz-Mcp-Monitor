@@ -32,7 +32,7 @@ end
 	tmpfile.Close()
 
 	// Load plugin
-	matcher, err := NewPluginMatcher(tmpfile.Name())
+	matcher, err := NewPluginMatcher(tmpfile.Name(), time.Second)
 	if err != nil {
 		t.Fatalf("Failed to create plugin: %v", err)
 	}
@@ -51,7 +51,7 @@ end
 	}
 
 	for _, tt := range tests {
-		matched, _, _ := matcher.Match(tt.statusCode, tt.size, 0, 0, "test body", "text/html")
+		matched, _, _ := matcher.Match(tt.statusCode, tt.size, 0, 0, "test body", "text/html", time.Second)
 		if matched != tt.expected {
 			t.Errorf("Match(status=%d, size=%d) = %v, want %v",
 				tt.statusCode, tt.size, matched, tt.expected)
@@ -83,7 +83,7 @@ end
 	tmpfile.Close()
 
 	// Load plugin
-	mutator, err := NewPluginMutator(tmpfile.Name())
+	mutator, err := NewPluginMutator(tmpfile.Name(), time.Second)
 	if err != nil {
 		t.Fatalf("Failed to create plugin: %v", err)
 	}
@@ -108,7 +108,7 @@ end
 // TestPluginMatcherError verifies error handling
 func TestPluginMatcherError(t *testing.T) {
 	// Try to load non-existent file
-	_, err := NewPluginMatcher("/nonexistent/file.lua")
+	_, err := NewPluginMatcher("/nonexistent/file.lua", time.Second)
 	if err == nil {
 		t.Error("Expected error for non-existent file")
 	}
@@ -130,7 +130,7 @@ end
 	}
 	tmpfile.Close()
 
-	_, err = NewPluginMatcher(tmpfile.Name())
+	_, err = NewPluginMatcher(tmpfile.Name(), time.Second)
 	if err == nil {
 		t.Error("Expected error for missing match function")
 	}
@@ -139,7 +139,7 @@ end
 // TestPluginMutatorError verifies error handling
 func TestPluginMutatorError(t *testing.T) {
 	// Try to load non-existent file
-	_, err := NewPluginMutator("/nonexistent/file.lua")
+	_, err := NewPluginMutator("/nonexistent/file.lua", time.Second)
 	if err == nil {
 		t.Error("Expected error for non-existent file")
 	}
@@ -161,9 +161,38 @@ end
 	}
 	tmpfile.Close()
 
-	_, err = NewPluginMutator(tmpfile.Name())
+	_, err = NewPluginMutator(tmpfile.Name(), time.Second)
 	if err == nil {
 		t.Error("Expected error for missing mutate function")
+	}
+}
+
+func TestRunActiveTemplateTimesOut(t *testing.T) {
+	script := `
+function run(ctx)
+    while true do end
+end
+`
+	tmpfile, err := os.CreateTemp("", "test_active_template_timeout_*.lua")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpfile.Name())
+
+	if _, err := tmpfile.Write([]byte(script)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tmpfile.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	err = RunActiveTemplate(context.Background(), tmpfile.Name(), 50*time.Millisecond, "", false, "http://example.com", false)
+	if err == nil {
+		t.Fatal("expected timeout error from active template")
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("active template timeout took too long")
 	}
 }
 
@@ -235,7 +264,7 @@ end
 	}
 	tmpfile.Close()
 
-	matcher, err := NewPluginMatcher(tmpfile.Name())
+	matcher, err := NewPluginMatcher(tmpfile.Name(), time.Second)
 	if err != nil {
 		t.Fatalf("Failed to create plugin: %v", err)
 	}
@@ -254,7 +283,7 @@ end
 
 	done := make(chan bool, 1)
 	go func() {
-		matched, _, _ := matcher.Match(200, 10, 1, 1, "ok", "text/plain")
+		matched, _, _ := matcher.Match(200, 10, 1, 1, "ok", "text/plain", time.Second)
 		done <- matched
 	}()
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -23,6 +24,17 @@ type WebhookPayload struct {
 
 // SendWebhook posts a WebhookPayload to the given URL.
 func SendWebhook(webhookURL string, payload WebhookPayload) error {
+	u, parseErr := url.Parse(webhookURL)
+	if parseErr != nil {
+		return fmt.Errorf("webhook: invalid URL: %w", parseErr)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("webhook: invalid URL: missing scheme or host")
+	}
+	if err := validateOutboundHostname(u.Hostname(), false); err != nil {
+		return fmt.Errorf("webhook SSRF guard: %w", err)
+	}
+
 	var body []byte
 	var err error
 

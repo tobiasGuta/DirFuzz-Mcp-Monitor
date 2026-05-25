@@ -14,6 +14,8 @@ import (
 	lua "github.com/yuin/gopher-lua"
 )
 
+const defaultLuaExecutionTimeout = 5 * time.Second
+
 func defaultVMPoolSize() int {
 	n := runtime.NumCPU()
 	if n < 4 {
@@ -23,6 +25,23 @@ func defaultVMPoolSize() int {
 		n = 16
 	}
 	return n
+}
+
+func luaExecutionTimeout(timeout time.Duration) time.Duration {
+	if timeout > 0 {
+		return timeout
+	}
+	return defaultLuaExecutionTimeout
+}
+
+func runLuaWithTimeout(L *lua.LState, parent context.Context, timeout time.Duration, fn func() error) error {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, luaExecutionTimeout(timeout))
+	defer cancel()
+	L.SetContext(ctx)
+	return fn()
 }
 
 func newRestrictedLuaState() *lua.LState {
@@ -44,9 +63,10 @@ type PluginMatcher struct {
 	pool     chan *lua.LState
 	file     string
 	compiled []byte
+	timeout  time.Duration
 }
 
-func NewPluginMatcher(scriptPath string) (*PluginMatcher, error) {
+func NewPluginMatcher(scriptPath string, timeout time.Duration) (*PluginMatcher, error) {
 	compiled, err := os.ReadFile(scriptPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read plugin file: %w", err)
@@ -57,7 +77,9 @@ func NewPluginMatcher(scriptPath string) (*PluginMatcher, error) {
 
 	for i := 0; i < size; i++ {
 		L := newRestrictedLuaState()
-		if err := L.DoString(string(compiled)); err != nil {
+		if err := runLuaWithTimeout(L, context.Background(), timeout, func() error {
+			return L.DoString(string(compiled))
+		}); err != nil {
 			L.Close()
 			for len(pool) > 0 {
 				(<-pool).Close()
@@ -73,10 +95,10 @@ func NewPluginMatcher(scriptPath string) (*PluginMatcher, error) {
 		}
 		pool <- L
 	}
-	return &PluginMatcher{pool: pool, file: scriptPath, compiled: compiled}, nil
+	return &PluginMatcher{pool: pool, file: scriptPath, compiled: compiled, timeout: timeout}, nil
 }
 
-func (pm *PluginMatcher) evalMatch(L *lua.LState, statusCode, size, words, lines int, body, contentType string) (bool, []string, string) {
+func (pm *PluginMatcher) evalMatch(L *lua.LState, timeout time.Duration, statusCode, size, words, lines int, body, contentType string) (bool, []string, string) {
 	matchFunc := L.GetGlobal("match")
 	if matchFunc == lua.LNil {
 		return false, nil, ""
@@ -89,7 +111,9 @@ func (pm *PluginMatcher) evalMatch(L *lua.LState, statusCode, size, words, lines
 	L.SetField(t, "body", lua.LString(body))
 	L.SetField(t, "content_type", lua.LString(contentType))
 
-	if err := L.CallByParam(lua.P{Fn: matchFunc, NRet: 1, Protect: true}, t); err != nil {
+	if err := runLuaWithTimeout(L, context.Background(), timeout, func() error {
+		return L.CallByParam(lua.P{Fn: matchFunc, NRet: 1, Protect: true}, t)
+	}); err != nil {
 		return false, nil, ""
 	}
 	res := L.Get(-1)
@@ -143,20 +167,25 @@ func (pm *PluginMatcher) evalMatch(L *lua.LState, statusCode, size, words, lines
 	return lua.LVAsBool(res), nil, ""
 }
 
-func (pm *PluginMatcher) Match(statusCode, size, words, lines int, body, contentType string) (bool, []string, string) {
+func (pm *PluginMatcher) Match(statusCode, size, words, lines int, body, contentType string, timeout time.Duration) (bool, []string, string) {
+	if timeout <= 0 {
+		timeout = pm.timeout
+	}
 	select {
 	case L := <-pm.pool:
 		defer func() { pm.pool <- L }()
-		return pm.evalMatch(L, statusCode, size, words, lines, body, contentType)
+		return pm.evalMatch(L, timeout, statusCode, size, words, lines, body, contentType)
 	default:
 		// Pool saturated: run the matcher in a short-lived VM so workers
 		// don't block behind the fixed-size pool.
 		L := newRestrictedLuaState()
 		defer L.Close()
-		if err := L.DoString(string(pm.compiled)); err != nil {
+		if err := runLuaWithTimeout(L, context.Background(), timeout, func() error {
+			return L.DoString(string(pm.compiled))
+		}); err != nil {
 			return false, nil, ""
 		}
-		return pm.evalMatch(L, statusCode, size, words, lines, body, contentType)
+		return pm.evalMatch(L, timeout, statusCode, size, words, lines, body, contentType)
 	}
 }
 
@@ -171,7 +200,7 @@ func (pm *PluginMatcher) Close() {
 // evalOnFinding invokes the optional on_finding(result) hook. It builds a
 // Lua table representation of the Result and calls the hook. The hook may
 // modify the table in-place. Returns (dropped, labels, confidence).
-func (pm *PluginMatcher) evalOnFinding(L *lua.LState, r *Result) (bool, []string, string) {
+func (pm *PluginMatcher) evalOnFinding(L *lua.LState, timeout time.Duration, r *Result) (bool, []string, string) {
 	onFunc := L.GetGlobal("on_finding")
 	if onFunc == lua.LNil {
 		return false, nil, ""
@@ -194,7 +223,9 @@ func (pm *PluginMatcher) evalOnFinding(L *lua.LState, r *Result) (bool, []string
 	}
 	L.SetField(t, "headers", hdrTbl)
 
-	if err := L.CallByParam(lua.P{Fn: onFunc, NRet: 0, Protect: true}, t); err != nil {
+	if err := runLuaWithTimeout(L, context.Background(), timeout, func() error {
+		return L.CallByParam(lua.P{Fn: onFunc, NRet: 0, Protect: true}, t)
+	}); err != nil {
 		return false, nil, ""
 	}
 
@@ -235,36 +266,44 @@ func (pm *PluginMatcher) evalOnFinding(L *lua.LState, r *Result) (bool, []string
 // available, otherwise a short-lived VM is created. registerHTTPLib is
 // invoked so plugins can use http_send from within on_finding.
 func (pm *PluginMatcher) OnFinding(reqCtx context.Context, timeout time.Duration, proxyAddr string, insecure bool, allowPrivate bool, r *Result) (bool, []string, string) {
+	if timeout <= 0 {
+		timeout = pm.timeout
+	}
 	select {
 	case L := <-pm.pool:
 		defer func() { pm.pool <- L }()
 		// Ensure http_send is available in the VM for outbound notifications.
 		registerHTTPLib(L, reqCtx, timeout, proxyAddr, insecure, allowPrivate)
-		return pm.evalOnFinding(L, r)
+		return pm.evalOnFinding(L, timeout, r)
 	default:
 		L := newRestrictedLuaState()
 		defer L.Close()
-		if err := L.DoString(string(pm.compiled)); err != nil {
+		if err := runLuaWithTimeout(L, reqCtx, timeout, func() error {
+			return L.DoString(string(pm.compiled))
+		}); err != nil {
 			return false, nil, ""
 		}
 		registerHTTPLib(L, reqCtx, timeout, proxyAddr, insecure, allowPrivate)
-		return pm.evalOnFinding(L, r)
+		return pm.evalOnFinding(L, timeout, r)
 	}
 }
 
 // PluginMutator wraps a pool of Lua VMs running the same mutator script.
 type PluginMutator struct {
-	pool chan *lua.LState
-	file string
+	pool    chan *lua.LState
+	file    string
+	timeout time.Duration
 }
 
-func NewPluginMutator(scriptPath string) (*PluginMutator, error) {
+func NewPluginMutator(scriptPath string, timeout time.Duration) (*PluginMutator, error) {
 	size := defaultVMPoolSize()
 	pool := make(chan *lua.LState, size)
 
 	for i := 0; i < size; i++ {
 		L := newRestrictedLuaState()
-		if err := L.DoFile(scriptPath); err != nil {
+		if err := runLuaWithTimeout(L, context.Background(), timeout, func() error {
+			return L.DoFile(scriptPath)
+		}); err != nil {
 			L.Close()
 			for len(pool) > 0 {
 				(<-pool).Close()
@@ -280,27 +319,30 @@ func NewPluginMutator(scriptPath string) (*PluginMutator, error) {
 		}
 		pool <- L
 	}
-	return &PluginMutator{pool: pool, file: scriptPath}, nil
+	return &PluginMutator{pool: pool, file: scriptPath, timeout: timeout}, nil
 }
 
 func (pm *PluginMutator) Mutate(original, targetURL string, depth int) []string {
+	timeout := pm.timeout
 	select {
 	case L := <-pm.pool:
 		defer func() { pm.pool <- L }()
-		return pm.doMutate(L, original, targetURL, depth)
+		return pm.doMutate(L, timeout, original, targetURL, depth)
 	default:
 		// Pool saturated: run the mutator in a short-lived VM so workers
 		// don't block behind the fixed-size pool.
 		L := newRestrictedLuaState()
 		defer L.Close()
-		if err := L.DoFile(pm.file); err != nil {
+		if err := runLuaWithTimeout(L, context.Background(), timeout, func() error {
+			return L.DoFile(pm.file)
+		}); err != nil {
 			return []string{original}
 		}
-		return pm.doMutate(L, original, targetURL, depth)
+		return pm.doMutate(L, timeout, original, targetURL, depth)
 	}
 }
 
-func (pm *PluginMutator) doMutate(L *lua.LState, original, targetURL string, depth int) []string {
+func (pm *PluginMutator) doMutate(L *lua.LState, timeout time.Duration, original, targetURL string, depth int) []string {
 	mutateFunc := L.GetGlobal("mutate")
 	if mutateFunc == lua.LNil {
 		return []string{original}
@@ -312,7 +354,9 @@ func (pm *PluginMutator) doMutate(L *lua.LState, original, targetURL string, dep
 	L.SetField(ctx, "target", lua.LString(targetURL))
 	L.SetField(ctx, "depth", lua.LNumber(depth))
 
-	if err := L.CallByParam(lua.P{Fn: mutateFunc, NRet: 1, Protect: true}, lua.LString(original), ctx); err != nil {
+	if err := runLuaWithTimeout(L, context.Background(), timeout, func() error {
+		return L.CallByParam(lua.P{Fn: mutateFunc, NRet: 1, Protect: true}, lua.LString(original), ctx)
+	}); err != nil {
 		return []string{original}
 	}
 	res := L.Get(-1)
@@ -358,7 +402,7 @@ func registerHTTPLib(L *lua.LState, reqCtx context.Context, timeout time.Duratio
 		u, err := url.Parse(targetURL)
 		if err != nil {
 			result := L.NewTable()
-			L.SetField(result, "error", lua.LString("invalid url: " + err.Error()))
+			L.SetField(result, "error", lua.LString("invalid url: "+err.Error()))
 			L.Push(result)
 			return 1
 		}
@@ -432,12 +476,13 @@ func registerHTTPLib(L *lua.LState, reqCtx context.Context, timeout time.Duratio
 // RunActiveTemplate loads and executes a Lua PoC script with http.send available
 func RunActiveTemplate(ctx context.Context, luaPath string, timeout time.Duration, proxyAddr string, insecure bool, targetURL string, allowPrivate bool) error {
 	L := newRestrictedLuaState()
-	L.SetContext(ctx)
 	defer L.Close()
 
 	registerHTTPLib(L, ctx, timeout, proxyAddr, insecure, allowPrivate)
 
-	if err := L.DoFile(luaPath); err != nil {
+	if err := runLuaWithTimeout(L, ctx, timeout, func() error {
+		return L.DoFile(luaPath)
+	}); err != nil {
 		return fmt.Errorf("failed to load script: %w", err)
 	}
 
@@ -449,14 +494,16 @@ func RunActiveTemplate(ctx context.Context, luaPath string, timeout time.Duratio
 	// Create context table
 	ctxTable := L.NewTable()
 	L.SetField(ctxTable, "url", lua.LString(targetURL))
-	
+
 	baseURL := targetURL
 	if strings.HasSuffix(baseURL, "/") {
 		baseURL = strings.TrimSuffix(baseURL, "/")
 	}
 	L.SetField(ctxTable, "base_url", lua.LString(baseURL))
 
-	if err := L.CallByParam(lua.P{Fn: runFunc, NRet: 0, Protect: true}, ctxTable); err != nil {
+	if err := runLuaWithTimeout(L, ctx, timeout, func() error {
+		return L.CallByParam(lua.P{Fn: runFunc, NRet: 0, Protect: true}, ctxTable)
+	}); err != nil {
 		return fmt.Errorf("run function failed: %w", err)
 	}
 
