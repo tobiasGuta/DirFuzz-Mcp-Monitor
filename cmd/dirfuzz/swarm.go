@@ -178,6 +178,7 @@ func buildSwarmWorkerConfig(cfg cliConfig) (engine.SwarmWorkerConfig, error) {
 		AntiBotFallback:      cfg.AntiBotFallback,
 		AllowPrivateTargets:  cfg.AllowPrivate,
 		Recursive:            cfg.Recursive,
+		RecursivePrune:       boolPtr(cfg.RecursivePrune),
 		MaxDepth:             cfg.MaxDepth,
 		SmartAPI:             cfg.SmartAPI,
 		Mutate:               cfg.Mutate,
@@ -463,6 +464,7 @@ func prepareControllerEngine(eng *engine.Engine, cfg cliConfig) error {
 		c.SaveRaw = cfg.SaveRaw
 		c.AuthMatrix = cfg.AuthMatrix
 		c.Recursive = cfg.Recursive
+		c.RecursivePrune = cfg.RecursivePrune
 		c.MaxDepth = cfg.MaxDepth
 		c.SmartAPI = cfg.SmartAPI
 		c.Mutate = cfg.Mutate

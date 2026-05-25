@@ -15,6 +15,7 @@ DirFuzz is a memory-efficient, high-performance web security testing and directo
 - Smart filtering with status, size, word/line, regex, response-time, AutoFilter, and SimHash suppression.
 - WAF and anti-bot handling, including optional headless fallback when challenge responses are detected.
 - Recursive scanning, wildcard calibration, timing-oracle enumeration, and route harvesting from JS/OpenAPI/GraphQL.
+- Recursive pruning reports low-value static branches once, then avoids spending recursive budget under directories like fonts/images/css.
 - Hidden parameter fuzzing with chunked probes and bisection to isolate interesting parameters.
 - Harvesting from JavaScript, OpenAPI, GraphQL, and generic response bodies such as JSON endpoint lists.
 - Role-based auth matrix execution for comparing the same path across multiple header/cookie states.

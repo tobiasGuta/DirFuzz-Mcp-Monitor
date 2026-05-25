@@ -33,6 +33,7 @@ output_format: "jsonl"  # Options: jsonl, csv, url
 # delay: 0
 # max_depth: 3
 # recursive: false
+# recursive_prune: true
 # mutate: false
 # follow_redirects: false
 # http2: false

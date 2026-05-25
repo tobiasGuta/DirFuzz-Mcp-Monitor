@@ -47,6 +47,7 @@ type SwarmWorkerConfig struct {
 	AntiBotFallback      bool                `json:"anti_bot_fallback,omitempty"`
 	AllowPrivateTargets  bool                `json:"allow_private_targets,omitempty"`
 	Recursive            bool                `json:"recursive,omitempty"`
+	RecursivePrune       *bool               `json:"recursive_prune,omitempty"`
 	MaxDepth             int                 `json:"max_depth,omitempty"`
 	SmartAPI             bool                `json:"smart_api,omitempty"`
 	Mutate               bool                `json:"mutate,omitempty"`
@@ -293,6 +294,10 @@ func applySwarmConfig(e *Engine, cfg SwarmWorkerConfig) error {
 		c.AntiBotFallback = cfg.AntiBotFallback
 		c.AllowPrivateTargets = cfg.AllowPrivateTargets
 		c.Recursive = cfg.Recursive
+		c.RecursivePrune = true
+		if cfg.RecursivePrune != nil {
+			c.RecursivePrune = *cfg.RecursivePrune
+		}
 		c.MaxDepth = cfg.MaxDepth
 		c.SmartAPI = cfg.SmartAPI
 		c.Mutate = cfg.Mutate

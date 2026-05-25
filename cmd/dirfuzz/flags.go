@@ -77,6 +77,7 @@ func parseFlags() cliConfig {
 
 	// ── Scan modes ───────────────────────────────────────────────────────────
 	recursive := flag.Bool("r", false, "Recursive directory scanning")
+	recursivePrune := flag.Bool("recursive-prune", true, "Prune low-value static/resource branches during recursive scanning")
 	maxDepth := flag.Int("depth", engine.DefaultMaxDepth, "Maximum recursion depth  (requires -r)")
 	mutate := flag.Bool("mutate", false, "Append backup/swap suffixes to every hit (.bak, .old, ~, …)")
 	smartAPI := flag.Bool("smart-api", false, "Multi-method fuzzing only on API-style paths (/api/, /v1/, …)")
@@ -219,6 +220,7 @@ func parseFlags() cliConfig {
 		SaveRaw:      *saveRaw,
 
 		Recursive:            *recursive,
+		RecursivePrune:       *recursivePrune,
 		MaxDepth:             *maxDepth,
 		Mutate:               *mutate,
 		SmartAPI:             *smartAPI,

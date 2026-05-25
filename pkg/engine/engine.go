@@ -70,6 +70,7 @@ const (
 	EventHarvestDiscovery          EventType = "HarvestDiscovery"
 	EventHarvestParseError         EventType = "HarvestParseError"
 	EventHarvestJSAnalysisComplete EventType = "HarvestJSAnalysisComplete"
+	EventRecursivePruned           EventType = "RecursivePruned"
 	EventAutoFilterTriggered       EventType = "AutoFilterTriggered"
 	EventSimhashCluster            EventType = "SimhashCluster"
 	EventWAFBypassAttempt          EventType = "WAFBypassAttempt"
@@ -114,6 +115,7 @@ type Config struct {
 	SmartAPI             bool
 	Mutate               bool
 	Recursive            bool
+	RecursivePrune       bool
 	MaxDepth             int
 	IsPaused             bool
 	Delay                time.Duration
@@ -212,6 +214,7 @@ type configSnapshot struct {
 	EvasionLimit         int
 	Mutate               bool
 	Recursive            bool
+	RecursivePrune       bool
 	MaxDepth             int
 	WordlistPath         string
 	WAFEvasion           bool
@@ -665,6 +668,101 @@ func (e *Engine) isRecursiveMirror(path string, sig recursiveResponseSignature) 
 	return false
 }
 
+func shouldPruneRecursiveBranch(path, contentType string, body []byte) (bool, string) {
+	terminal := recursiveTerminalSegment(path)
+	if terminal == "" {
+		return false, ""
+	}
+	contentType = strings.ToLower(strings.TrimSpace(contentType))
+
+	if isStaticContentType(contentType) {
+		return true, "static content type"
+	}
+	if isLowValueStaticSegment(terminal) {
+		if bodyContainsInterestingRecursiveToken(body) {
+			return false, ""
+		}
+		if terminal == "fonts" || terminal == "font" {
+			return true, "font asset directory"
+		}
+		if bodyLooksLikeStaticDirectoryListing(body) {
+			return true, "static directory listing"
+		}
+	}
+	if bodyLooksLikeStaticDirectoryListing(body) && !bodyContainsInterestingRecursiveToken(body) {
+		return true, "mostly static directory listing"
+	}
+	return false, ""
+}
+
+func recursiveTerminalSegment(path string) string {
+	normalized := normalizeRecursiveSignaturePath(path)
+	if normalized == "" {
+		return ""
+	}
+	segments := strings.Split(normalized, "/")
+	return strings.ToLower(strings.TrimSpace(segments[len(segments)-1]))
+}
+
+func isStaticContentType(contentType string) bool {
+	if idx := strings.Index(contentType, ";"); idx != -1 {
+		contentType = strings.TrimSpace(contentType[:idx])
+	}
+	switch {
+	case strings.HasPrefix(contentType, "image/"):
+		return true
+	case strings.HasPrefix(contentType, "font/"):
+		return true
+	case contentType == "text/css":
+		return true
+	case contentType == "application/font-woff" || contentType == "application/font-woff2":
+		return true
+	case contentType == "application/vnd.ms-fontobject":
+		return true
+	}
+	return false
+}
+
+func isLowValueStaticSegment(segment string) bool {
+	switch strings.ToLower(strings.TrimSpace(segment)) {
+	case "font", "fonts", "icon", "icons", "image", "images", "img", "imgs", "css", "styles", "style":
+		return true
+	default:
+		return false
+	}
+}
+
+func bodyLooksLikeStaticDirectoryListing(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	lower := strings.ToLower(string(body))
+	staticCount := 0
+	for _, token := range []string{".woff", ".woff2", ".ttf", ".otf", ".eot", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".css", ".map"} {
+		staticCount += strings.Count(lower, token)
+	}
+	if staticCount < 3 {
+		return false
+	}
+	return strings.Contains(lower, "<a ") || strings.Contains(lower, "index of") || strings.Contains(lower, "directory")
+}
+
+func bodyContainsInterestingRecursiveToken(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	lower := strings.ToLower(string(body))
+	for _, token := range []string{
+		"admin", "api", "auth", "backup", ".bak", ".old", ".orig", ".save", ".sql", ".sqlite",
+		"config", "debug", "dev", ".env", "private", "secret", "test", "upload", "user",
+	} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
+}
+
 // String returns a string representation of the result for CLI output.
 func (r Result) String() string {
 	extras := ""
@@ -814,6 +912,7 @@ func NewEngine(numWorkers int, expectedItems uint, falsePositiveRate float64) *E
 			Insecure:            false,
 			AntiBotFallback:     true,
 			AllowPrivateTargets: false,
+			RecursivePrune:      true,
 			AutoFilterThreshold: DefaultAutoFilterThreshold,
 			SimhashThreshold:    DefaultSimhashThreshold,
 			SimhashClusterLimit: DefaultSimhashClusterLimit,
@@ -1059,6 +1158,7 @@ func (e *Engine) buildAndStoreConfigSnapshot() {
 		EvasionLimit:         e.Config.EvasionLimit,
 		Mutate:               e.Config.Mutate,
 		Recursive:            e.Config.Recursive,
+		RecursivePrune:       e.Config.RecursivePrune,
 		MaxDepth:             e.Config.MaxDepth,
 		WordlistPath:         e.Config.WordlistPath,
 		WAFEvasion:           e.Config.WAFEvasion,
@@ -2928,6 +3028,7 @@ func (e *Engine) worker(id int) {
 						EvasionLimit:         e.Config.EvasionLimit,
 						Mutate:               e.Config.Mutate,
 						Recursive:            e.Config.Recursive,
+						RecursivePrune:       e.Config.RecursivePrune,
 						MaxDepth:             e.Config.MaxDepth,
 						WordlistPath:         e.Config.WordlistPath,
 						WAFEvasion:           e.Config.WAFEvasion,
@@ -2989,6 +3090,7 @@ func (e *Engine) worker(id int) {
 			autoFilterThreshold := snap.AutoFilterThreshold
 			doMutate := snap.Mutate
 			doRecurse := snap.Recursive
+			doRecursivePrune := snap.RecursivePrune
 			maxDepth := snap.MaxDepth
 			wordlistPath := snap.WordlistPath
 			wafEvasion := snap.WAFEvasion
@@ -3661,6 +3763,19 @@ func (e *Engine) worker(id int) {
 
 			// Recursive scanning with bounded concurrency.
 			if doRecurse && depth < maxDepth {
+				if doRecursivePrune {
+					if prune, reason := shouldPruneRecursiveBranch(payload, contentType, resp.Body); prune {
+						e.emitLogEvent(LogLevelInfo, LogCategoryDiscovery, EventRecursivePruned, "recursive branch pruned", map[string]interface{}{
+							"path":   payload,
+							"reason": reason,
+						})
+						e.activeJobs.Done()
+						if shouldExit {
+							return
+						}
+						continue
+					}
+				}
 				inScope := true
 				if result.Redirect != "" {
 					if parsedRedir, err := url.Parse(result.Redirect); err == nil && parsedRedir.Host != "" {

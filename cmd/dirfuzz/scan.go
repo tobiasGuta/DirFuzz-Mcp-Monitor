@@ -78,6 +78,7 @@ func run(cfg cliConfig) error {
 		c.SaveRaw = cfg.SaveRaw
 		c.AuthMatrix = cfg.AuthMatrix
 		c.Recursive = cfg.Recursive
+		c.RecursivePrune = cfg.RecursivePrune
 		c.MaxDepth = cfg.MaxDepth
 		c.SmartAPI = cfg.SmartAPI
 		c.Mutate = cfg.Mutate

@@ -127,6 +127,44 @@ func TestRecursiveMirrorDetectionSuppressesRepeatedResponses(t *testing.T) {
 	}
 }
 
+func TestShouldPruneRecursiveBranchSkipsFontDirectory(t *testing.T) {
+	body := []byte(`<html><body>
+		<a href="inter.woff2">inter.woff2</a>
+		<a href="icons.ttf">icons.ttf</a>
+		<a href="brand.svg">brand.svg</a>
+	</body></html>`)
+
+	prune, reason := shouldPruneRecursiveBranch("includes/fonts", "text/html", body)
+	if !prune {
+		t.Fatalf("expected font directory to be pruned, reason=%q", reason)
+	}
+}
+
+func TestShouldPruneRecursiveBranchKeepsInterestingDirectoryListing(t *testing.T) {
+	body := []byte(`<html><body>
+		<a href="config.php.bak">config.php.bak</a>
+		<a href="admin.old">admin.old</a>
+		<a href="logo.svg">logo.svg</a>
+		<a href="style.css">style.css</a>
+		<a href="inter.woff2">inter.woff2</a>
+	</body></html>`)
+
+	if prune, reason := shouldPruneRecursiveBranch("includes/backups", "text/html", body); prune {
+		t.Fatalf("did not expect interesting listing to be pruned, reason=%q", reason)
+	}
+	if prune, reason := shouldPruneRecursiveBranch("includes/fonts", "text/html", body); prune {
+		t.Fatalf("did not expect font listing with interesting files to be pruned, reason=%q", reason)
+	}
+}
+
+func TestShouldPruneRecursiveBranchKeepsAPIRoutes(t *testing.T) {
+	body := []byte(`{"endpoints":["/api/user","/api/jobs"]}`)
+
+	if prune, reason := shouldPruneRecursiveBranch("api/jobs", "application/json", body); prune {
+		t.Fatalf("did not expect API route to be pruned, reason=%q", reason)
+	}
+}
+
 func TestClassify403(t *testing.T) {
 	tests := []struct {
 		name     string

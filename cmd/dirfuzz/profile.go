@@ -43,6 +43,7 @@ type scanProfile struct {
 	ReportFormat         string              `yaml:"report_format" json:"report_format"`
 	SaveRaw              bool                `yaml:"save_raw" json:"save_raw"`
 	Recursive            bool                `yaml:"recursive" json:"recursive"`
+	RecursivePrune       *bool               `yaml:"recursive_prune" json:"recursive_prune"`
 	MaxDepth             int                 `yaml:"max_depth" json:"max_depth"`
 	Mutate               bool                `yaml:"mutate" json:"mutate"`
 	SmartAPI             bool                `yaml:"smart_api" json:"smart_api"`
@@ -198,6 +199,9 @@ func applyProfile(cfg *cliConfig, set map[string]bool) error {
 	}
 	if !set["r"] && p.Recursive {
 		cfg.Recursive = true
+	}
+	if !set["recursive-prune"] && p.RecursivePrune != nil {
+		cfg.RecursivePrune = *p.RecursivePrune
 	}
 	if !set["depth"] && p.MaxDepth > 0 {
 		cfg.MaxDepth = p.MaxDepth

@@ -13,6 +13,8 @@ type multiFlag []string
 func (f *multiFlag) String() string     { return strings.Join(*f, ", ") }
 func (f *multiFlag) Set(s string) error { *f = append(*f, s); return nil }
 
+func boolPtr(v bool) *bool { return &v }
+
 // cliConfig holds all values parsed from command-line flags.
 // It is built once in parseFlags() and passed to run().
 type cliConfig struct {
@@ -65,6 +67,7 @@ type cliConfig struct {
 
 	// ── Scan modes ───────────────────────────────────────────────────────────
 	Recursive            bool
+	RecursivePrune       bool
 	MaxDepth             int
 	Mutate               bool
 	SmartAPI             bool
