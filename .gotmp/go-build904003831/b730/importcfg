@@ -1,7 +1,0 @@
-# import config
-packagefile os=D:\projects\DirFuzz-Mcp-Monitor\.gocache\7f\7f1dbef84e026120886c80500cdd845d475a972aabe3ac0fa225a6ab379f1f23-d
-packagefile reflect=D:\projects\DirFuzz-Mcp-Monitor\.gocache\92\92ee02dd6b0fd1a5850326a5667aa04e76e4fe864fe14406e0d0b53fec7bc191-d
-packagefile testing=D:\projects\DirFuzz-Mcp-Monitor\.gocache\06\06e95c927838e58565c7f87c2ee21eee5f763e981805cff4408f14169d2d4404-d
-packagefile testing/internal/testdeps=D:\projects\DirFuzz-Mcp-Monitor\.gocache\6c\6cd91235f3ff985d81bb64010512953a1f41e39b65ac02da29b3530a8707708a-d
-packagefile runtime=D:\projects\DirFuzz-Mcp-Monitor\.gocache\45\456201fc76c5bb3ac1fc376958029131060d1bb9978c8069551bd2d74f38d7d6-d
-packagefile dirfuzz/pkg/engine=D:\projects\DirFuzz-Mcp-Monitor\.gocache\e4\e4f81e5379415594198b3096bd9d4a8a821a45270b7e14a09cfe7e2b48f40e98-d
