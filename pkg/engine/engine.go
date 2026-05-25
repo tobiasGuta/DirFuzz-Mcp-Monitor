@@ -533,18 +533,22 @@ type Engine struct {
 	// Scope domain for recursion
 	scopeDomain string
 
+	// Response fingerprints for accepted paths. Recursive scans use this to
+	// avoid expanding route aliases that return the same body under a child path.
+	recursiveSignatures sync.Map // map[string]recursiveResponseSignature
+
 	// Bounded concurrency for recursive wordlist scanners
 	recursiveSem chan struct{}
 
 	// Bounded outbound proxy replay queue + workers
 	replayCh chan replayTask
 	// Bounded hidden-parameter fuzzing queue + workers.
-	paramTaskChan chan ParamTask
-	paramTaskSeen sync.Map
-	paramHitSeen  sync.Map
-	paramHintsSeen sync.Map
+	paramTaskChan   chan ParamTask
+	paramTaskSeen   sync.Map
+	paramHitSeen    sync.Map
+	paramHintsSeen  sync.Map
 	phpParamTargets sync.Map
-	paramTasksWg  sync.WaitGroup
+	paramTasksWg    sync.WaitGroup
 	// Cached immutable config snapshot read by workers.
 	configSnap atomic.Pointer[configSnapshot]
 	// Cached outbound HTTP clients for proxy replay to avoid creating a new
@@ -571,6 +575,95 @@ const (
 )
 
 // ─── Result helpers ───────────────────────────────────────────────────────────
+
+type recursiveResponseSignature struct {
+	statusCode  int
+	size        int
+	words       int
+	lines       int
+	contentType string
+	bodyHash    uint64
+}
+
+func makeRecursiveResponseSignature(statusCode, size, words, lines int, contentType string, bodyHash uint64) recursiveResponseSignature {
+	return recursiveResponseSignature{
+		statusCode:  statusCode,
+		size:        size,
+		words:       words,
+		lines:       lines,
+		contentType: strings.ToLower(strings.TrimSpace(contentType)),
+		bodyHash:    bodyHash,
+	}
+}
+
+func normalizeRecursiveSignaturePath(path string) string {
+	path = strings.TrimSpace(path)
+	if idx := strings.Index(path, "?"); idx != -1 {
+		path = path[:idx]
+	}
+	parts := strings.FieldsFunc(path, func(r rune) bool {
+		return r == '/'
+	})
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "/")
+}
+
+func recursiveMirrorReferencePaths(path string) []string {
+	normalized := normalizeRecursiveSignaturePath(path)
+	if normalized == "" {
+		return nil
+	}
+	segments := strings.Split(normalized, "/")
+	if len(segments) < 2 {
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	refs := make([]string, 0, len(segments)*2)
+	add := func(ref string) {
+		if ref == "" || ref == normalized {
+			return
+		}
+		if _, ok := seen[ref]; ok {
+			return
+		}
+		seen[ref] = struct{}{}
+		refs = append(refs, ref)
+	}
+
+	for i := len(segments) - 1; i >= 1; i-- {
+		add(strings.Join(segments[:i], "/"))
+	}
+	for i := 1; i < len(segments); i++ {
+		if !strings.EqualFold(segments[i-1], segments[i]) {
+			continue
+		}
+		collapsed := make([]string, 0, len(segments)-1)
+		collapsed = append(collapsed, segments[:i]...)
+		collapsed = append(collapsed, segments[i+1:]...)
+		add(strings.Join(collapsed, "/"))
+	}
+	return refs
+}
+
+func (e *Engine) rememberRecursiveSignature(path string, sig recursiveResponseSignature) {
+	normalized := normalizeRecursiveSignaturePath(path)
+	if normalized == "" {
+		return
+	}
+	e.recursiveSignatures.Store(normalized, sig)
+}
+
+func (e *Engine) isRecursiveMirror(path string, sig recursiveResponseSignature) bool {
+	for _, ref := range recursiveMirrorReferencePaths(path) {
+		if prev, ok := e.recursiveSignatures.Load(ref); ok && prev == sig {
+			return true
+		}
+	}
+	return false
+}
 
 // String returns a string representation of the result for CLI output.
 func (r Result) String() string {
@@ -1456,6 +1549,7 @@ func (e *Engine) ChangeWordlist(path string) error {
 	atomic.StoreInt32(&e.alreadyThrottled, 0)
 	atomic.StoreInt64(&e.HarvestedPaths, 0)
 	e.evasionAttempted = sync.Map{}
+	e.recursiveSignatures = sync.Map{}
 	e.EvasionScoreboard = NewEvasionScoreboard()
 	e.headRejectedHosts.Range(func(k, _ interface{}) bool {
 		e.headRejectedHosts.Delete(k)
@@ -1955,7 +2049,30 @@ func (e *Engine) checkRecursiveWildcard(dirPath string) bool {
 		time.Sleep(delay)
 	}
 
-	randPath := strings.TrimSuffix(dirPath, "/") + "/" + randomString(RecursiveWildcardTestLen)
+	currentBaseURL := e.BaseURL()
+	word := strings.TrimSuffix(dirPath, "/") + "/" + randomString(RecursiveWildcardTestLen)
+	if !strings.HasPrefix(word, "/") {
+		word = "/" + word
+	}
+	fullURL := ""
+	if strings.Contains(currentBaseURL, "{PAYLOAD}") {
+		fullURL = strings.Replace(currentBaseURL, "{PAYLOAD}", word, 1)
+	} else {
+		fullURL = strings.TrimRight(currentBaseURL, "/") + word
+	}
+
+	parsedURL, errURL := url.Parse(fullURL)
+	if errURL != nil {
+		return true
+	}
+
+	reqPath := parsedURL.Path
+	if parsedURL.RawQuery != "" {
+		reqPath += "?" + parsedURL.RawQuery
+	}
+	if reqPath == "" {
+		reqPath = "/"
+	}
 
 	var ua string
 	if snapshot := e.configSnap.Load(); snapshot != nil {
@@ -1968,7 +2085,7 @@ func (e *Engine) checkRecursiveWildcard(dirPath string) bool {
 
 	rawRequest := []byte(fmt.Sprintf(
 		"GET %s HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\nUser-Agent: %s\r\nAccept: */*\r\n\r\n",
-		randPath, e.Host(), ua,
+		reqPath, parsedURL.Host, ua,
 	))
 
 	var proxyAddr string
@@ -1977,11 +2094,13 @@ func (e *Engine) checkRecursiveWildcard(dirPath string) bool {
 	}
 	sc := e.scannerCtx.Load()
 	if sc == nil {
-		return false
+		return true
 	}
-	resp, err := e.executeRequestWithRetry(sc.ctx, e.BaseURL(), rawRequest, RecursiveWildcardTimeout, proxyAddr)
+	resp, err := e.executeRequestOnceQuiet(sc.ctx, fullURL, rawRequest, RecursiveWildcardTimeout, proxyAddr)
 	if err != nil {
-		return false
+		// Fail closed for recursion probes: if this endpoint drops or times out
+		// on unknown children, recursing below it will amplify network errors.
+		return true
 	}
 	// Treat 200, 403 and common redirect responses as wildcard indicators.
 	// Some servers redirect unknown paths (e.g. /*) with 301/302 — these
@@ -3453,6 +3572,17 @@ func (e *Engine) worker(id int) {
 				if authFinding.Summary != "" {
 					result.Headers["Auth-Matrix"] = authFinding.Summary
 				}
+			}
+
+			if !strings.EqualFold(successfulMethod, "HEAD") {
+				recSig := makeRecursiveResponseSignature(resp.StatusCode, bodySize, wordCount, lineCount, contentType, bodyHash)
+				if job.Depth > 0 && e.isRecursiveMirror(payload, recSig) {
+					if e.cleanupJob(shouldExit) {
+						return
+					}
+					continue
+				}
+				e.rememberRecursiveSignature(payload, recSig)
 			}
 
 			paramFuzzURL := fullURL

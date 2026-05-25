@@ -56,6 +56,77 @@ func TestExecuteRequestWithRetryDoesNotLogCanceledContextAsNetworkError(t *testi
 	}
 }
 
+func TestCheckRecursiveWildcardFailsClosedOnEmptyResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("test server does not support hijacking")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("hijack failed: %v", err)
+		}
+		conn.Close()
+	}))
+	defer server.Close()
+
+	eng := NewEngine(1, 100, 0.01)
+	defer eng.Shutdown()
+	eng.Config.Lock()
+	eng.Config.AllowPrivateTargets = true
+	eng.Config.Unlock()
+	eng.RefreshConfigSnapshot()
+	if err := eng.SetTarget(server.URL); err != nil {
+		t.Fatalf("SetTarget() failed: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	eng.scannerCtx.Store(&scannerContext{ctx: ctx, cancel: cancel})
+
+	if !eng.checkRecursiveWildcard("/jobs.php") {
+		t.Fatal("expected recursive wildcard check to fail closed on empty response")
+	}
+
+	select {
+	case ev := <-eng.LogEvents:
+		t.Fatalf("expected quiet wildcard probe, got log event %s: %s", ev.Type, ev.Message)
+	default:
+	}
+}
+
+func TestRecursiveMirrorReferencePaths(t *testing.T) {
+	got := recursiveMirrorReferencePaths("/api/api/user?debug=1")
+	want := []string{"api/api", "api", "api/user"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("recursiveMirrorReferencePaths() = %v, want %v", got, want)
+	}
+}
+
+func TestRecursiveMirrorDetectionSuppressesRepeatedResponses(t *testing.T) {
+	eng := NewEngine(1, 100, 0.01)
+	sig := makeRecursiveResponseSignature(200, 65, 1, 1, "application/json", 0x1234)
+	otherSig := makeRecursiveResponseSignature(200, 66, 1, 1, "application/json", 0x1234)
+
+	eng.rememberRecursiveSignature("api", sig)
+	eng.rememberRecursiveSignature("api/user", sig)
+
+	if !eng.isRecursiveMirror("api/api", sig) {
+		t.Fatal("expected repeated API root response to be treated as a recursive mirror")
+	}
+	if !eng.isRecursiveMirror("api/user/api", sig) {
+		t.Fatal("expected child that mirrors its parent API response to be suppressed")
+	}
+	if !eng.isRecursiveMirror("api/api/user", sig) {
+		t.Fatal("expected collapsed duplicate segment to match canonical API sibling")
+	}
+	if eng.isRecursiveMirror("api/jobs", otherSig) {
+		t.Fatal("first-level API child with a different response should not be treated as a recursive mirror")
+	}
+	if eng.isRecursiveMirror("api/user/api", otherSig) {
+		t.Fatal("different response signatures should remain visible")
+	}
+}
+
 func TestClassify403(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -224,6 +224,25 @@ func (e *Engine) executeRequestOnce(ctx context.Context, targetURL string, rawRe
 	return httpclient.SendRawRequestWithContext(ctx, targetURL, rawRequest, timeout, proxyAddr, insecure)
 }
 
+// executeRequestOnceQuiet sends a single request without retry logging.
+// It is used by heuristics such as recursive wildcard checks, where a network
+// timeout should be treated as inconclusive rather than noisy.
+func (e *Engine) executeRequestOnceQuiet(ctx context.Context, targetURL string, rawRequest []byte, timeout time.Duration, proxyAddr string) (*httpclient.RawResponse, error) {
+	e.Config.RLock()
+	insecure := e.Config.Insecure
+	h2Mode := e.Config.H2Mode
+	e.Config.RUnlock()
+
+	rawRequest = e.injectCookiesIntoRawRequest(targetURL, rawRequest)
+
+	if h2Mode && e.H2Client != nil {
+		return e.executeH2Request(ctx, targetURL, rawRequest, timeout)
+	}
+
+	e.requestsDispatched.Add(1)
+	return httpclient.SendRawRequestWithContext(ctx, targetURL, rawRequest, timeout, proxyAddr, insecure)
+}
+
 func (e *Engine) mergeResponseCookies(targetURL string, resp *httpclient.RawResponse) {
 	if e == nil || e.antiBot == nil || resp == nil {
 		return
