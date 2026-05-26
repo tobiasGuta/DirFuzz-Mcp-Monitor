@@ -3,6 +3,7 @@ package tui
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -193,5 +194,63 @@ func TestPersistedUIStateRoundTrip(t *testing.T) {
 	}
 	if got := string(restored.repeaterSessions[0].LastRaw); got != string([]byte{0x01, 0x02, 0x03}) {
 		t.Fatalf("restored LastRaw = %v", restored.repeaterSessions[0].LastRaw)
+	}
+}
+
+func TestBuildCurlCommandFromRawRequest(t *testing.T) {
+	rawReq := "POST /submit?id=1 HTTP/1.1\r\nHost: example.test\r\nUser-Agent: DirFuzz/2.0\r\nContent-Type: application/json\r\n\r\n{\"ok\":true}"
+
+	curlCmd, err := buildCurlCommand(rawReq, "http://example.test/")
+	if err != nil {
+		t.Fatalf("buildCurlCommand error = %v", err)
+	}
+
+	checks := []string{
+		"POST",
+		"http://example.test:80/submit?id=1",
+		"Host: example.test",
+		"User-Agent: DirFuzz/2.0",
+		"Content-Type: application/json",
+		"{\"ok\":true}",
+	}
+	for _, want := range checks {
+		if !strings.Contains(curlCmd, want) {
+			t.Fatalf("curl command %q does not contain %q", curlCmd, want)
+		}
+	}
+}
+
+func TestBuildCurlCommandFromBodylessRawRequest(t *testing.T) {
+	rawReq := "GET /config HTTP/1.1\nHost: 10.67.164.196\nConnection: keep-alive\nUser-Agent: DirFuzz/2.0\nAccept: */*"
+
+	curlCmd, err := buildCurlCommand(rawReq, "http://10.67.164.196/")
+	if err != nil {
+		t.Fatalf("buildCurlCommand error = %v", err)
+	}
+	if !strings.Contains(curlCmd, "GET") {
+		t.Fatalf("curl command %q does not contain GET", curlCmd)
+	}
+	if !strings.Contains(curlCmd, "http://10.67.164.196:80/config") {
+		t.Fatalf("curl command %q does not contain expected target", curlCmd)
+	}
+}
+
+func TestExportRepeaterRequestCreatesFile(t *testing.T) {
+	eng := engine.NewEngine(1, 1000, 0.01)
+	model := NewModel(eng, make(chan engine.Result), make(chan engine.LogEvent))
+	model.openRepeaterSession("https://example.test", "GET /one HTTP/1.1\nHost: example.test\n")
+
+	path, err := model.exportRepeaterRequest("")
+	if err != nil {
+		t.Fatalf("exportRepeaterRequest error = %v", err)
+	}
+	defer os.Remove(path)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) error = %v", path, err)
+	}
+	if got := string(data); got != "GET /one HTTP/1.1\nHost: example.test\n" {
+		t.Fatalf("exported request = %q", got)
 	}
 }

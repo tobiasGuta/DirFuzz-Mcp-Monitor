@@ -170,6 +170,11 @@ The TUI is where the new inspection features shine.
 - `[` and `]` switch between open repeater sessions.
 - `Ctrl+W` closes the active repeater session.
 - `Ctrl+P` and `Ctrl+N` move backward or forward through the history inside the current repeater session.
+- `Ctrl+Y` copies the active repeater request to the clipboard.
+- `Alt+Y` copies the active repeater response to the clipboard.
+- `Alt+B` copies the active repeater request and response together.
+- `Alt+C` copies the active repeater request as a ready-to-paste `curl` command.
+- `Alt+W` exports the active repeater request to a temporary `.http` file.
 - `L` toggles the live log panel.
 - `m` cycles the main view between the list, dashboard, and log panel modes.
 - `1` to `5` switch between the dashboard analytics tabs.
@@ -189,6 +194,8 @@ The list, dashboard, detail, hex, repeater, and log views all advertise their ow
 5. Or press `r` to send a request to the repeater. Each request opens its own repeater session and stays available until you close it or exit the app.
 6. Inside the repeater, use `[` and `]` to move between sessions, then use `D` to diff the active replayed response against the saved reference.
 7. If you ran with `-o results.jsonl --history-mode append`, those repeater sessions are restored the next time you open DirFuzz with the same output file.
+8. Use `Ctrl+Y`, `Alt+Y`, `Alt+B`, or `Alt+C` when you want exact clipboard copies instead of terminal text selection.
+9. Use `:copy-request`, `:copy-response`, `:copy-both`, `:copy-curl`, or `:export-request [file]` from the command palette when you want the same actions without relying on keybinds.
 
 The diff view highlights deleted text in red on the left and added text in green on the right.
 

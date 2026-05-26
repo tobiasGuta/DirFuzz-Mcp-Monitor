@@ -2757,6 +2757,37 @@ func (m *Model) initCommands() {
 			}
 			return statusStyle.Render("[*] Scan restarted")
 		}},
+		{Name: "copy-request", Description: "Copy active repeater request to the clipboard", Args: "", Handler: func(m *Model, args string) string {
+			if err := m.copyRepeaterRequest(); err != nil {
+				return errorStyle.Render(fmt.Sprintf("Copy request failed: %v", err))
+			}
+			return statusStyle.Render("[*] Repeater request copied to clipboard")
+		}},
+		{Name: "copy-response", Description: "Copy active repeater response to the clipboard", Args: "", Handler: func(m *Model, args string) string {
+			if err := m.copyRepeaterResponse(); err != nil {
+				return errorStyle.Render(fmt.Sprintf("Copy response failed: %v", err))
+			}
+			return statusStyle.Render("[*] Repeater response copied to clipboard")
+		}},
+		{Name: "copy-both", Description: "Copy active repeater request and response", Args: "", Handler: func(m *Model, args string) string {
+			if err := m.copyRepeaterBoth(); err != nil {
+				return errorStyle.Render(fmt.Sprintf("Copy request/response failed: %v", err))
+			}
+			return statusStyle.Render("[*] Repeater request and response copied to clipboard")
+		}},
+		{Name: "copy-curl", Description: "Copy the active repeater request as curl", Args: "", Handler: func(m *Model, args string) string {
+			if err := m.copyRepeaterCurl(); err != nil {
+				return errorStyle.Render(fmt.Sprintf("Copy curl failed: %v", err))
+			}
+			return statusStyle.Render("[*] Repeater curl command copied to clipboard")
+		}},
+		{Name: "export-request", Description: "Export the active repeater request to a file", Args: "[file]", Handler: func(m *Model, args string) string {
+			path, err := m.exportRepeaterRequest(strings.TrimSpace(args))
+			if err != nil {
+				return errorStyle.Render(fmt.Sprintf("Export request failed: %v", err))
+			}
+			return statusStyle.Render(fmt.Sprintf("[*] Repeater request exported to %s", path))
+		}},
 		{Name: "config", Description: "Show current config", Args: "", Handler: func(m *Model, args string) string {
 			m.Engine.Config.RLock()
 			ua := m.Engine.Config.UserAgent
@@ -3741,6 +3772,47 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, sendRepeaterRequest(m.Engine, m.repeaterTarget, rawReq, session.ID, ctx)
 					}
 				}
+			case "ctrl+y":
+				if err := m.copyRepeaterRequest(); err != nil {
+					m.statusMessage = errorStyle.Render(fmt.Sprintf("Copy request failed: %v", err))
+				} else {
+					m.statusMessage = statusStyle.Render("Repeater request copied to clipboard")
+				}
+				m.statusExpiry = time.Now().Add(3 * time.Second)
+				return m, nil
+			case "alt+y":
+				if err := m.copyRepeaterResponse(); err != nil {
+					m.statusMessage = errorStyle.Render(fmt.Sprintf("Copy response failed: %v", err))
+				} else {
+					m.statusMessage = statusStyle.Render("Repeater response copied to clipboard")
+				}
+				m.statusExpiry = time.Now().Add(3 * time.Second)
+				return m, nil
+			case "alt+b":
+				if err := m.copyRepeaterBoth(); err != nil {
+					m.statusMessage = errorStyle.Render(fmt.Sprintf("Copy request/response failed: %v", err))
+				} else {
+					m.statusMessage = statusStyle.Render("Repeater request and response copied to clipboard")
+				}
+				m.statusExpiry = time.Now().Add(3 * time.Second)
+				return m, nil
+			case "alt+c":
+				if err := m.copyRepeaterCurl(); err != nil {
+					m.statusMessage = errorStyle.Render(fmt.Sprintf("Copy curl failed: %v", err))
+				} else {
+					m.statusMessage = statusStyle.Render("Repeater curl command copied to clipboard")
+				}
+				m.statusExpiry = time.Now().Add(3 * time.Second)
+				return m, nil
+			case "alt+w":
+				path, err := m.exportRepeaterRequest("")
+				if err != nil {
+					m.statusMessage = errorStyle.Render(fmt.Sprintf("Export request failed: %v", err))
+				} else {
+					m.statusMessage = statusStyle.Render(fmt.Sprintf("Repeater request exported to %s", path))
+				}
+				m.statusExpiry = time.Now().Add(3 * time.Second)
+				return m, nil
 			case "[":
 				m.cycleRepeaterSession(-1)
 				return m, nil
@@ -3750,6 +3822,47 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+w":
 				m.closeActiveRepeaterSession()
 				return m, nil
+			case "y":
+				if !m.repeaterFocusReq {
+					if err := m.copyRepeaterRequest(); err != nil {
+						m.statusMessage = errorStyle.Render(fmt.Sprintf("Copy request failed: %v", err))
+					} else {
+						m.statusMessage = statusStyle.Render("Repeater request copied to clipboard")
+					}
+					m.statusExpiry = time.Now().Add(3 * time.Second)
+					return m, nil
+				}
+			case "Y":
+				if !m.repeaterFocusReq {
+					if err := m.copyRepeaterResponse(); err != nil {
+						m.statusMessage = errorStyle.Render(fmt.Sprintf("Copy response failed: %v", err))
+					} else {
+						m.statusMessage = statusStyle.Render("Repeater response copied to clipboard")
+					}
+					m.statusExpiry = time.Now().Add(3 * time.Second)
+					return m, nil
+				}
+			case "C":
+				if !m.repeaterFocusReq {
+					if err := m.copyRepeaterCurl(); err != nil {
+						m.statusMessage = errorStyle.Render(fmt.Sprintf("Copy curl failed: %v", err))
+					} else {
+						m.statusMessage = statusStyle.Render("Repeater curl command copied to clipboard")
+					}
+					m.statusExpiry = time.Now().Add(3 * time.Second)
+					return m, nil
+				}
+			case "w":
+				if !m.repeaterFocusReq {
+					path, err := m.exportRepeaterRequest("")
+					if err != nil {
+						m.statusMessage = errorStyle.Render(fmt.Sprintf("Export request failed: %v", err))
+					} else {
+						m.statusMessage = statusStyle.Render(fmt.Sprintf("Repeater request exported to %s", path))
+					}
+					m.statusExpiry = time.Now().Add(3 * time.Second)
+					return m, nil
+				}
 			case "tab":
 				m.repeaterFocusReq = !m.repeaterFocusReq
 				if m.repeaterFocusReq {
@@ -5137,12 +5250,12 @@ func (m *Model) View() string {
 			leftChips = strings.Join([]string{
 				keyChip("R", "bookmark"),
 				keyChip("D", "diff replay"),
-				keyChip("L", "logs"),
 				keyChip("Tab", "focus"),
 				keyChip("Ctrl+R", "send"),
-				keyChip("Ctrl+P/N", "history"),
-				keyChip("[", "prev"),
-				keyChip("]", "next"),
+				keyChip("Ctrl+Y", "req"),
+				keyChip("Alt+Y/B/C/W", "copy/export"),
+				keyChip("Ctrl+P/N", "hist"),
+				keyChip("[/]", "session"),
 				keyChip("Ctrl+W", "close"),
 				keyChip("Esc/q", "back"),
 			}, "  ")
