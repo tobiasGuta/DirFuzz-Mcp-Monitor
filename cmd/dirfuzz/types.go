@@ -48,17 +48,18 @@ type cliConfig struct {
 	OOBToken     string
 
 	// ── Matching / filtering ─────────────────────────────────────────────────
-	MatchCodes  string // comma-separated, e.g. "200,301,403"
-	FilterSizes string // comma-separated response byte sizes to drop
-	Extensions  string // comma-separated extensions to append
-	MatchRegex  string
-	FilterRegex string
-	FilterWords int
-	FilterLines int
-	MatchWords  int
-	MatchLines  int
-	RTMin       time.Duration
-	RTMax       time.Duration
+	MatchCodes   string // comma-separated, e.g. "200,301,403"
+	FilterSizes  string // comma-separated response byte sizes to drop
+	Extensions   string // comma-separated extensions to append
+	MatchRegex   string
+	FilterRegex  string
+	ExcludePaths []string
+	FilterWords  int
+	FilterLines  int
+	MatchWords   int
+	MatchLines   int
+	RTMin        time.Duration
+	RTMax        time.Duration
 
 	// ── Output ───────────────────────────────────────────────────────────────
 	OutputFormat string // jsonl | csv | url

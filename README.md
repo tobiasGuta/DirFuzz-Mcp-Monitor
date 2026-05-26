@@ -19,6 +19,7 @@ DirFuzz is a memory-efficient, high-performance web security testing and directo
 - Hidden parameter fuzzing with chunked probes and bisection to isolate interesting parameters.
 - Harvesting from JavaScript, OpenAPI, GraphQL, and generic response bodies such as JSON endpoint lists.
 - Role-based auth matrix execution for comparing the same path across multiple header/cookie states.
+- Path-level denylist regexes so authenticated or recursive scans can skip logout, delete, reset, and other unsafe routes.
 - Raw request/response capture with hex inspection and split-screen replay/diff workflows in the TUI.
 - Live system logs, a multi-tab metrics dashboard, log search/filter/export, and context-aware related logs in the TUI.
 - Lua plugins for transformers, matchers, mutators, and active proof-of-concept flows.
@@ -66,6 +67,16 @@ In `append` mode, DirFuzz keeps appending JSONL hits to the same results file, r
 - Repeater tabs and other TUI restore state are stored in `results.jsonl.ui.json`.
 - If the same endpoint is seen again later, the JSONL journal keeps the new line while the TUI shows the latest visible snapshot for that endpoint.
 - `--save-raw` is strongly recommended with append mode when you want restored hex, replay, and diff workflows after reopening the tool.
+
+### Safe authenticated fuzzing with path exclusions
+
+```bash
+./dirfuzz -u https://app.example.com -w wordlists/common.txt \
+  --auth admin="Cookie: session=A" \
+  --exclude-path "(?i)logout|delete|destroy|reset"
+```
+
+`--exclude-path` is repeatable and applies to all queued scan work, including wordlist submissions, recursive discoveries, and harvested routes.
 
 ### Save raw request and response bytes
 
@@ -208,6 +219,7 @@ The diff view highlights deleted text in red on the left and added text in green
 - The TUI includes a live system log stream, a bounded log buffer, log search/filter/export commands, and a split layout that can show logs under the main results list.
 - The dashboard includes performance, error, discovery, network, and timeline views with rolling histories.
 - `--auth` is repeatable and accepts `role=Header: Value||Header2: Value2`.
+- `--exclude-path` is repeatable and skips matching paths across direct fuzzing, recursion, and harvested routes.
 - `--swarm-provider lambda` expects a Lambda function name in `DIRFUZZ_SWARM_LAMBDA_FUNCTION`, `SWARM_LAMBDA_FUNCTION`, or `AWS_LAMBDA_FUNCTION_NAME`.
 - `--harvest-js` and `--harvest-api` let you narrow route harvesting to one source family.
 - `--harvest-response` narrows harvesting to generic HTTP response bodies, which is useful for JSON APIs that advertise child endpoints.
@@ -226,9 +238,10 @@ The diff view highlights deleted text in red on the left and added text in green
 4. Add `--param-wordlist path/to/params.txt` when you want hidden parameter fuzzing during a scan.
 5. Enable `--anti-bot-fallback` on targets that present WAF or challenge behavior.
 6. Use `--auth` when you want to compare the same path across multiple roles.
-7. Turn on `--swarm` only for authorized distributed execution.
-8. Export with `--no-tui -o results.jsonl` when you want a clean JSONL stream.
-9. Use `-o results.jsonl --history-mode append --save-raw` when you want to close and reopen the same investigation with restored hits and repeater tabs.
+7. Add `--exclude-path "(?i)logout|delete|destroy|reset"` before authenticated or recursive scans so destructive routes never enter the queue.
+8. Turn on `--swarm` only for authorized distributed execution.
+9. Export with `--no-tui -o results.jsonl` when you want a clean JSONL stream.
+10. Use `-o results.jsonl --history-mode append --save-raw` when you want to close and reopen the same investigation with restored hits and repeater tabs.
 
 ## Monitoring and MCP
 

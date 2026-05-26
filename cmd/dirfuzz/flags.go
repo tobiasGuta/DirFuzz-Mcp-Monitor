@@ -59,6 +59,8 @@ func parseFlags() cliConfig {
 	extensions := flag.String("e", "", "Extensions to append, comma-separated  (e.g. php,html,js)")
 	matchRegex := flag.String("mr", "", "Only surface results whose body matches this regex")
 	filterRegex := flag.String("fr", "", "Discard results whose body matches this regex")
+	var excludePaths multiFlag
+	flag.Var(&excludePaths, "exclude-path", "Exclude paths matching this regex from all queued scan work (repeatable)")
 	filterWords := flag.Int("fw", -1, "Filter results with exactly N words  (-1 = off)")
 	filterLines := flag.Int("fl", -1, "Filter results with exactly N lines  (-1 = off)")
 	matchWords := flag.Int("mw", -1, "Only surface results with exactly N words  (-1 = off)")
@@ -210,17 +212,18 @@ func parseFlags() cliConfig {
 		OOBServer:    *oobServer,
 		OOBToken:     *oobToken,
 
-		MatchCodes:  *matchCodes,
-		FilterSizes: *filterSizes,
-		Extensions:  *extensions,
-		MatchRegex:  *matchRegex,
-		FilterRegex: *filterRegex,
-		FilterWords: *filterWords,
-		FilterLines: *filterLines,
-		MatchWords:  *matchWords,
-		MatchLines:  *matchLines,
-		RTMin:       *rtMin,
-		RTMax:       *rtMax,
+		MatchCodes:   *matchCodes,
+		FilterSizes:  *filterSizes,
+		Extensions:   *extensions,
+		MatchRegex:   *matchRegex,
+		FilterRegex:  *filterRegex,
+		ExcludePaths: normalizeExcludePaths([]string(excludePaths)),
+		FilterWords:  *filterWords,
+		FilterLines:  *filterLines,
+		MatchWords:   *matchWords,
+		MatchLines:   *matchLines,
+		RTMin:        *rtMin,
+		RTMax:        *rtMax,
 
 		OutputFormat: outFmt,
 		OutputFile:   *outputFile,
@@ -360,6 +363,10 @@ func parseFlags() cliConfig {
 	}
 	if cfg.SimhashClusterLimit < 1 {
 		fmt.Fprintln(os.Stderr, "error: --simhash-cluster must be >= 1")
+		os.Exit(1)
+	}
+	if err := validateExcludePaths(cfg.ExcludePaths); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 	if err := validateHistoryMode(cfg); err != nil {

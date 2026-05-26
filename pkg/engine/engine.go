@@ -110,6 +110,7 @@ type Config struct {
 	FilterContentTypes   []string    // NEW: discard responses whose Content-Type contains any of these strings
 	MatchRegex           string
 	FilterRegex          string
+	ExcludePathPatterns  []string
 	Extensions           []string
 	Methods              []string
 	AuthMatrix           map[string][]string
@@ -185,6 +186,7 @@ type configSnapshot struct {
 	FilterSizeRanges     []SizeRange
 	MatchContentTypes    []string
 	FilterContentTypes   []string
+	ExcludePathRegexps   []*regexp.Regexp
 	FollowRedirects      bool
 	MaxRedirects         int
 	RequestBody          string
@@ -1147,6 +1149,7 @@ func (e *Engine) buildAndStoreConfigSnapshot() {
 		Headers:              make(map[string]string, len(e.Config.Headers)),
 		MatchCodes:           make(map[int]bool, len(e.Config.MatchCodes)),
 		FilterSizes:          make(map[int]bool, len(e.Config.FilterSizes)),
+		ExcludePathRegexps:   make([]*regexp.Regexp, 0, len(e.Config.ExcludePathPatterns)),
 		FilterSizeRanges:     make([]SizeRange, len(e.Config.FilterSizeRanges)),
 		MatchContentTypes:    make([]string, len(e.Config.MatchContentTypes)),
 		FilterContentTypes:   make([]string, len(e.Config.FilterContentTypes)),
@@ -1228,6 +1231,15 @@ func (e *Engine) buildAndStoreConfigSnapshot() {
 	}
 	for k, v := range e.Config.FilterSizes {
 		s.FilterSizes[k] = v
+	}
+	for _, pattern := range e.Config.ExcludePathPatterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		if re, err := regexp.Compile(pattern); err == nil {
+			s.ExcludePathRegexps = append(s.ExcludePathRegexps, re)
+		}
 	}
 	copy(s.FilterSizeRanges, e.Config.FilterSizeRanges)
 	copy(s.MatchContentTypes, e.Config.MatchContentTypes)
@@ -1851,6 +1863,10 @@ func (e *Engine) StartWordlistScanner(ctx context.Context, runID int64, path str
 			copy(exts, snap.Extensions)
 		}
 
+		if pathExcludedByRegexps(line, snap.ExcludePathRegexps) {
+			continue
+		}
+
 		methodsToUse := resolveMethodsForPath(line, methods, smartAPI)
 		for _, method := range methodsToUse {
 			// Increment total for this base path.
@@ -1860,6 +1876,9 @@ func (e *Engine) StartWordlistScanner(ctx context.Context, runID int64, path str
 				cleanExt := strings.TrimSpace(ext)
 				if !strings.HasPrefix(cleanExt, ".") {
 					cleanExt = "." + cleanExt
+				}
+				if pathExcludedByRegexps(line+cleanExt, snap.ExcludePathRegexps) {
+					continue
 				}
 				atomic.AddInt64(&e.TotalLines, 1)
 				e.Submit(Job{Path: line + cleanExt, Depth: 0, Method: method, RunID: runID})
@@ -3881,6 +3900,9 @@ func (e *Engine) worker(id int) {
 										continue
 									}
 									newPath := strings.TrimSuffix(basePath, "/") + "/" + strings.TrimPrefix(word, "/")
+									if pathExcludedByRegexps(newPath, snap.ExcludePathRegexps) {
+										continue
+									}
 									for _, method := range resolveMethodsForPath(newPath, snap.Methods, snap.SmartAPI) {
 										atomic.AddInt64(&e.TotalLines, 1)
 										e.Submit(Job{Path: newPath, Depth: nextDepth, Method: method, RunID: runID})
@@ -3981,6 +4003,9 @@ func (e *Engine) Submit(job Job) {
 	if job.RunID != atomic.LoadInt64(&e.RunID) {
 		return
 	}
+	if e.shouldExcludePath(job.Path) {
+		return
+	}
 
 	filterKey := job.Path
 	if job.Method != "" {
@@ -4010,6 +4035,9 @@ func (e *Engine) Submit(job Job) {
 func (e *Engine) SubmitHarvestPath(path string, runID int64, harvestDepth int) {
 	path = strings.TrimSpace(path)
 	if path == "" {
+		return
+	}
+	if e.shouldExcludePath(path) {
 		return
 	}
 

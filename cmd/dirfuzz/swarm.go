@@ -161,6 +161,7 @@ func buildSwarmWorkerConfig(cfg cliConfig) (engine.SwarmWorkerConfig, error) {
 		FilterSizes:          mustCSVInts(cfg.FilterSizes, "-fs"),
 		MatchRegex:           cfg.MatchRegex,
 		FilterRegex:          cfg.FilterRegex,
+		ExcludePathPatterns:  append([]string(nil), cfg.ExcludePaths...),
 		Extensions:           splitTrimmed(cfg.Extensions),
 		Methods:              normalizedMethods(splitTrimmed(cfg.Methods)),
 		Timeout:              cfg.Timeout,

@@ -71,3 +71,9 @@ func TestLoadPersistedResultsRestoresRawBytes(t *testing.T) {
 		t.Fatalf("ResponseBytes = %v, want %v", results[0].ResponseBytes, res.ResponseBytes)
 	}
 }
+
+func TestValidateExcludePathsRejectsInvalidRegex(t *testing.T) {
+	if err := validateExcludePaths([]string{"logout", "("}); err == nil {
+		t.Fatal("expected invalid exclude-path regex to fail validation")
+	}
+}

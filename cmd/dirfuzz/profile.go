@@ -31,6 +31,7 @@ type scanProfile struct {
 	Extensions           string              `yaml:"extensions" json:"extensions"`
 	MatchRegex           string              `yaml:"match_regex" json:"match_regex"`
 	FilterRegex          string              `yaml:"filter_regex" json:"filter_regex"`
+	ExcludePaths         []string            `yaml:"exclude_paths" json:"exclude_paths"`
 	FilterWords          int                 `yaml:"filter_words" json:"filter_words"`
 	FilterLines          int                 `yaml:"filter_lines" json:"filter_lines"`
 	MatchWords           int                 `yaml:"match_words" json:"match_words"`
@@ -164,6 +165,9 @@ func applyProfile(cfg *cliConfig, set map[string]bool) error {
 	}
 	if !set["fr"] && p.FilterRegex != "" {
 		cfg.FilterRegex = p.FilterRegex
+	}
+	if !set["exclude-path"] && len(p.ExcludePaths) > 0 {
+		cfg.ExcludePaths = normalizeExcludePaths(p.ExcludePaths)
 	}
 	if !set["fw"] && p.FilterWords != -1 {
 		cfg.FilterWords = p.FilterWords

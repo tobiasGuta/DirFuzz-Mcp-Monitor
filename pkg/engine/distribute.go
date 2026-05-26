@@ -27,6 +27,7 @@ type SwarmWorkerConfig struct {
 	FilterSizes          []int               `json:"filter_sizes,omitempty"`
 	MatchRegex           string              `json:"match_regex,omitempty"`
 	FilterRegex          string              `json:"filter_regex,omitempty"`
+	ExcludePathPatterns  []string            `json:"exclude_path_patterns,omitempty"`
 	Extensions           []string            `json:"extensions,omitempty"`
 	Methods              []string            `json:"methods,omitempty"`
 	Timeout              time.Duration       `json:"timeout,omitempty"`
@@ -284,6 +285,7 @@ func applySwarmConfig(e *Engine, cfg SwarmWorkerConfig) error {
 		c.FollowRedirects = cfg.FollowRedirects
 		c.MaxRedirects = cfg.MaxRedirects
 		c.RequestBody = cfg.RequestBody
+		c.ExcludePathPatterns = append([]string(nil), cfg.ExcludePathPatterns...)
 		c.FilterWords = cfg.FilterWords
 		c.FilterLines = cfg.FilterLines
 		c.MatchWords = cfg.MatchWords

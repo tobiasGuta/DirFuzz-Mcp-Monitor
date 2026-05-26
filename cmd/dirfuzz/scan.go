@@ -76,6 +76,7 @@ func run(cfg cliConfig) error {
 		c.MaxRedirects = cfg.MaxRedirects
 		c.RequestBody = cfg.Body
 		c.SaveRaw = cfg.SaveRaw
+		c.ExcludePathPatterns = append([]string(nil), cfg.ExcludePaths...)
 		c.AuthMatrix = cfg.AuthMatrix
 		c.Recursive = cfg.Recursive
 		c.RecursivePrune = cfg.RecursivePrune
