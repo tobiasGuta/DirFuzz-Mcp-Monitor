@@ -91,8 +91,7 @@ var (
 				Foreground(DraculaFg)
 
 	autocompleteSelectedStyle = lipgloss.NewStyle().
-					Foreground(DraculaBg).
-					Background(DraculaPurple).
+					Foreground(DraculaCyan).
 					Bold(true)
 
 	paneStyle = lipgloss.NewStyle().
@@ -4790,21 +4789,21 @@ func (m *Model) View() string {
 	}
 
 	// Footer
-	var footerBody string
+	var leftChips string
 	if m.statusMessage != "" {
-		footerBody = m.statusMessage
+		leftChips = m.statusMessage
 	} else {
 		if m.state == StateLogsPanel {
-			footerBody = m.footerBarStyle.Render(strings.Join([]string{
+			leftChips = strings.Join([]string{
 				keyChip("Enter", "jump"),
 				keyChip("x", "detail"),
 				keyChip("L", "logs"),
 				keyChip("m", "dashboard"),
 				keyChip("Esc/q", "back"),
 				keyChip("Up/Down/PgUp/PgDn", "navigate"),
-			}, "  "))
+			}, "  ")
 		} else if m.state == StateList {
-			footerBody = m.footerBarStyle.Render(strings.Join([]string{
+			leftChips = strings.Join([]string{
 				keyChip("Enter", "detail"),
 				keyChip("r", "repeater"),
 				keyChip("h/H", "hex"),
@@ -4814,18 +4813,18 @@ func (m *Model) View() string {
 				keyChip("L", "logs"),
 				keyChip(":", "commands"),
 				keyChip("q", "quit"),
-			}, "  "))
+			}, "  ")
 		} else if m.state == StateDashboard {
-			footerBody = m.footerBarStyle.Render(strings.Join([]string{
+			leftChips = strings.Join([]string{
 				keyChip("1-5", "tabs"),
 				keyChip("f", "range"),
 				keyChip("e", "export"),
 				keyChip("L", "logs"),
 				keyChip("m/q/Esc", "back"),
 				keyChip("Up/Down/PgUp/PgDn", "scroll"),
-			}, "  "))
+			}, "  ")
 		} else if m.state == StateDetail {
-			footerBody = m.footerBarStyle.Render(strings.Join([]string{
+			leftChips = strings.Join([]string{
 				keyChip("R", "bookmark"),
 				keyChip("d", "diff"),
 				keyChip("h/H", "hex"),
@@ -4833,25 +4832,25 @@ func (m *Model) View() string {
 				keyChip("x", "related logs"),
 				keyChip("Esc/q", "back"),
 				keyChip("Up/Down", "scroll"),
-			}, "  "))
+			}, "  ")
 		} else if m.state == StateHexView {
-			footerBody = m.footerBarStyle.Render(strings.Join([]string{
+			leftChips = strings.Join([]string{
 				keyChip("R", "bookmark"),
 				keyChip("d", "diff"),
 				keyChip("D", "replay diff"),
 				keyChip("L", "logs"),
 				keyChip("Tab", "switch request/response"),
 				keyChip("Esc/q", "back"),
-			}, "  "))
+			}, "  ")
 		} else if m.state == StateDiffView {
-			footerBody = m.footerBarStyle.Render(strings.Join([]string{
+			leftChips = strings.Join([]string{
 				keyChip("L", "logs"),
 				keyChip("Esc/q", "back"),
 				keyChip("Up/Down", "scroll"),
 				keyChip("PgUp/PgDn", "page"),
-			}, "  "))
+			}, "  ")
 		} else if m.state == StateRepeater {
-			footerBody = m.footerBarStyle.Render(strings.Join([]string{
+			leftChips = strings.Join([]string{
 				keyChip("R", "bookmark"),
 				keyChip("D", "diff replay"),
 				keyChip("L", "logs"),
@@ -4859,16 +4858,33 @@ func (m *Model) View() string {
 				keyChip("Ctrl+R", "send"),
 				keyChip("Ctrl+P/N", "history"),
 				keyChip("Esc/q", "back"),
-			}, "  "))
+			}, "  ")
 		} else {
-			footerBody = m.footerBarStyle.Render(strings.Join([]string{
+			leftChips = strings.Join([]string{
 				keyChip(":", "commands"),
 				keyChip("p", "pause"),
 				keyChip("q", "quit"),
 				keyChip("r", "repeater"),
-			}, "  "))
+			}, "  ")
 		}
 	}
+
+	var footerBody string
+	var rightIndicator string
+	if m.Engine != nil && m.Engine.Config.IsPaused {
+		rightIndicator = lipgloss.NewStyle().Foreground(DraculaOrange).Render("● PAUSED  ") + mutedStyle.Render("v4.0.0")
+	} else {
+		rightIndicator = lipgloss.NewStyle().Foreground(DraculaGreen).Blink(true).Render("● SCANNING  ") + mutedStyle.Render("v4.0.0")
+	}
+
+	lWidth := lipgloss.Width(leftChips)
+	rWidth := lipgloss.Width(rightIndicator)
+	spc := m.width - 2 - lWidth - rWidth
+	if spc < 0 {
+		spc = 0
+	}
+
+	footerBody = m.footerBarStyle.Render(leftChips + strings.Repeat(" ", spc) + rightIndicator)
 	if m.state == StateCommand {
 		panelBorderColor := DraculaCyan
 		if m.commandPulseOn {
