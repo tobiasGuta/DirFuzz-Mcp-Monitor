@@ -183,7 +183,7 @@ func renderStatusBadge(activeColor lipgloss.Color, icon, label string, count int
 	leftBorder := lipgloss.RoundedBorder()
 	leftBorder.TopRight = "┬"
 	leftBorder.BottomRight = "┴"
-	
+
 	leftStyle := lipgloss.NewStyle().
 		Foreground(displayColor).
 		Border(leftBorder).
@@ -194,7 +194,7 @@ func renderStatusBadge(activeColor lipgloss.Color, icon, label string, count int
 	rightBorder.TopLeft = "─"
 	rightBorder.BottomLeft = "─"
 	rightBorder.Left = ""
-	
+
 	rightStyle := lipgloss.NewStyle().
 		Foreground(displayColor).
 		Border(rightBorder). // True for all edges so top/bottom draw properly
@@ -246,6 +246,201 @@ func renderPaneHeader(style lipgloss.Style, width int, title string) string {
 		width = 1
 	}
 	return style.Width(width).Align(lipgloss.Left).Render(title)
+}
+
+func newRepeaterTextarea() textarea.Model {
+	ta := newRepeaterTextarea()
+	return ta
+}
+
+func repeaterSessionLabel(rawReq string) string {
+	line := strings.TrimSpace(strings.Split(rawReq, "\n")[0])
+	if line == "" {
+		return "untitled"
+	}
+	parts := strings.Fields(line)
+	label := line
+	if len(parts) >= 2 {
+		label = parts[0] + " " + parts[1]
+	}
+	runes := []rune(label)
+	if len(runes) > 28 {
+		label = string(runes[:27]) + "…"
+	}
+	return label
+}
+
+func (m *Model) activeRepeaterSession() *RepeaterSession {
+	if m.activeRepeaterIdx < 0 || m.activeRepeaterIdx >= len(m.repeaterSessions) {
+		return nil
+	}
+	return &m.repeaterSessions[m.activeRepeaterIdx]
+}
+
+func (m *Model) findRepeaterSessionIndex(sessionID int) int {
+	for i := range m.repeaterSessions {
+		if m.repeaterSessions[i].ID == sessionID {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m *Model) syncActiveRepeaterSessionFromUI() {
+	session := m.activeRepeaterSession()
+	if session == nil {
+		return
+	}
+	session.Request = m.repeaterInput.Value()
+	session.Label = repeaterSessionLabel(session.Request)
+	session.Target = m.repeaterTarget
+	session.Sending = m.repeaterSending
+	session.LastStatus = m.repeaterLastStatus
+	session.LastDuration = m.repeaterLastDuration
+	session.LastRaw = append(session.LastRaw[:0], m.repeaterLastRaw...)
+	session.CancelFn = m.repeaterCancelFn
+	session.History = append(session.History[:0], m.repeaterHistory...)
+	session.HistoryIdx = m.repeaterHistoryIdx
+}
+
+func (m *Model) loadRepeaterSessionIntoUI(idx int) {
+	if idx < 0 || idx >= len(m.repeaterSessions) {
+		return
+	}
+
+	session := &m.repeaterSessions[idx]
+	m.activeRepeaterIdx = idx
+	m.repeaterTarget = session.Target
+	m.repeaterInput.SetValue(session.Request)
+	m.repeaterSending = session.Sending
+	m.repeaterLastStatus = session.LastStatus
+	m.repeaterLastDuration = session.LastDuration
+	m.repeaterLastRaw = append(m.repeaterLastRaw[:0], session.LastRaw...)
+	m.repeaterCancelFn = session.CancelFn
+	m.repeaterHistory = append(m.repeaterHistory[:0], session.History...)
+	m.repeaterHistoryIdx = session.HistoryIdx
+	if session.Sending {
+		m.repeaterRespVp.SetContent("Sending...")
+	} else if session.HasError {
+		m.repeaterRespVp.SetContent(errorStyle.Render(session.Response))
+	} else {
+		m.repeaterRespVp.SetContent(wrapText(session.Response, m.repeaterRespVp.Width))
+	}
+	m.repeaterRespVp.GotoTop()
+	if m.repeaterFocusReq {
+		m.repeaterInput.Focus()
+	} else {
+		m.repeaterInput.Blur()
+	}
+}
+
+func (m *Model) openRepeaterSession(target, rawReq string) {
+	m.syncActiveRepeaterSessionFromUI()
+	session := RepeaterSession{
+		ID:      m.nextRepeaterSessionID,
+		Label:   repeaterSessionLabel(rawReq),
+		Target:  target,
+		Request: rawReq,
+		History: []RepeaterHistoryEntry{{
+			Request:    rawReq,
+			Response:   "",
+			StatusCode: 0,
+			Duration:   0,
+		}},
+		HistoryIdx: 0,
+	}
+	m.nextRepeaterSessionID++
+	m.repeaterSessions = append(m.repeaterSessions, session)
+	m.loadRepeaterSessionIntoUI(len(m.repeaterSessions) - 1)
+	m.state = StateRepeater
+	m.repeaterFocusReq = true
+	m.repeaterInput.Focus()
+}
+
+func (m *Model) cycleRepeaterSession(delta int) {
+	if len(m.repeaterSessions) <= 1 {
+		return
+	}
+	m.syncActiveRepeaterSessionFromUI()
+	next := m.activeRepeaterIdx + delta
+	if next < 0 {
+		next = len(m.repeaterSessions) - 1
+	} else if next >= len(m.repeaterSessions) {
+		next = 0
+	}
+	m.loadRepeaterSessionIntoUI(next)
+}
+
+func (m *Model) closeActiveRepeaterSession() {
+	if len(m.repeaterSessions) == 0 {
+		m.state = StateList
+		return
+	}
+
+	session := m.activeRepeaterSession()
+	if session != nil && session.CancelFn != nil {
+		session.CancelFn()
+	}
+
+	idx := m.activeRepeaterIdx
+	m.repeaterSessions = append(m.repeaterSessions[:idx], m.repeaterSessions[idx+1:]...)
+	if len(m.repeaterSessions) == 0 {
+		m.repeaterTarget = ""
+		m.repeaterInput.SetValue("")
+		m.repeaterRespVp.SetContent("")
+		m.repeaterSending = false
+		m.repeaterLastStatus = 0
+		m.repeaterLastDuration = 0
+		m.repeaterLastRaw = nil
+		m.repeaterCancelFn = nil
+		m.repeaterHistory = nil
+		m.repeaterHistoryIdx = 0
+		m.activeRepeaterIdx = 0
+		m.state = StateList
+		return
+	}
+
+	if idx >= len(m.repeaterSessions) {
+		idx = len(m.repeaterSessions) - 1
+	}
+	m.loadRepeaterSessionIntoUI(idx)
+}
+
+func (m *Model) repeaterSessionStrip(width int) string {
+	if len(m.repeaterSessions) == 0 || width <= 0 {
+		return ""
+	}
+
+	start := max(0, m.activeRepeaterIdx-2)
+	end := min(len(m.repeaterSessions), start+5)
+	if end-start < 5 {
+		start = max(0, end-5)
+	}
+
+	parts := make([]string, 0, end-start+2)
+	if start > 0 {
+		parts = append(parts, mutedStyle.Render("…"))
+	}
+	for i := start; i < end; i++ {
+		label := fmt.Sprintf("%d %s", i+1, m.repeaterSessions[i].Label)
+		if m.repeaterSessions[i].Sending {
+			label += " *"
+		}
+		style := mutedStyle
+		if i == m.activeRepeaterIdx {
+			style = highlightStyle
+		}
+		parts = append(parts, style.Render("["+label+"]"))
+	}
+	if end < len(m.repeaterSessions) {
+		parts = append(parts, mutedStyle.Render("…"))
+	}
+
+	strip := strings.Join(parts, " ")
+	if lipgloss.Width(strip) > width {
+		return lipgloss.NewStyle().MaxWidth(width).Render(strip)
+	}
+	return strip
 }
 
 func keyChip(key, label string) string {
@@ -362,7 +557,7 @@ func (m *Model) renderCardTable(title string, headers []string, rows [][]string)
 	}
 
 	var sb strings.Builder
-	
+
 	showHeaders := true
 	if len(headers) == 2 && headers[0] == "Signal" && headers[1] == "Value" {
 		showHeaders = false
@@ -371,7 +566,7 @@ func (m *Model) renderCardTable(title string, headers []string, rows [][]string)
 	} else if len(headers) == 0 {
 		showHeaders = false
 	}
-	
+
 	if showHeaders {
 		for i, header := range headers {
 			sb.WriteString(mutedStyle.Render(header))
@@ -1936,10 +2131,10 @@ func renderSuggestionDropdown(suggestions []CommandSuggestion, selectedIdx, widt
 			prefix = "▸ "
 			style = autocompleteSelectedStyle
 		}
-		
+
 		s := suggestions[i]
 		leftText := prefix + s.Text
-		
+
 		content := leftText
 		if s.Description != "" {
 			targetLeftWidth := 15
@@ -2003,6 +2198,7 @@ const (
 
 // RepeaterResultMsg is the message returned after a repeater request.
 type RepeaterResultMsg struct {
+	SessionID   int
 	RawResponse *httpclient.RawResponse
 	Err         error
 	Duration    time.Duration
@@ -2013,6 +2209,22 @@ type RepeaterHistoryEntry struct {
 	Response   string
 	StatusCode int
 	Duration   time.Duration
+}
+
+type RepeaterSession struct {
+	ID           int
+	Label        string
+	Target       string
+	Request      string
+	Response     string
+	HasError     bool
+	Sending      bool
+	LastStatus   int
+	LastDuration time.Duration
+	LastRaw      []byte
+	CancelFn     context.CancelFunc
+	History      []RepeaterHistoryEntry
+	HistoryIdx   int
 }
 
 // Model is the BubbleTea model for the TUI.
@@ -2081,17 +2293,20 @@ type Model struct {
 	cmdViewport       viewport.Model
 
 	// Repeater state
-	repeaterInput        textarea.Model
-	repeaterRespVp       viewport.Model
-	repeaterTarget       string
-	repeaterSending      bool
-	repeaterFocusReq     bool
-	repeaterLastStatus   int
-	repeaterLastDuration time.Duration
-	repeaterLastRaw      []byte
-	repeaterCancelFn     context.CancelFunc
-	repeaterHistory      []RepeaterHistoryEntry
-	repeaterHistoryIdx   int
+	repeaterInput         textarea.Model
+	repeaterRespVp        viewport.Model
+	repeaterTarget        string
+	repeaterSending       bool
+	repeaterFocusReq      bool
+	repeaterLastStatus    int
+	repeaterLastDuration  time.Duration
+	repeaterLastRaw       []byte
+	repeaterCancelFn      context.CancelFunc
+	repeaterHistory       []RepeaterHistoryEntry
+	repeaterHistoryIdx    int
+	repeaterSessions      []RepeaterSession
+	activeRepeaterIdx     int
+	nextRepeaterSessionID int
 
 	// Hex view state
 	hexSelectedIndex int
@@ -2210,6 +2425,7 @@ func NewModel(eng *engine.Engine, resultsCh <-chan engine.Result, logEventsCh <-
 		repeaterRespVp:           repeaterVp,
 		repeaterFocusReq:         true,
 		repeaterLastRaw:          nil,
+		nextRepeaterSessionID:    1,
 		lastProgressPct:          -1,
 	}
 	m.initCommands()
@@ -3239,6 +3455,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateHexView()
 		} else if m.state == StateDiffView {
 			m.updateDiffView()
+		} else if m.state == StateRepeater && len(m.repeaterSessions) > 0 {
+			m.syncActiveRepeaterSessionFromUI()
+			m.loadRepeaterSessionIntoUI(m.activeRepeaterIdx)
 		}
 
 	case TickMsg:
@@ -3391,47 +3610,54 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.listenForLogEvents())
 
 	case RepeaterResultMsg:
-		m.repeaterSending = false
-		if msg.Err != nil {
-			m.repeaterRespVp.SetContent(errorStyle.Render(fmt.Sprintf("Error: %v", msg.Err)))
-			m.repeaterLastStatus = 0
-			m.repeaterLastDuration = 0
-			m.repeaterLastRaw = nil
-			m.repeaterRespVp.GotoTop()
-		} else {
-			m.repeaterLastRaw = append(m.repeaterLastRaw[:0], msg.RawResponse.Raw...)
-			content := strings.ReplaceAll(string(msg.RawResponse.Raw), "\r\n", "\n")
-			content = formatHTTPResponse(content)
-			if len(content) > 50_000 {
-				content = content[:50_000] + "\n\n[... truncated for display ...]"
-			}
-			m.repeaterRespVp.SetContent(wrapText(content, m.repeaterRespVp.Width))
-			m.repeaterLastStatus = msg.RawResponse.StatusCode
-			m.repeaterLastDuration = msg.Duration
-			m.repeaterRespVp.GotoTop()
+		idx := m.findRepeaterSessionIndex(msg.SessionID)
+		if idx >= 0 {
+			session := &m.repeaterSessions[idx]
+			session.Sending = false
+			session.CancelFn = nil
+			if msg.Err != nil {
+				session.HasError = true
+				session.Response = fmt.Sprintf("Error: %v", msg.Err)
+				session.LastStatus = 0
+				session.LastDuration = 0
+				session.LastRaw = nil
+			} else {
+				session.HasError = false
+				session.LastRaw = append(session.LastRaw[:0], msg.RawResponse.Raw...)
+				content := strings.ReplaceAll(string(msg.RawResponse.Raw), "\r\n", "\n")
+				content = formatHTTPResponse(content)
+				if len(content) > 50_000 {
+					content = content[:50_000] + "\n\n[... truncated for display ...]"
+				}
+				session.Response = content
+				session.LastStatus = msg.RawResponse.StatusCode
+				session.LastDuration = msg.Duration
 
-			// Truncate 'future' history if we went back in time and sent a new request
-			if m.repeaterHistoryIdx < len(m.repeaterHistory)-1 {
-				m.repeaterHistory = m.repeaterHistory[:m.repeaterHistoryIdx+1]
+				if session.HistoryIdx < len(session.History)-1 {
+					session.History = session.History[:session.HistoryIdx+1]
+				}
+				session.History = append(session.History, RepeaterHistoryEntry{
+					Request:    session.Request,
+					Response:   content,
+					StatusCode: msg.RawResponse.StatusCode,
+					Duration:   msg.Duration,
+				})
+				if len(session.History) > 15 {
+					session.History = session.History[1:]
+				}
+				session.HistoryIdx = len(session.History) - 1
 			}
-			// Append the snapshot
-			m.repeaterHistory = append(m.repeaterHistory, RepeaterHistoryEntry{
-				Request:    m.repeaterInput.Value(),
-				Response:   content,
-				StatusCode: msg.RawResponse.StatusCode,
-				Duration:   msg.Duration,
-			})
-			// Cap history at 15 items to save memory
-			if len(m.repeaterHistory) > 15 {
-				m.repeaterHistory = m.repeaterHistory[1:]
+
+			if idx == m.activeRepeaterIdx {
+				m.loadRepeaterSessionIntoUI(idx)
 			}
-			m.repeaterHistoryIdx = len(m.repeaterHistory) - 1
 		}
 
 	case tea.KeyMsg:
 		if m.state == StateRepeater {
 			switch msg.String() {
 			case "ctrl+c":
+				m.syncActiveRepeaterSessionFromUI()
 				if m.repeaterCancelFn != nil {
 					m.repeaterCancelFn()
 				}
@@ -3443,9 +3669,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					entry := m.repeaterHistory[m.repeaterHistoryIdx]
 					m.repeaterInput.SetValue(entry.Request)
 					m.repeaterRespVp.SetContent(wrapText(entry.Response, m.repeaterRespVp.Width))
+					if session := m.activeRepeaterSession(); session != nil {
+						session.Request = entry.Request
+						session.Response = entry.Response
+						session.HasError = false
+					}
 					m.repeaterLastStatus = entry.StatusCode
 					m.repeaterLastDuration = entry.Duration
 					m.repeaterRespVp.GotoTop()
+					m.syncActiveRepeaterSessionFromUI()
 				}
 				return m, nil
 			case "ctrl+n":
@@ -3454,9 +3686,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					entry := m.repeaterHistory[m.repeaterHistoryIdx]
 					m.repeaterInput.SetValue(entry.Request)
 					m.repeaterRespVp.SetContent(wrapText(entry.Response, m.repeaterRespVp.Width))
+					if session := m.activeRepeaterSession(); session != nil {
+						session.Request = entry.Request
+						session.Response = entry.Response
+						session.HasError = false
+					}
 					m.repeaterLastStatus = entry.StatusCode
 					m.repeaterLastDuration = entry.Duration
 					m.repeaterRespVp.GotoTop()
+					m.syncActiveRepeaterSessionFromUI()
 				}
 				return m, nil
 			case "ctrl+r":
@@ -3468,8 +3706,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					rawReq = strings.ReplaceAll(rawReq, "\n", "\r\n") // Enforce strict HTTP CRLF
 					ctx, cancel := context.WithCancel(context.Background())
 					m.repeaterCancelFn = cancel
-					return m, sendRepeaterRequest(m.Engine, m.repeaterTarget, rawReq, ctx)
+					session := m.activeRepeaterSession()
+					if session != nil {
+						session.Request = m.repeaterInput.Value()
+						session.Target = m.repeaterTarget
+						session.Sending = true
+						session.CancelFn = cancel
+						return m, sendRepeaterRequest(m.Engine, m.repeaterTarget, rawReq, session.ID, ctx)
+					}
 				}
+			case "[":
+				m.cycleRepeaterSession(-1)
+				return m, nil
+			case "]":
+				m.cycleRepeaterSession(1)
+				return m, nil
+			case "ctrl+w":
+				m.closeActiveRepeaterSession()
+				return m, nil
 			case "tab":
 				m.repeaterFocusReq = !m.repeaterFocusReq
 				if m.repeaterFocusReq {
@@ -3478,6 +3732,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.repeaterInput.Blur()
 				}
 			case "esc":
+				m.syncActiveRepeaterSessionFromUI()
 				if m.repeaterCancelFn != nil {
 					m.repeaterCancelFn()
 				}
@@ -3485,6 +3740,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default:
 				if m.repeaterFocusReq {
 					m.repeaterInput, cmd = m.repeaterInput.Update(msg)
+					m.syncActiveRepeaterSessionFromUI()
 					cmds = append(cmds, cmd)
 				} else {
 					m.repeaterRespVp, cmd = m.repeaterRespVp.Update(msg)
@@ -3799,23 +4055,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.state == StateList && m.selectedIndex >= 0 && m.selectedIndex < len(m.logLineHits) {
 				selectedHit := m.logLineHits[m.selectedIndex]
 				if selectedHit != nil && selectedHit.Request != "" {
-					m.repeaterTarget = m.Engine.BaseURL()
 					cleanReq := strings.ReplaceAll(selectedHit.Request, "\r\n", "\n")
-					m.repeaterInput.SetValue(cleanReq)
-					m.repeaterRespVp.SetContent("")
-
-					// Initialize history with this baseline request
-					m.repeaterHistory = []RepeaterHistoryEntry{{
-						Request:    cleanReq,
-						Response:   "",
-						StatusCode: 0,
-						Duration:   0,
-					}}
-					m.repeaterHistoryIdx = 0
-
-					m.state = StateRepeater
-					m.repeaterFocusReq = true
-					m.repeaterInput.Focus()
+					m.openRepeaterSession(m.Engine.BaseURL(), cleanReq)
 				} else {
 					m.statusMessage = errorStyle.Render("No raw request available. Use --save-raw and restart.")
 					m.statusExpiry = time.Now().Add(3 * time.Second)
@@ -4450,10 +4691,10 @@ func (m *Model) View() string {
 	titleStr := titleStyle.Render(" 🦇 DirFuzz ")
 	urlStr := highlightStyle.Render(m.Engine.BaseURL())
 	wordlistStr := mutedStyle.Render(wordlistPath)
-	
+
 	titleURL := fmt.Sprintf("%s%s%s%s%s", titleStr, separator, urlStr, separator, wordlistStr)
 	statusElapsed := fmt.Sprintf("%s  %s", statusText, mutedStyle.Render(elapsed.String()))
-	
+
 	leftW := (availableWidth * 6) / 10
 	rightW := availableWidth - leftW
 	row1Left := lipgloss.NewStyle().Width(leftW).Align(lipgloss.Left).Render(titleURL)
@@ -4508,12 +4749,12 @@ func (m *Model) View() string {
 	progressTextLeft := mutedStyle.Render("PROGRESS    ")
 	barWidth := 20
 	bar := renderProgressBar(barWidth, progressPct, m.cachedFillStyle)
-	
+
 	pctStr := m.cachedFillStyle.Render(fmt.Sprintf("%5.1f%%", progressPct))
 	countsStr := mutedStyle.Render(fmt.Sprintf("%s / %s", formatComma(processed), formatComma(total)))
 	etaLabel := mutedStyle.Render(" │  ETA ")
 	etaValue := lipgloss.NewStyle().Foreground(DraculaCyan).Render(etaStr)
-	
+
 	row3Content := lipgloss.JoinHorizontal(lipgloss.Center,
 		progressTextLeft,
 		bar,
@@ -4716,12 +4957,19 @@ func (m *Model) View() string {
 	} else if activeState == StateRepeater {
 		vpHeight := remainingHeight
 		vpHeight -= actualLogPanelHeight
-		if vpHeight < 5 {
-			vpHeight = 5
+		if len(m.repeaterSessions) > 1 {
+			vpHeight--
+		}
+		if vpHeight < 6 {
+			vpHeight = 6
 		}
 		paneOuterWidth := (m.width - 2) / 2
 
-		reqHeader := renderPaneHeader(requestPaneHeaderStyle, m.repeaterInput.Width(), "✏  Repeater")
+		reqTitle := "✏  Repeater"
+		if session := m.activeRepeaterSession(); session != nil {
+			reqTitle = fmt.Sprintf("✏  Repeater [%d/%d] %s", m.activeRepeaterIdx+1, len(m.repeaterSessions), session.Label)
+		}
+		reqHeader := renderPaneHeader(requestPaneHeaderStyle, m.repeaterInput.Width(), reqTitle)
 		var resHeader string
 		if m.repeaterSending {
 			resHeader = renderPaneHeader(responsePaneHeaderStyle, m.repeaterRespVp.Width, "Response ─── [⟳ Sending…]")
@@ -4786,6 +5034,9 @@ func (m *Model) View() string {
 		)
 		spacer := strings.Repeat(" ", m.width-(paneOuterWidth*2))
 		mainContent = lipgloss.JoinHorizontal(lipgloss.Top, reqPane, spacer, resPane)
+		if strip := m.repeaterSessionStrip(max(1, m.width-2)); strip != "" {
+			mainContent = lipgloss.JoinVertical(lipgloss.Left, strip, mainContent)
+		}
 	}
 
 	// Footer
@@ -4857,6 +5108,9 @@ func (m *Model) View() string {
 				keyChip("Tab", "focus"),
 				keyChip("Ctrl+R", "send"),
 				keyChip("Ctrl+P/N", "history"),
+				keyChip("[", "prev"),
+				keyChip("]", "next"),
+				keyChip("Ctrl+W", "close"),
 				keyChip("Esc/q", "back"),
 			}, "  ")
 		} else {
@@ -5034,11 +5288,11 @@ func parseRawRequestTarget(rawReq, baseURL string) (string, error) {
 	return fmt.Sprintf("%s://%s%s", scheme, host, path), nil
 }
 
-func sendRepeaterRequest(eng *engine.Engine, repeaterTarget string, rawReq string, ctx context.Context) tea.Cmd {
+func sendRepeaterRequest(eng *engine.Engine, repeaterTarget string, rawReq string, sessionID int, ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
 		targetURL, err := parseRawRequestTarget(rawReq, repeaterTarget)
 		if err != nil {
-			return RepeaterResultMsg{Err: err}
+			return RepeaterResultMsg{SessionID: sessionID, Err: err}
 		}
 
 		eng.Config.RLock()
@@ -5055,6 +5309,6 @@ func sendRepeaterRequest(eng *engine.Engine, repeaterTarget string, rawReq strin
 		resp, err := httpclient.SendRawRequestWithContext(ctx, targetURL, []byte(rawReq), timeout, proxy, insecure)
 		duration := time.Since(start)
 
-		return RepeaterResultMsg{RawResponse: resp, Err: err, Duration: duration}
+		return RepeaterResultMsg{SessionID: sessionID, RawResponse: resp, Err: err, Duration: duration}
 	}
 }

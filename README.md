@@ -152,6 +152,8 @@ The TUI is where the new inspection features shine.
 - `d` opens the split diff view against the saved reference.
 - `D` opens the replay diff view from the repeater.
 - `r` sends a selected request to the repeater.
+- `[` and `]` switch between open repeater sessions.
+- `Ctrl+W` closes the active repeater session.
 - `L` toggles the live log panel.
 - `m` cycles the main view between the list, dashboard, and log panel modes.
 - `1` to `5` switch between the dashboard analytics tabs.
@@ -168,7 +170,8 @@ The list, dashboard, detail, hex, repeater, and log views all advertise their ow
 2. Open a hit in the TUI with `Enter`.
 3. Press `R` to save the current response as your reference.
 4. Select another hit and press `d` to compare them.
-5. Or press `r` to send a request to the repeater, then use `D` to diff the replayed response against the saved reference.
+5. Or press `r` to send a request to the repeater. Each request opens its own repeater session and stays available until you close it or exit the app.
+6. Inside the repeater, use `[` and `]` to move between sessions, then use `D` to diff the active replayed response against the saved reference.
 
 The diff view highlights deleted text in red on the left and added text in green on the right.
 
