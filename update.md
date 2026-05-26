@@ -2,6 +2,14 @@
 
 This file tracks user-facing fixes and noteworthy updates. Keep future bugfix notes here instead of scattering them across other Markdown docs. Add new entries with the date they were made.
 
+## 2026-05-26
+- Replaced the markdown-looking dashboard tables with modern card sections using bordered panels.
+- Improved the selected row styling in lists to use a left accent bar (`▸`) and colorful text instead of a full purple background.
+- Redesigned the footer into a compact layout with colored minimalist key chips and muted labels.
+- Upgraded the command panel to a full "⌘ Command Palette" featuring descriptions for each command and streamlined selected-item styling.
+- Added a blinking live status indicator (`● SCANNING` or `● PAUSED`) to the right side of the footer.
+- Fixed an issue where the Repeater's text area rendered an opaque background that obscured transparent terminal backgrounds.
+
 ## 2026-05-25
 - Added bounded asynchronous 401/403 bypass micro-tasks that try standard path normalization and IP-spoofing headers, and emit labeled `[BYPASS: ...]` findings when a permutation returns a successful response.
 - Added JavaScript source map harvesting so `.js` responses can discover hidden routes from `SourceMap` / `X-SourceMap` headers or `sourceMappingURL` directives and feed them back into the fuzzing queue.

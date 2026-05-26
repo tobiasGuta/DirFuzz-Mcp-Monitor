@@ -2155,8 +2155,8 @@ func NewModel(eng *engine.Engine, resultsCh <-chan engine.Result, logEventsCh <-
 	ta := textarea.New()
 	ta.Placeholder = "GET / HTTP/1.1..."
 	ta.ShowLineNumbers = false
-	ta.FocusedStyle.Base = ta.FocusedStyle.Base.Background(DraculaBg)
-	ta.BlurredStyle.Base = ta.BlurredStyle.Base.Background(DraculaBg)
+	ta.FocusedStyle.Base = lipgloss.NewStyle()
+	ta.BlurredStyle.Base = lipgloss.NewStyle()
 	ta.Prompt = ""
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 
