@@ -249,6 +249,55 @@ func renderPaneHeader(style lipgloss.Style, width int, title string) string {
 	return style.Width(width).Align(lipgloss.Left).Render(title)
 }
 
+func keyChip(key, label string) string {
+	color := lipgloss.TerminalColor(DraculaCyan)
+	switch key {
+	case "Enter":
+		key = "↵"
+		color = DraculaOrange
+	case "r":
+		color = DraculaCyan
+	case "h", "h/H":
+		color = DraculaGreen
+	case "d":
+		color = DraculaOrange
+	case "R":
+		color = DraculaRed
+	case "m":
+		color = DraculaYellow
+	case "L":
+		color = DraculaPink
+	case ":":
+		color = DraculaCyan
+	case "q", "Esc", "Esc/q", "m/q/Esc":
+		color = DraculaRed
+	case "x":
+		color = DraculaPurple
+	case "D":
+		color = DraculaOrange
+	case "f":
+		color = DraculaGreen
+	case "e":
+		color = DraculaYellow
+	case "Tab":
+		color = DraculaPink
+	case "Ctrl+R":
+		color = DraculaGreen
+	case "Ctrl+P/N":
+		color = DraculaPurple
+	case "1-5":
+		color = DraculaPink
+	}
+
+	k := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(color).
+		Render(key)
+
+	l := lipgloss.NewStyle().Foreground(lipgloss.Color("#6272A4")).Render(" " + label)
+	return k + l
+}
+
 func renderEvasionSummary(rows []engine.EvasionScoreboardRow) string {
 	if len(rows) == 0 {
 		return mutedStyle.Render("WAF Bypass Summary: none recorded")
@@ -4726,21 +4775,78 @@ func (m *Model) View() string {
 		footerBody = m.statusMessage
 	} else {
 		if m.state == StateLogsPanel {
-			footerBody = m.footerBarStyle.Render("Enter: jump | x: details | L: logs | m: cycle view | Esc/q: back | Up/Down/PgUp/PgDn: navigate")
+			footerBody = m.footerBarStyle.Render(strings.Join([]string{
+				keyChip("Enter", "jump"),
+				keyChip("x", "detail"),
+				keyChip("L", "logs"),
+				keyChip("m", "dashboard"),
+				keyChip("Esc/q", "back"),
+				keyChip("Up/Down/PgUp/PgDn", "navigate"),
+			}, "  "))
 		} else if m.state == StateList {
-			footerBody = m.footerBarStyle.Render("Enter: details | L: logs | m: cycle view | R: save ref | d: diff | h/H: hex | r: repeater | ':' commands | q: quit")
+			footerBody = m.footerBarStyle.Render(strings.Join([]string{
+				keyChip("Enter", "detail"),
+				keyChip("r", "repeater"),
+				keyChip("h/H", "hex"),
+				keyChip("d", "diff"),
+				keyChip("R", "bookmark"),
+				keyChip("m", "dashboard"),
+				keyChip("L", "logs"),
+				keyChip(":", "commands"),
+				keyChip("q", "quit"),
+			}, "  "))
 		} else if m.state == StateDashboard {
-			footerBody = m.footerBarStyle.Render("1-5: tabs | f: range | e: export | L: logs | m/q/Esc: back | Up/Down/PgUp/PgDn: scroll")
+			footerBody = m.footerBarStyle.Render(strings.Join([]string{
+				keyChip("1-5", "tabs"),
+				keyChip("f", "range"),
+				keyChip("e", "export"),
+				keyChip("L", "logs"),
+				keyChip("m/q/Esc", "back"),
+				keyChip("Up/Down/PgUp/PgDn", "scroll"),
+			}, "  "))
 		} else if m.state == StateDetail {
-			footerBody = m.footerBarStyle.Render("R: save ref | d: diff | h/H: hex | L: logs | x: related logs | Esc/q: back | Up/Down to scroll")
+			footerBody = m.footerBarStyle.Render(strings.Join([]string{
+				keyChip("R", "bookmark"),
+				keyChip("d", "diff"),
+				keyChip("h/H", "hex"),
+				keyChip("L", "logs"),
+				keyChip("x", "related logs"),
+				keyChip("Esc/q", "back"),
+				keyChip("Up/Down", "scroll"),
+			}, "  "))
 		} else if m.state == StateHexView {
-			footerBody = m.footerBarStyle.Render("R: save ref | d: diff | D: replay diff | L: logs | Tab: switch request/response | Esc/q: back")
+			footerBody = m.footerBarStyle.Render(strings.Join([]string{
+				keyChip("R", "bookmark"),
+				keyChip("d", "diff"),
+				keyChip("D", "replay diff"),
+				keyChip("L", "logs"),
+				keyChip("Tab", "switch request/response"),
+				keyChip("Esc/q", "back"),
+			}, "  "))
 		} else if m.state == StateDiffView {
-			footerBody = m.footerBarStyle.Render("L: logs | Esc/q: back | Up/Down: scroll | PgUp/PgDn: page")
+			footerBody = m.footerBarStyle.Render(strings.Join([]string{
+				keyChip("L", "logs"),
+				keyChip("Esc/q", "back"),
+				keyChip("Up/Down", "scroll"),
+				keyChip("PgUp/PgDn", "page"),
+			}, "  "))
 		} else if m.state == StateRepeater {
-			footerBody = m.footerBarStyle.Render("R: save ref | D: diff replay | L: logs | Tab: focus | Ctrl+R: send | Ctrl+P/N: history | Esc/q: back")
+			footerBody = m.footerBarStyle.Render(strings.Join([]string{
+				keyChip("R", "bookmark"),
+				keyChip("D", "diff replay"),
+				keyChip("L", "logs"),
+				keyChip("Tab", "focus"),
+				keyChip("Ctrl+R", "send"),
+				keyChip("Ctrl+P/N", "history"),
+				keyChip("Esc/q", "back"),
+			}, "  "))
 		} else {
-			footerBody = m.footerBarStyle.Render("Press ':' for commands | 'p' to pause | 'q' to quit | 'r' for repeater")
+			footerBody = m.footerBarStyle.Render(strings.Join([]string{
+				keyChip(":", "commands"),
+				keyChip("p", "pause"),
+				keyChip("q", "quit"),
+				keyChip("r", "repeater"),
+			}, "  "))
 		}
 	}
 	if m.state == StateCommand {
