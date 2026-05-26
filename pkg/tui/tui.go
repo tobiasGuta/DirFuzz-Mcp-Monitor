@@ -1877,14 +1877,19 @@ func renderProgressBar(width int, progressPct float64, style lipgloss.Style) str
 	return style.Render(fill.String()) + mutedStyle.Render(empty)
 }
 
-func suggestionDropdownWidth(suggestions []string, maxWidth int) int {
+type CommandSuggestion struct {
+	Text        string
+	Description string
+}
+
+func suggestionDropdownWidth(suggestions []CommandSuggestion, maxWidth int) int {
 	if maxWidth < 16 {
 		return 16
 	}
 
 	width := 20
 	for _, s := range suggestions {
-		candidate := len([]rune(s)) + 4
+		candidate := len([]rune(s.Text)) + len([]rune(s.Description)) + 6
 		if candidate > width {
 			width = candidate
 		}
@@ -1900,7 +1905,7 @@ func suggestionDropdownWidth(suggestions []string, maxWidth int) int {
 	return width
 }
 
-func renderSuggestionDropdown(suggestions []string, selectedIdx, width int) string {
+func renderSuggestionDropdown(suggestions []CommandSuggestion, selectedIdx, width int) string {
 	if len(suggestions) == 0 {
 		return ""
 	}
@@ -1932,7 +1937,22 @@ func renderSuggestionDropdown(suggestions []string, selectedIdx, width int) stri
 			prefix = "▸ "
 			style = autocompleteSelectedStyle
 		}
-		line := style.Width(innerWidth).Render(prefix + suggestions[i])
+		
+		s := suggestions[i]
+		leftText := prefix + s.Text
+		
+		content := leftText
+		if s.Description != "" {
+			targetLeftWidth := 15
+			actualLeftWidth := len([]rune(leftText))
+			pad := targetLeftWidth - actualLeftWidth
+			if pad < 2 {
+				pad = 2
+			}
+			content += strings.Repeat(" ", pad) + mutedStyle.Render(s.Description)
+		}
+
+		line := style.Width(innerWidth).Render(content)
 		lines = append(lines, line)
 	}
 
@@ -2096,7 +2116,7 @@ type Model struct {
 	commands []CommandDef
 
 	// Autocomplete state
-	suggestions    []string
+	suggestions    []CommandSuggestion
 	selectedSugIdx int
 
 	// State
@@ -3739,7 +3759,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						base = "wordlist "
 					}
 
-					suggestion := m.suggestions[m.selectedSugIdx]
+					suggestion := m.suggestions[m.selectedSugIdx].Text
 					if strings.HasSuffix(suggestion, "/") {
 						newVal := base + suggestion
 						m.textInput.SetValue(newVal)
@@ -3753,7 +3773,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.suggestions = nil
 					}
 				} else {
-					newVal := m.suggestions[m.selectedSugIdx] + " "
+					newVal := m.suggestions[m.selectedSugIdx].Text + " "
 					m.textInput.SetValue(newVal)
 					m.textInput.SetCursor(len(newVal))
 					m.suggestions = nil
@@ -4054,9 +4074,9 @@ func (m *Model) updateSuggestions(val string) {
 				name := entry.Name()
 				if strings.HasPrefix(name, base) {
 					if entry.IsDir() {
-						m.suggestions = append(m.suggestions, name+"/")
+						m.suggestions = append(m.suggestions, CommandSuggestion{Text: name + "/"})
 					} else {
-						m.suggestions = append(m.suggestions, name)
+						m.suggestions = append(m.suggestions, CommandSuggestion{Text: name})
 					}
 				}
 			}
@@ -4067,7 +4087,7 @@ func (m *Model) updateSuggestions(val string) {
 
 	for _, c := range m.commands {
 		if strings.HasPrefix(c.Name, val) {
-			m.suggestions = append(m.suggestions, c.Name)
+			m.suggestions = append(m.suggestions, CommandSuggestion{Text: c.Name, Description: c.Description})
 		}
 	}
 	m.selectedSugIdx = 0
@@ -4867,7 +4887,7 @@ func (m *Model) View() string {
 			Height(12).
 			Padding(0, 1)
 
-		cmdTitle := pinkStyle.Render(" ⚡ Command Panel ") +
+		cmdTitle := pinkStyle.Render(" ⌘ Command Palette ") +
 			mutedStyle.Render(" (Esc to close, ':help' for commands) ")
 		promptLine := cmdPromptStyle.Render(":") + m.textInput.View()
 
