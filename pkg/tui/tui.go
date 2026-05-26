@@ -230,6 +230,13 @@ func renderSeverityMarker(hit *engine.Result) string {
 	}
 }
 
+func renderTriageMarker(hit *engine.Result) string {
+	if hit == nil || !hit.MarkedInteresting {
+		return mutedStyle.Render(" ")
+	}
+	return yellowStyle.Render("★")
+}
+
 func severitySymbol(hit *engine.Result) string {
 	if hit == nil {
 		return "·"
@@ -2353,6 +2360,7 @@ type Model struct {
 	uiStateDirtyAt time.Time
 	logIndexByKey  map[string]int
 	hitIndexByKey  map[string]int
+	markedHitKeys  map[string]bool
 
 	// Status messages
 	statusMessage string
@@ -2431,6 +2439,7 @@ func NewModel(eng *engine.Engine, resultsCh <-chan engine.Result, logEventsCh <-
 		logSelectedIndex:         0,
 		logIndexByKey:            make(map[string]int),
 		hitIndexByKey:            make(map[string]int),
+		markedHitKeys:            make(map[string]bool),
 		errorPulseOn:             false,
 		dashboardTab:             DashboardTabPerformance,
 		dashboardRangeIdx:        int(DashboardRange30s),
@@ -2460,6 +2469,15 @@ func (m *Model) initCommands() {
 				sb.WriteString(highlightStyle.Render(line) + " - " + mutedStyle.Render(cmd.Description) + "\n")
 			}
 			return sb.String()
+		}},
+		{Name: "mark", Description: "Mark the selected hit as interesting", Args: "", Handler: func(m *Model, args string) string {
+			return m.setSelectedHitMarked(true)
+		}},
+		{Name: "unmark", Description: "Remove the interesting mark from the selected hit", Args: "", Handler: func(m *Model, args string) string {
+			return m.setSelectedHitMarked(false)
+		}},
+		{Name: "togglemark", Description: "Toggle the interesting mark on the selected hit", Args: "", Handler: func(m *Model, args string) string {
+			return m.toggleSelectedHitMarked()
 		}},
 		{Name: "metrics", Description: "Open or close the live dashboard", Args: "", Handler: func(m *Model, args string) string {
 			m.toggleDashboardView()
@@ -4289,6 +4307,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "m":
 			m.cycleMetricsView()
 			return m, nil
+		case "t":
+			if m.state == StateList || m.state == StateDetail {
+				m.statusMessage = m.toggleSelectedHitMarked()
+				m.statusExpiry = time.Now().Add(3 * time.Second)
+				return m, nil
+			}
 		case "L":
 			m.toggleLogsPanel()
 			return m, nil
@@ -4349,11 +4373,17 @@ func (m *Model) updateDetailView() {
 
 	if selectedHit != nil {
 		reqContent = "No raw request available. Use --save-raw to include raw request/response; set follow redirects or disable body filters if using HEAD."
+		if selectedHit.MarkedInteresting {
+			reqContent = yellowStyle.Render("★ Marked interesting") + "\n\n" + reqContent
+		}
 		if selectedHit.Note != "" {
 			reqContent = selectedHit.Note + "\n\n" + reqContent
 		}
 		if selectedHit.Request != "" {
 			reqContent = selectedHit.Request
+			if selectedHit.MarkedInteresting {
+				reqContent = yellowStyle.Render("★ Marked interesting") + "\n\n" + reqContent
+			}
 			if selectedHit.Note != "" {
 				reqContent = selectedHit.Note + "\n\n" + reqContent
 			}
@@ -4363,11 +4393,17 @@ func (m *Model) updateDetailView() {
 		}
 
 		resContent = "No raw response available. Use --save-raw to include raw request/response."
+		if selectedHit.MarkedInteresting {
+			resContent = yellowStyle.Render("★ Marked interesting") + "\n\n" + resContent
+		}
 		if selectedHit.Note != "" {
 			resContent = selectedHit.Note + "\n\n" + resContent
 		}
 		if selectedHit.Response != "" {
 			resContent = selectedHit.Response
+			if selectedHit.MarkedInteresting {
+				resContent = yellowStyle.Render("★ Marked interesting") + "\n\n" + resContent
+			}
 			if selectedHit.Note != "" {
 				resContent = selectedHit.Note + "\n\n" + resContent
 			}
@@ -4415,14 +4451,15 @@ func (m *Model) renderListView() {
 		}
 
 		if i == m.selectedIndex {
-			selectedRow := fmt.Sprintf("%s %s %s", selectedCursorStyle.Render("▌"), renderSeverityMarker(lineHit), line)
+			selectedRow := fmt.Sprintf("%s %s %s %s", selectedCursorStyle.Render("▌"), renderTriageMarker(lineHit), renderSeverityMarker(lineHit), line)
 			visibleLines = append(visibleLines, selectedRowStyle.Render(selectedRow))
 			continue
 		}
 
 		cursor := severityNeutralStyle.Render(" ")
+		triage := renderTriageMarker(lineHit)
 		severity := renderSeverityMarker(lineHit)
-		visibleLines = append(visibleLines, fmt.Sprintf("%s %s %s", cursor, severity, line))
+		visibleLines = append(visibleLines, fmt.Sprintf("%s %s %s %s", cursor, triage, severity, line))
 	}
 
 	m.viewport.SetContent(strings.Join(visibleLines, "\n"))
@@ -4585,6 +4622,12 @@ func (m *Model) exportLogsToFile(path string) error {
 func (m *Model) appendLog(text string, hit *engine.Result) {
 	if text == "" {
 		return
+	}
+	if hit != nil {
+		hitCopy := *hit
+		m.applyMarkedHit(&hitCopy)
+		text = formatResult(hitCopy)
+		hit = &hitCopy
 	}
 	if hit != nil && m.historyAppendEnabled() {
 		m.upsertHistoryHit(text, *hit)
@@ -5203,6 +5246,7 @@ func (m *Model) View() string {
 			leftChips = strings.Join([]string{
 				keyChip("Enter", "detail"),
 				keyChip("r", "repeater"),
+				keyChip("t", "mark"),
 				keyChip("h/H", "hex"),
 				keyChip("d", "diff"),
 				keyChip("R", "bookmark"),
@@ -5222,6 +5266,7 @@ func (m *Model) View() string {
 			}, "  ")
 		} else if m.state == StateDetail {
 			leftChips = strings.Join([]string{
+				keyChip("t", "mark"),
 				keyChip("R", "bookmark"),
 				keyChip("d", "diff"),
 				keyChip("h/H", "hex"),

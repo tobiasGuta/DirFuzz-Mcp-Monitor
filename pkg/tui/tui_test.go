@@ -161,6 +161,39 @@ func TestResetAfterRestartPreservingHistoryKeepsHitsAndRepeater(t *testing.T) {
 	}
 }
 
+func TestToggleSelectedHitMarkMarksAndUnmarksHit(t *testing.T) {
+	eng := engine.NewEngine(1, 1000, 0.01)
+	model := NewModel(eng, make(chan engine.Result), make(chan engine.LogEvent))
+
+	model.appendLog("ignored", &engine.Result{
+		URL:        "https://example.test/admin",
+		Method:     "GET",
+		Path:       "/admin",
+		StatusCode: 403,
+		Size:       10,
+	})
+
+	if got := model.toggleSelectedHitMarked(); !strings.Contains(got, "Marked interesting") {
+		t.Fatalf("toggleSelectedHitMarked() = %q, want marked message", got)
+	}
+	if model.logLineHits[0] == nil || !model.logLineHits[0].MarkedInteresting {
+		t.Fatal("expected selected log hit to be marked interesting")
+	}
+	if !model.hits[0].MarkedInteresting {
+		t.Fatal("expected stored hit to be marked interesting")
+	}
+
+	if got := model.toggleSelectedHitMarked(); !strings.Contains(got, "Unmarked") {
+		t.Fatalf("second toggleSelectedHitMarked() = %q, want unmarked message", got)
+	}
+	if model.logLineHits[0] == nil || model.logLineHits[0].MarkedInteresting {
+		t.Fatal("expected selected log hit to be unmarked")
+	}
+	if model.hits[0].MarkedInteresting {
+		t.Fatal("expected stored hit to be unmarked")
+	}
+}
+
 func TestPersistedUIStateRoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
 	outputPath := filepath.Join(tmpDir, "results.jsonl")
@@ -194,6 +227,41 @@ func TestPersistedUIStateRoundTrip(t *testing.T) {
 	}
 	if got := string(restored.repeaterSessions[0].LastRaw); got != string([]byte{0x01, 0x02, 0x03}) {
 		t.Fatalf("restored LastRaw = %v", restored.repeaterSessions[0].LastRaw)
+	}
+}
+
+func TestPersistedUIStateRoundTripPreservesMarkedHits(t *testing.T) {
+	tmpDir := t.TempDir()
+	outputPath := filepath.Join(tmpDir, "results.jsonl")
+
+	eng := engine.NewEngine(1, 1000, 0.01)
+	model := NewModel(eng, make(chan engine.Result), make(chan engine.LogEvent))
+	model.ConfigureHistoryPersistence(outputPath, appendHistoryMode)
+	model.LoadPersistedResults([]engine.Result{
+		{URL: "https://example.test/admin", Method: "GET", Path: "/admin", StatusCode: 403, Size: 10},
+	})
+
+	if got := model.setSelectedHitMarked(true); !strings.Contains(got, "Marked interesting") {
+		t.Fatalf("setSelectedHitMarked(true) = %q, want marked message", got)
+	}
+	if err := model.FlushPersistedUIState(); err != nil {
+		t.Fatalf("FlushPersistedUIState error = %v", err)
+	}
+
+	restored := NewModel(eng, make(chan engine.Result), make(chan engine.LogEvent))
+	restored.ConfigureHistoryPersistence(outputPath, appendHistoryMode)
+	restored.LoadPersistedResults([]engine.Result{
+		{URL: "https://example.test/admin", Method: "GET", Path: "/admin", StatusCode: 403, Size: 10},
+	})
+	if err := restored.LoadPersistedUIState(); err != nil {
+		t.Fatalf("LoadPersistedUIState error = %v", err)
+	}
+
+	if got := len(restored.logLineHits); got != 1 {
+		t.Fatalf("len(restored.logLineHits) = %d, want 1", got)
+	}
+	if restored.logLineHits[0] == nil || !restored.logLineHits[0].MarkedInteresting {
+		t.Fatal("expected restored hit to remain marked interesting")
 	}
 }
 

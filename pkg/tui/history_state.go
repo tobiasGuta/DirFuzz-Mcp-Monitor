@@ -34,6 +34,7 @@ type persistedRepeaterSession struct {
 type persistedUIState struct {
 	Version           int                        `json:"version"`
 	ActiveRepeaterIdx int                        `json:"active_repeater_idx,omitempty"`
+	MarkedHitKeys     []string                   `json:"marked_hit_keys,omitempty"`
 	RepeaterFocusReq  bool                       `json:"repeater_focus_req"`
 	RepeaterSessions  []persistedRepeaterSession `json:"repeater_sessions,omitempty"`
 }
@@ -127,6 +128,8 @@ func (m *Model) trimOldestHitEntry() {
 }
 
 func (m *Model) upsertHistoryHit(text string, hit engine.Result) {
+	m.applyMarkedHit(&hit)
+	text = formatResult(hit)
 	key := historyIdentityKey(hit)
 	if logIdx, ok := m.logIndexByKey[key]; ok && logIdx >= 0 && logIdx < len(m.logs) {
 		hitCopy := hit
@@ -211,6 +214,16 @@ func (m *Model) LoadPersistedUIState() error {
 		return nil
 	}
 
+	m.markedHitKeys = make(map[string]bool, len(state.MarkedHitKeys))
+	for _, key := range state.MarkedHitKeys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		m.markedHitKeys[key] = true
+	}
+	m.applyMarkedStateToVisibleHits()
+
 	m.repeaterSessions = nil
 	m.repeaterFocusReq = state.RepeaterFocusReq
 	maxID := 0
@@ -270,6 +283,7 @@ func (m *Model) buildPersistedUIState() persistedUIState {
 	state := persistedUIState{
 		Version:           persistedUIStateVersion,
 		ActiveRepeaterIdx: m.activeRepeaterIdx,
+		MarkedHitKeys:     m.markedHitKeyList(),
 		RepeaterFocusReq:  m.repeaterFocusReq,
 		RepeaterSessions:  make([]persistedRepeaterSession, 0, len(m.repeaterSessions)),
 	}
@@ -298,7 +312,7 @@ func (m *Model) FlushPersistedUIState() error {
 	if !m.historyAppendEnabled() {
 		return nil
 	}
-	if len(m.repeaterSessions) == 0 {
+	if len(m.repeaterSessions) == 0 && len(m.markedHitKeys) == 0 {
 		if err := os.Remove(m.historyUIPath); err != nil && !os.IsNotExist(err) {
 			return err
 		}

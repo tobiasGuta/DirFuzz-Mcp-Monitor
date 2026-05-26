@@ -260,33 +260,34 @@ type Job struct {
 // Callers that need a stable absolute target should prefer URL when present and
 // fall back to Path only for scans that were not started with SetTarget.
 type Result struct {
-	Path             string            `json:"path"`
-	Method           string            `json:"method,omitempty"`
-	StatusCode       int               `json:"status"`
-	Forbidden403Type string            `json:"forbidden_403_type,omitempty"`
-	Size             int               `json:"length"`
-	Words            int               `json:"words,omitempty"`
-	Lines            int               `json:"lines,omitempty"`
-	ContentType      string            `json:"content_type,omitempty"`
-	Labels           []string          `json:"labels,omitempty"`
-	Confidence       string            `json:"confidence,omitempty"`
-	Duration         time.Duration     `json:"duration,omitempty"`
-	Redirect         string            `json:"redirect,omitempty"`
-	Headers          map[string]string `json:"headers,omitempty"`
-	IsEagleAlert     bool              `json:"eagle_alert,omitempty"`
-	OldStatusCode    int               `json:"old_status,omitempty"`
-	IsAutoFilter     bool              `json:"auto_filter,omitempty"`
-	URL              string            `json:"url,omitempty"`
-	Request          string            `json:"request,omitempty"`  // only populated when SaveRaw=true
-	Response         string            `json:"response,omitempty"` // only populated when SaveRaw=true
-	RequestBytes     []byte            `json:"-"`
-	ResponseBytes    []byte            `json:"-"`
-	Note             string            `json:"note,omitempty"`
-	ContentDrift     bool              `json:"content_drift,omitempty"`
-	OldSize          int               `json:"old_size,omitempty"`
-	OldWords         int               `json:"old_words,omitempty"`
-	DriftDeltaBytes  int               `json:"drift_delta_bytes,omitempty"`
-	DiscoveredParams []string          `json:"discovered_params,omitempty"`
+	Path              string            `json:"path"`
+	Method            string            `json:"method,omitempty"`
+	StatusCode        int               `json:"status"`
+	Forbidden403Type  string            `json:"forbidden_403_type,omitempty"`
+	Size              int               `json:"length"`
+	Words             int               `json:"words,omitempty"`
+	Lines             int               `json:"lines,omitempty"`
+	ContentType       string            `json:"content_type,omitempty"`
+	Labels            []string          `json:"labels,omitempty"`
+	Confidence        string            `json:"confidence,omitempty"`
+	Duration          time.Duration     `json:"duration,omitempty"`
+	Redirect          string            `json:"redirect,omitempty"`
+	Headers           map[string]string `json:"headers,omitempty"`
+	IsEagleAlert      bool              `json:"eagle_alert,omitempty"`
+	OldStatusCode     int               `json:"old_status,omitempty"`
+	IsAutoFilter      bool              `json:"auto_filter,omitempty"`
+	URL               string            `json:"url,omitempty"`
+	Request           string            `json:"request,omitempty"`  // only populated when SaveRaw=true
+	Response          string            `json:"response,omitempty"` // only populated when SaveRaw=true
+	RequestBytes      []byte            `json:"-"`
+	ResponseBytes     []byte            `json:"-"`
+	Note              string            `json:"note,omitempty"`
+	MarkedInteresting bool              `json:"marked_interesting,omitempty"`
+	ContentDrift      bool              `json:"content_drift,omitempty"`
+	OldSize           int               `json:"old_size,omitempty"`
+	OldWords          int               `json:"old_words,omitempty"`
+	DriftDeltaBytes   int               `json:"drift_delta_bytes,omitempty"`
+	DiscoveredParams  []string          `json:"discovered_params,omitempty"`
 }
 
 // replayTask carries everything needed to replay a hit through an outbound proxy.

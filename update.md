@@ -3,6 +3,7 @@
 This file tracks user-facing fixes and noteworthy updates. Keep future bugfix notes here instead of scattering them across other Markdown docs. Add new entries with the date they were made.
 
 ## 2026-05-26
+- Added in-TUI triage marking so selected hits can be toggled as interesting with `t`, surfaced visually in the list/detail views, and restored from append-mode UI state on reopen.
 - Added repeatable `--exclude-path` regex support so authenticated, recursive, and harvested scan work can skip unsafe routes such as logout, delete, destroy, or reset endpoints before they ever hit the queue.
 - Added repeater clipboard/export actions so requests and responses can be copied without relying on terminal text selection: `Ctrl+Y` copies the request, `Alt+Y` copies the response, `Alt+B` copies both, `Alt+C` copies a generated `curl` command, and `Alt+W` exports the request to a temporary `.http` file.
 - Added repeater command-palette actions `:copy-request`, `:copy-response`, `:copy-both`, `:copy-curl`, and `:export-request [file]`.
