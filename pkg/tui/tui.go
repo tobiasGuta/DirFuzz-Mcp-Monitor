@@ -127,11 +127,10 @@ var (
 				Background(DraculaOrange)
 
 	selectedRowStyle = lipgloss.NewStyle().
-				Background(DraculaPurple).
-				Foreground(DraculaBg)
+				Bold(true)
 
 	selectedCursorStyle = lipgloss.NewStyle().
-				Foreground(DraculaPurple).
+				Foreground(DraculaCyan).
 				Bold(true)
 
 	severity2xxStyle     = lipgloss.NewStyle().Foreground(DraculaGreen)
@@ -1423,7 +1422,7 @@ func (m *Model) formatSystemLogEntry(entry systemLogEntry, selected bool) string
 	level := logLevelStyle(entry.Event.Level)
 	cursor := " "
 	if selected {
-		cursor = "▶"
+		cursor = selectedCursorStyle.Render("▌")
 	}
 	expandMark := " "
 	if entry.HasDetail {
@@ -1452,7 +1451,7 @@ func (m *Model) formatSystemLogEntry(entry systemLogEntry, selected bool) string
 		line = errorStyle.Bold(true).Render(line)
 	}
 	if selected {
-		line = selectedRowStyle.Width(m.logViewport.Width).Render(fmt.Sprintf("%s %s %s", cursor, expandMark, line))
+		line = selectedRowStyle.Render(fmt.Sprintf("%s %s %s", cursor, expandMark, line))
 	} else {
 		line = fmt.Sprintf("%s %s %s", cursor, expandMark, line)
 	}
@@ -3967,8 +3966,8 @@ func (m *Model) renderListView() {
 		}
 
 		if i == m.selectedIndex {
-			selectedRow := fmt.Sprintf("▶ %s %s", severitySymbol(lineHit), stripANSI(line))
-			visibleLines = append(visibleLines, selectedRowStyle.Width(m.viewport.Width).Render(selectedRow))
+			selectedRow := fmt.Sprintf("%s %s %s", selectedCursorStyle.Render("▌"), renderSeverityMarker(lineHit), line)
+			visibleLines = append(visibleLines, selectedRowStyle.Render(selectedRow))
 			continue
 		}
 
