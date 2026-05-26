@@ -98,20 +98,17 @@ var (
 	paneStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(DraculaPurple).
-			Padding(0, 1).
-			Background(DraculaBg)
+			Padding(0, 1)
 
 	paneActiveStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(DraculaCyan).
-			Padding(0, 1).
-			Background(DraculaBg)
+			Padding(0, 1)
 
 	paneInactiveStyle = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(DraculaComment).
-				Padding(0, 1).
-				Background(DraculaBg)
+				Padding(0, 1)
 
 	detailPaneHeaderBaseStyle = lipgloss.NewStyle().
 					Bold(true).
@@ -289,66 +286,98 @@ type contentTypeRow struct {
 	count int
 }
 
-func renderMarkdownTable(title string, headers []string, rows [][]string) string {
-	if len(headers) == 0 {
-		return title
+func (m *Model) renderCardTable(title string, headers []string, rows [][]string) string {
+	width := m.width - 6
+	if width < 20 {
+		width = 40
+	}
+
+	if len(headers) == 0 && len(rows) == 0 {
+		return renderCard(title, "", width, false)
 	}
 
 	cols := len(headers)
+	if len(rows) > 0 && len(rows[0]) > cols {
+		cols = len(rows[0])
+	}
 	widths := make([]int, cols)
 	for i, header := range headers {
-		widths[i] = len([]rune(header))
+		if i < len(widths) {
+			widths[i] = lipgloss.Width(header)
+		}
 	}
 	for _, row := range rows {
 		for i := 0; i < cols && i < len(row); i++ {
-			if cellWidth := len([]rune(row[i])); cellWidth > widths[i] {
+			if cellWidth := lipgloss.Width(row[i]); cellWidth > widths[i] {
 				widths[i] = cellWidth
 			}
 		}
 	}
 
 	var sb strings.Builder
-	sb.WriteString(title)
-	sb.WriteString("\n")
-	for i, header := range headers {
-		if i > 0 {
-			sb.WriteString(" | ")
-		}
-		sb.WriteString(header)
-		padding := widths[i] - len([]rune(header))
-		if padding > 0 {
-			sb.WriteString(strings.Repeat(" ", padding))
-		}
+	
+	showHeaders := true
+	if len(headers) == 2 && headers[0] == "Signal" && headers[1] == "Value" {
+		showHeaders = false
+	} else if len(headers) == 1 && headers[0] == "Event" {
+		showHeaders = false
+	} else if len(headers) == 0 {
+		showHeaders = false
 	}
-	sb.WriteString("\n")
-
-	for i, width := range widths {
-		if i > 0 {
-			sb.WriteString(" | ")
-		}
-		sb.WriteString(strings.Repeat("-", width))
-	}
-	sb.WriteString("\n")
-
-	for _, row := range rows {
-		for i := 0; i < cols; i++ {
-			if i > 0 {
-				sb.WriteString(" | ")
+	
+	if showHeaders {
+		for i, header := range headers {
+			sb.WriteString(mutedStyle.Render(header))
+			padding := widths[i] - lipgloss.Width(header)
+			if padding > 0 {
+				sb.WriteString(strings.Repeat(" ", padding))
 			}
+			if i < cols-1 {
+				sb.WriteString("   ")
+			}
+		}
+		sb.WriteString("\n\n")
+	}
+
+	for rIdx, row := range rows {
+		for i := 0; i < cols; i++ {
 			cell := ""
 			if i < len(row) {
 				cell = row[i]
 			}
 			sb.WriteString(cell)
-			padding := widths[i] - len([]rune(cell))
+			padding := widths[i] - lipgloss.Width(cell)
 			if padding > 0 {
 				sb.WriteString(strings.Repeat(" ", padding))
 			}
+			if i < cols-1 {
+				sb.WriteString("   ")
+			}
 		}
-		sb.WriteString("\n")
+		if rIdx < len(rows)-1 {
+			sb.WriteString("\n")
+		}
 	}
 
-	return sb.String()
+	return renderCard(title, sb.String(), width, false)
+}
+
+func renderCard(title string, body string, width int, active bool) string {
+	style := paneStyle
+	if active {
+		style = paneActiveStyle
+	}
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(DraculaBg).
+		Background(DraculaPurple).
+		Padding(0, 1).
+		Width(width - 4).
+		Render(" " + title + " ")
+
+	return style.Width(width).Render(
+		lipgloss.JoinVertical(lipgloss.Top, header, body),
+	)
 }
 
 func buildTopContentTypes(rows []engine.Result, limit int) []contentTypeRow {
@@ -841,7 +870,7 @@ func (m *Model) renderPerformanceDashboard() string {
 	}}
 
 	parts := []string{
-		renderMarkdownTable(
+		m.renderCardTable(
 			"Performance Trends",
 			[]string{"Window", "Current RPS", "Avg RPS", "Peak RPS", "Current Util", "Avg Util", "Queue"},
 			metricsRows,
@@ -943,9 +972,9 @@ func (m *Model) renderErrorAnalysisDashboard() string {
 	}
 
 	parts := []string{
-		renderMarkdownTable("Error Analysis", []string{"Signal", "Value"}, buckets),
+		m.renderCardTable("Error Analysis", []string{"Signal", "Value"}, buckets),
 		fmt.Sprintf("%s %s", mutedStyle.Render("Error rate trend"), errorStyle.Render(renderFloatSparkline(m.errorRateHistory, 30))),
-		renderMarkdownTable("Most Common Error Paths", []string{"Path", "Hits"}, pathRows),
+		m.renderCardTable("Most Common Error Paths", []string{"Path", "Hits"}, pathRows),
 	}
 	return strings.Join(parts, "\n\n")
 }
@@ -1044,16 +1073,16 @@ func (m *Model) renderDiscoveryDashboard() string {
 	}
 
 	parts := []string{
-		renderMarkdownTable("Recent Interesting Findings", []string{"Event"}, func() [][]string {
+		m.renderCardTable("Recent Interesting Findings", []string{"Event"}, func() [][]string {
 			rows := make([][]string, 0, len(interesting))
 			for _, item := range interesting {
 				rows = append(rows, []string{item})
 			}
 			return rows
 		}()),
-		renderMarkdownTable("Content Type Distribution", []string{"Type", "Count", "Share", "Bar"}, contentRows),
-		renderMarkdownTable("Redirect Chains", []string{"From", "To"}, redirectRows),
-		renderMarkdownTable("Harvested by Source", []string{"Source", "Count"}, sourceRows),
+		m.renderCardTable("Content Type Distribution", []string{"Type", "Count", "Share", "Bar"}, contentRows),
+		m.renderCardTable("Redirect Chains", []string{"From", "To"}, redirectRows),
+		m.renderCardTable("Harvested by Source", []string{"Source", "Count"}, sourceRows),
 	}
 	return strings.Join(parts, "\n\n")
 }
@@ -1143,11 +1172,11 @@ func (m *Model) renderNetworkDashboard() string {
 	}
 
 	parts := []string{
-		renderMarkdownTable("Network Intelligence", []string{"Signal", "Value"}, proxyRows),
+		m.renderCardTable("Network Intelligence", []string{"Signal", "Value"}, proxyRows),
 		fmt.Sprintf("%s %s", mutedStyle.Render("Proxy rotation trail"), highlightStyle.Render(strings.Join(proxyEvents, "\n"))),
 		fmt.Sprintf("%s %s", mutedStyle.Render("Rate limiting"), orangeStyle.Render(strings.Join(rateLimitEvents, "\n"))),
-		renderMarkdownTable("Average Response Time by Status Category", []string{"Category", "Samples", "Avg"}, durationRows),
-		renderMarkdownTable("Bandwidth Estimates", []string{"Metric", "Value"}, bandwidthRows),
+		m.renderCardTable("Average Response Time by Status Category", []string{"Category", "Samples", "Avg"}, durationRows),
+		m.renderCardTable("Bandwidth Estimates", []string{"Metric", "Value"}, bandwidthRows),
 	}
 	return strings.Join(parts, "\n\n")
 }
@@ -1174,7 +1203,7 @@ func (m *Model) renderTimelineDashboard() string {
 	for _, line := range lines {
 		rows = append(rows, []string{line})
 	}
-	return renderMarkdownTable("Critical Event Timeline", []string{"Event"}, rows)
+	return m.renderCardTable("Critical Event Timeline", []string{"Event"}, rows)
 }
 
 func (m *Model) exportMetricsSnapshot() (string, error) {
