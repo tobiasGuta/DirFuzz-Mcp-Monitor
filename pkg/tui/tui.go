@@ -185,21 +185,32 @@ func renderStatusBadge(activeColor lipgloss.Color, icon, label string, count int
 		displayColor = DraculaComment
 	}
 
+	leftBorder := lipgloss.RoundedBorder()
+	leftBorder.TopRight = "┬"
+	leftBorder.BottomRight = "┴"
+	
 	leftStyle := lipgloss.NewStyle().
 		Foreground(displayColor).
-		Background(lipgloss.Color("#44475a")). // Dracula selection line / dark grey
+		Border(leftBorder).
+		BorderForeground(displayColor).
 		Padding(0, 1)
 
+	rightBorder := lipgloss.RoundedBorder()
+	rightBorder.TopLeft = "─"
+	rightBorder.BottomLeft = "─"
+	rightBorder.Left = ""
+	
 	rightStyle := lipgloss.NewStyle().
-		Foreground(DraculaBg).
-		Background(displayColor).
+		Foreground(displayColor).
+		Border(rightBorder). // True for all edges so top/bottom draw properly
+		BorderForeground(displayColor).
 		Padding(0, 1).
 		Bold(true)
 
 	left := leftStyle.Render(fmt.Sprintf("%s %s", icon, label))
 	right := rightStyle.Render(fmt.Sprintf("%d", count))
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+	return lipgloss.JoinHorizontal(lipgloss.Center, left, right)
 }
 
 func renderSeverityMarker(hit *engine.Result) string {
@@ -400,13 +411,16 @@ func (m *Model) renderDashboardView() {
 	tuiDropped := atomic.LoadInt64(&m.Engine.TUIDropped)
 	logDropped := m.Engine.LogEventsDropped.Load()
 
+	// Look for this section inside renderDashboardView()
 	overview := strings.Join([]string{
 		mutedStyle.Render("Live metrics, updated while the scan runs."),
 		m.renderDashboardTabBar(),
-		fmt.Sprintf(
-			"%s %s %s",
+		// Replace the fmt.Sprintf("%s %s %s", ...) block with this:
+		lipgloss.JoinHorizontal(lipgloss.Center,
 			renderStatusBadge(DraculaPink, "◌", "AF", autoFilterSuppressed),
+			" ",
 			renderStatusBadge(DraculaCyan, "⬢", "S404", simhashSuppressed),
+			" ",
 			mutedStyle.Render(fmt.Sprintf("Harvested:%d Queue:%d TUI-dropped:%d Log-dropped:%d", harvestedPaths, queueSize, tuiDropped, logDropped)),
 		),
 		fmt.Sprintf(
@@ -4294,8 +4308,6 @@ func (m *Model) View() string {
 	elapsed := time.Since(m.startTime).Round(time.Second)
 	total := atomic.LoadInt64(&m.Engine.TotalLines)
 	processed := atomic.LoadInt64(&m.Engine.ProcessedLines)
-	rps := atomic.LoadInt64(&m.Engine.CurrentRPS)
-	queueSize := m.Engine.QueueSize()
 	count200 := atomic.LoadInt64(&m.Engine.Count200)
 	count403 := atomic.LoadInt64(&m.Engine.Count403)
 	count404 := atomic.LoadInt64(&m.Engine.Count404)
@@ -4308,8 +4320,7 @@ func (m *Model) View() string {
 
 	m.Engine.Config.RLock()
 	paused := m.Engine.Config.IsPaused
-	workers := m.Engine.Config.MaxWorkers
-	delay := m.Engine.Config.Delay
+	wordlistPath := m.Engine.Config.WordlistPath
 	m.Engine.Config.RUnlock()
 
 	progressPct := float64(0)
@@ -4322,101 +4333,112 @@ func (m *Model) View() string {
 		m.cachedFillStyle = lipgloss.NewStyle().Foreground(progressFillColor(progressPct))
 	}
 
-	pauseBanner := ""
+	// Status text (RUNNING or PAUSED)
+	statusText := lipgloss.NewStyle().Foreground(DraculaGreen).Bold(true).Render("RUNNING")
 	if paused {
-		bannerWidth := m.width - 2
-		if bannerWidth < 20 {
-			bannerWidth = 20
-		}
-
-		var bannerStyle lipgloss.Style
 		if m.commandPulseOn {
-			bannerStyle = pauseBannerYellowStyle
+			statusText = lipgloss.NewStyle().Foreground(DraculaOrange).Bold(true).Render("PAUSED")
 		} else {
-			bannerStyle = pauseBannerOrangeStyle
+			statusText = lipgloss.NewStyle().Foreground(DraculaRed).Bold(true).Render("PAUSED")
 		}
-
-		pauseBanner = bannerStyle.Width(bannerWidth).Render("PAUSED - Press 'p' or :pause to resume")
 	}
-
-	tuiDropped := atomic.LoadInt64(&m.Engine.TUIDropped)
-	logDropped := m.Engine.LogEventsDropped.Load()
-	droppedStr := ""
-	if tuiDropped > 0 {
-		droppedStr = " " + errorStyle.Render(fmt.Sprintf("⚠ TUI-dropped:%d", tuiDropped))
-	}
-	if logDropped > 0 {
-		droppedStr += " " + orangeStyle.Render(fmt.Sprintf("⚠ Log-dropped:%d", logDropped))
-	}
-
-	statsLine := strings.Join([]string{
-		renderStatusBadge(DraculaGreen, "✓", "2xx", count200),
-		renderStatusBadge(DraculaOrange, "⛔", "403", count403),
-		renderStatusBadge(DraculaPurple, "❓", "404", count404),
-		renderStatusBadge(DraculaYellow, "🐢", "429", count429),
-		renderStatusBadge(DraculaRed, "💥", "5xx", count500),
-		renderStatusBadge(DraculaPink, "⚠", "Err", connErr),
-		renderStatusBadge(DraculaPink, "◌", "AF", autoFilterSuppressed),
-		renderStatusBadge(DraculaCyan, "⬢", "S404", simhashSuppressed),
-	}, " ") + fmt.Sprintf(" [HARVEST: %d paths]", harvestedPaths) + droppedStr
-	rpsSparkline := highlightStyle.Render(renderSparkline(m.rpsHistory, 10))
 
 	// 1. Re-calculate stable widths
-	// We use the full width with only a tiny 1-char buffer to maximize space
 	availableWidth := m.width - 2
-	leftWidth := availableWidth / 2
-	rightWidth := availableWidth - leftWidth
-
-	// 2. Build Left Column
-	leftContent := lipgloss.JoinVertical(lipgloss.Left,
-		fmt.Sprintf("%s %s", titleStyle.Render(" 🦇 DirFuzz "), highlightStyle.Render(m.Engine.BaseURL())),
-		statsLine,
-	)
-
-	// 3. Build Right Column (Pushed to the far right)
-	// Now only 2 lines tall, to perfectly match the left side
-	rightContent := lipgloss.JoinVertical(lipgloss.Right,
-		fmt.Sprintf("Workers: %s  Delay: %s  Elapsed: %s",
-			highlightStyle.Render(fmt.Sprintf("%d", workers)),
-			mutedStyle.Render(delay.String()),
-			mutedStyle.Render(elapsed.String())),
-		fmt.Sprintf("RPS: %s %s  |  Queue: %s",
-			pinkStyle.Render(fmt.Sprintf("%d", rps)),
-			rpsSparkline,
-			mutedStyle.Render(fmt.Sprintf("%d", queueSize))),
-	)
-
-	// 4. Join them with explicit widths to force the split
-	topData := lipgloss.JoinHorizontal(lipgloss.Top,
-		lipgloss.NewStyle().Width(leftWidth).Render(leftContent),
-		lipgloss.NewStyle().Width(rightWidth).Align(lipgloss.Right).Render(rightContent),
-	)
-
-	// 5. Fix Progress Bar alignment
-	// 'Progress: ' is 10 chars, ' 100.0%' is 7 chars. '(xx/yy)' adds ~15 chars.
-	barWidth := availableWidth - 32
-	if barWidth < 10 {
-		barWidth = 10
+	if availableWidth < 10 {
+		availableWidth = 10
 	}
+
+	// Row 1: Title, URL, Wordlist, Status, Elapsed
+	separator := mutedStyle.Render(" │ ")
+	titleStr := titleStyle.Render(" 🦇 DirFuzz ")
+	urlStr := highlightStyle.Render(m.Engine.BaseURL())
+	wordlistStr := mutedStyle.Render(wordlistPath)
+	
+	titleURL := fmt.Sprintf("%s%s%s%s%s", titleStr, separator, urlStr, separator, wordlistStr)
+	statusElapsed := fmt.Sprintf("%s  %s", statusText, mutedStyle.Render(elapsed.String()))
+	
+	leftW := (availableWidth * 6) / 10
+	rightW := availableWidth - leftW
+	row1Left := lipgloss.NewStyle().Width(leftW).Align(lipgloss.Left).Render(titleURL)
+	row1Right := lipgloss.NewStyle().Width(rightW).Align(lipgloss.Right).Render(statusElapsed)
+	row1 := lipgloss.JoinHorizontal(lipgloss.Top, row1Left, row1Right)
+
+	// Row 2: Badges
+	var badgeItems []string
+	badgeItems = append(badgeItems, renderStatusBadge(DraculaGreen, "✓", "2xx", count200))
+	badgeItems = append(badgeItems, renderStatusBadge(DraculaOrange, "⛔", "403", count403))
+	badgeItems = append(badgeItems, renderStatusBadge(DraculaPurple, "❓", "404", count404))
+	badgeItems = append(badgeItems, renderStatusBadge(DraculaYellow, "🐢", "429", count429))
+	badgeItems = append(badgeItems, renderStatusBadge(DraculaRed, "💥", "5xx", count500))
+	badgeItems = append(badgeItems, renderStatusBadge(DraculaPink, "⚠", "Err", connErr))
+	badgeItems = append(badgeItems, renderStatusBadge(DraculaPink, "◌", "AF", autoFilterSuppressed))
+	badgeItems = append(badgeItems, renderStatusBadge(DraculaCyan, "⬢", "S404", simhashSuppressed))
+	badgeItems = append(badgeItems, renderStatusBadge(DraculaGreen, "🌿", "Harvest", harvestedPaths))
+
+	var spacedBadges []string
+	for i, b := range badgeItems {
+		spacedBadges = append(spacedBadges, b)
+		if i < len(badgeItems)-1 {
+			spacedBadges = append(spacedBadges, " ")
+		}
+	}
+	row2 := lipgloss.JoinHorizontal(lipgloss.Left, spacedBadges...)
+
+	// Format with commas helper
+	formatComma := func(n int64) string {
+		in := strconv.FormatInt(n, 10)
+		var out []byte
+		for i, c := range in {
+			if i > 0 && (len(in)-i)%3 == 0 {
+				out = append(out, ',')
+			}
+			out = append(out, byte(c))
+		}
+		return string(out)
+	}
+
+	etaStr := "N/A"
+	if processed > 0 && total > processed {
+		timePerItem := float64(elapsed) / float64(processed)
+		remaining := float64(total - processed)
+		eta := time.Duration(timePerItem * remaining)
+		etaStr = "~" + eta.Round(time.Second).String()
+	} else if processed == total && total > 0 {
+		etaStr = "Done"
+	}
+
+	// Row 3: Progress, ETA
+	progressTextLeft := mutedStyle.Render("PROGRESS    ")
+	barWidth := 20
 	bar := renderProgressBar(barWidth, progressPct, m.cachedFillStyle)
-
-	progressRow := fmt.Sprintf("Progress: %s %s %s",
+	
+	pctStr := m.cachedFillStyle.Render(fmt.Sprintf("%5.1f%%", progressPct))
+	countsStr := mutedStyle.Render(fmt.Sprintf("%s / %s", formatComma(processed), formatComma(total)))
+	etaLabel := mutedStyle.Render(" │  ETA ")
+	etaValue := lipgloss.NewStyle().Foreground(DraculaCyan).Render(etaStr)
+	
+	row3Content := lipgloss.JoinHorizontal(lipgloss.Center,
+		progressTextLeft,
 		bar,
-		highlightStyle.Render(fmt.Sprintf("%5.1f%%", progressPct)),
-		mutedStyle.Render(fmt.Sprintf("(%d/%d)", processed, total)),
+		"        ",
+		pctStr,
+		" ",
+		countsStr,
+		etaLabel,
+		etaValue,
 	)
 
-	// 6. Final Header Assembly with clean padding
-	// This stacks the split top data and the full-width progress bar
+	row3 := lipgloss.NewStyle().Width(availableWidth).Align(lipgloss.Left).Render(row3Content)
+
+	// Final Header Assembly
 	headerContent := lipgloss.NewStyle().
-		Padding(0, 1, 0, 1). // Top, Right, Bottom, Left padding - heavily reduced
+		Padding(0, 1, 1, 1). // Top, Right, Bottom, Left
 		Render(lipgloss.JoinVertical(lipgloss.Left,
-			topData,
-			progressRow,
+			row1,
+			row2,
+			row3,
 		))
-	if pauseBanner != "" {
-		headerContent = lipgloss.JoinVertical(lipgloss.Top, headerContent, pauseBanner)
-	}
 
 	sep := separatorStyle.Render(strings.Repeat("─", m.width))
 	header := lipgloss.JoinVertical(lipgloss.Top, headerContent, sep)
