@@ -2347,20 +2347,21 @@ type Model struct {
 	selectedSugIdx int
 
 	// State
-	quitting       bool
-	pendingTarget  string
-	previousState  ViewState
-	commandPulseOn bool
-	logsChanged    bool
-	showLogsPanel  bool
-	logPanelHeight int
-	historyMode    string
-	historyUIPath  string
-	uiStateDirty   bool
-	uiStateDirtyAt time.Time
-	logIndexByKey  map[string]int
-	hitIndexByKey  map[string]int
-	markedHitKeys  map[string]bool
+	quitting          bool
+	pendingTarget     string
+	previousState     ViewState
+	commandPulseOn    bool
+	logsChanged       bool
+	showLogsPanel     bool
+	logPanelHeight    int
+	historyMode       string
+	historyUIPath     string
+	anomalyFilterOnly bool
+	uiStateDirty      bool
+	uiStateDirtyAt    time.Time
+	logIndexByKey     map[string]int
+	hitIndexByKey     map[string]int
+	markedHitKeys     map[string]bool
 
 	// Status messages
 	statusMessage string
@@ -2478,6 +2479,18 @@ func (m *Model) initCommands() {
 		}},
 		{Name: "togglemark", Description: "Toggle the interesting mark on the selected hit", Args: "", Handler: func(m *Model, args string) string {
 			return m.toggleSelectedHitMarked()
+		}},
+		{Name: "anomalies", Description: "Toggle or set anomaly-only hit view", Args: "[on|off|toggle]", Handler: func(m *Model, args string) string {
+			switch strings.ToLower(strings.TrimSpace(args)) {
+			case "", "toggle":
+				return m.toggleAnomalyFilterOnly()
+			case "on":
+				return m.setAnomalyFilterOnly(true)
+			case "off":
+				return m.setAnomalyFilterOnly(false)
+			default:
+				return errorStyle.Render("Usage: :anomalies [on|off|toggle]")
+			}
 		}},
 		{Name: "metrics", Description: "Open or close the live dashboard", Args: "", Handler: func(m *Model, args string) string {
 			m.toggleDashboardView()
@@ -4015,15 +4028,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			if m.state == StateList {
-				if m.selectedIndex > 0 {
-					m.selectedIndex--
-					m.atBottom = false
-					// Adjust scroll if necessary
-					if m.selectedIndex < m.listScrollIdx {
-						m.listScrollIdx = m.selectedIndex
-					}
-					m.renderListView()
-				}
+				m.moveListSelection(-1)
 				return m, nil
 			}
 			if m.state == StateDashboard {
@@ -4065,17 +4070,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			if m.state == StateList {
-				if m.selectedIndex < len(m.logs)-1 {
-					m.selectedIndex++
-					// Adjust scroll
-					if m.selectedIndex >= m.listScrollIdx+m.viewport.Height {
-						m.listScrollIdx++
-					}
-					m.renderListView()
-				}
-				if m.selectedIndex == len(m.logs)-1 {
-					m.atBottom = true
-				}
+				m.moveListSelection(1)
 				return m, nil
 			}
 			if m.state == StateDashboard {
@@ -4101,21 +4096,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.state == StateList {
-				m.selectedIndex += m.viewport.Height
-				if m.selectedIndex >= len(m.logs)-1 {
-					m.selectedIndex = len(m.logs) - 1
-					m.atBottom = true
-				} else {
-					m.atBottom = false
-				}
-				m.listScrollIdx += m.viewport.Height
-				if m.listScrollIdx > len(m.logs)-m.viewport.Height {
-					m.listScrollIdx = len(m.logs) - m.viewport.Height
-					if m.listScrollIdx < 0 {
-						m.listScrollIdx = 0
-					}
-				}
-				m.renderListView()
+				m.pageListSelection(max(1, m.viewport.Height))
 			} else if m.state == StateDashboard {
 				m.viewport.ViewDown()
 			} else if m.state == StateDetail || m.state == StateHexView || m.state == StateDiffView {
@@ -4133,16 +4114,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.state == StateList {
-				m.atBottom = false
-				m.selectedIndex -= m.viewport.Height
-				if m.selectedIndex < 0 {
-					m.selectedIndex = 0
-				}
-				m.listScrollIdx -= m.viewport.Height
-				if m.listScrollIdx < 0 {
-					m.listScrollIdx = 0
-				}
-				m.renderListView()
+				m.pageListSelection(-max(1, m.viewport.Height))
 			} else if m.state == StateDashboard || m.state == StateDetail || m.state == StateHexView || m.state == StateDiffView {
 				if m.state == StateDashboard {
 					m.viewport.ViewUp()
@@ -4307,6 +4279,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "m":
 			m.cycleMetricsView()
 			return m, nil
+		case "a":
+			if m.state == StateList || m.state == StateDetail {
+				m.statusMessage = m.toggleAnomalyFilterOnly()
+				m.statusExpiry = time.Now().Add(3 * time.Second)
+				return m, nil
+			}
 		case "t":
 			if m.state == StateList || m.state == StateDetail {
 				m.statusMessage = m.toggleSelectedHitMarked()
@@ -4435,14 +4413,27 @@ func (m *Model) renderListView() {
 		return
 	}
 
+	visibleIndexes := m.visibleListIndexes()
+	selectedPos := m.normalizeVisibleSelection(visibleIndexes)
+	if len(visibleIndexes) == 0 {
+		if m.anomalyFilterOnly {
+			m.viewport.SetContent(mutedStyle.Render("No anomaly findings yet. Press 'a' to return to the full list."))
+		} else {
+			m.viewport.SetContent("")
+		}
+		return
+	}
+	m.syncVisibleScroll(visibleIndexes, selectedPos)
+
 	var visibleLines []string
 	start := m.listScrollIdx
 	end := start + m.viewport.Height
-	if end > len(m.logs) {
-		end = len(m.logs)
+	if end > len(visibleIndexes) {
+		end = len(visibleIndexes)
 	}
 
-	for i := start; i < end; i++ {
+	for visibleIdx := start; visibleIdx < end; visibleIdx++ {
+		i := visibleIndexes[visibleIdx]
 		line := m.logs[i]
 
 		var lineHit *engine.Result
@@ -5246,6 +5237,7 @@ func (m *Model) View() string {
 			leftChips = strings.Join([]string{
 				keyChip("Enter", "detail"),
 				keyChip("r", "repeater"),
+				keyChip("a", "anomalies"),
 				keyChip("t", "mark"),
 				keyChip("h/H", "hex"),
 				keyChip("d", "diff"),
@@ -5266,6 +5258,7 @@ func (m *Model) View() string {
 			}, "  ")
 		} else if m.state == StateDetail {
 			leftChips = strings.Join([]string{
+				keyChip("a", "anomalies"),
 				keyChip("t", "mark"),
 				keyChip("R", "bookmark"),
 				keyChip("d", "diff"),

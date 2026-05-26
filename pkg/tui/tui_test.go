@@ -265,6 +265,64 @@ func TestPersistedUIStateRoundTripPreservesMarkedHits(t *testing.T) {
 	}
 }
 
+func TestAnomalyFilterShowsOnlyAnomalousHits(t *testing.T) {
+	eng := engine.NewEngine(1, 1000, 0.01)
+	model := NewModel(eng, make(chan engine.Result), make(chan engine.LogEvent))
+
+	model.appendLog("ignored", &engine.Result{
+		URL:        "https://example.test/plain",
+		Method:     "GET",
+		Path:       "/plain",
+		StatusCode: 200,
+		Size:       10,
+	})
+	model.appendLog("ignored", &engine.Result{
+		URL:              "https://example.test/admin",
+		Method:           "GET",
+		Path:             "/admin",
+		StatusCode:       403,
+		Size:             11,
+		DiscoveredParams: []string{"debug"},
+	})
+
+	if got := model.setAnomalyFilterOnly(true); !strings.Contains(got, "Anomaly-only view enabled") {
+		t.Fatalf("setAnomalyFilterOnly(true) = %q", got)
+	}
+
+	indexes := model.visibleListIndexes()
+	if got := len(indexes); got != 1 {
+		t.Fatalf("len(visibleListIndexes) = %d, want 1", got)
+	}
+	if got := model.logLineHits[indexes[0]].Path; got != "/admin" {
+		t.Fatalf("visible anomaly path = %q, want /admin", got)
+	}
+}
+
+func TestPersistedUIStateRoundTripPreservesAnomalyFilter(t *testing.T) {
+	tmpDir := t.TempDir()
+	outputPath := filepath.Join(tmpDir, "results.jsonl")
+
+	eng := engine.NewEngine(1, 1000, 0.01)
+	model := NewModel(eng, make(chan engine.Result), make(chan engine.LogEvent))
+	model.ConfigureHistoryPersistence(outputPath, appendHistoryMode)
+	if got := model.setAnomalyFilterOnly(true); !strings.Contains(got, "Anomaly-only view enabled") && !strings.Contains(got, "No anomaly hits yet") {
+		t.Fatalf("setAnomalyFilterOnly(true) = %q", got)
+	}
+	if err := model.FlushPersistedUIState(); err != nil {
+		t.Fatalf("FlushPersistedUIState error = %v", err)
+	}
+
+	restored := NewModel(eng, make(chan engine.Result), make(chan engine.LogEvent))
+	restored.ConfigureHistoryPersistence(outputPath, appendHistoryMode)
+	if err := restored.LoadPersistedUIState(); err != nil {
+		t.Fatalf("LoadPersistedUIState error = %v", err)
+	}
+
+	if !restored.anomalyFilterOnly {
+		t.Fatal("expected anomaly filter mode to be restored")
+	}
+}
+
 func TestBuildCurlCommandFromRawRequest(t *testing.T) {
 	rawReq := "POST /submit?id=1 HTTP/1.1\r\nHost: example.test\r\nUser-Agent: DirFuzz/2.0\r\nContent-Type: application/json\r\n\r\n{\"ok\":true}"
 

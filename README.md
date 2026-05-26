@@ -22,6 +22,7 @@ DirFuzz is a memory-efficient, high-performance web security testing and directo
 - Path-level denylist regexes so authenticated or recursive scans can skip logout, delete, reset, and other unsafe routes.
 - Raw request/response capture with hex inspection and split-screen replay/diff workflows in the TUI.
 - In-TUI triage marking so interesting hits can be flagged during review and restored with append-mode history.
+- Anomaly-only filtering in the TUI so you can instantly surface eagle alerts, content drift, discovered params, bypasses, auth-matrix findings, timing-oracle hits, and manual marks.
 - Live system logs, a multi-tab metrics dashboard, log search/filter/export, and context-aware related logs in the TUI.
 - Lua plugins for transformers, matchers, mutators, and active proof-of-concept flows.
 - Swarm mode for authorized distributed execution. It is opt-in only and stays disabled unless `--swarm` is provided.
@@ -217,6 +218,7 @@ The diff view highlights deleted text in red on the left and added text in green
 - `--history-mode append` keeps a long-lived JSONL journal and restores prior TUI hits plus repeater state on startup.
 - In append mode, `:restart` keeps the visible history and repeater sessions in the TUI while the new run adds or updates findings.
 - Press `t` in the hit list or detail view to mark or unmark a finding as interesting; in append mode those marks are restored from the `.ui.json` sidecar.
+- Press `a` in the hit list or detail view to toggle anomaly-only mode; the same filter is also available as `:anomalies [on|off|toggle]` and is restored in append mode.
 - Eagle mode still reads the JSONL output as plain result lines, so append-mode history does not change the eagle file format.
 - The TUI includes a live system log stream, a bounded log buffer, log search/filter/export commands, and a split layout that can show logs under the main results list.
 - The dashboard includes performance, error, discovery, network, and timeline views with rolling histories.
@@ -245,6 +247,7 @@ The diff view highlights deleted text in red on the left and added text in green
 9. Export with `--no-tui -o results.jsonl` when you want a clean JSONL stream.
 10. Use `-o results.jsonl --history-mode append --save-raw` when you want to close and reopen the same investigation with restored hits and repeater tabs.
 11. While triaging results, press `t` on anything worth revisiting so your interesting findings survive the next reopen.
+12. Press `a` whenever you want the list to collapse down to anomaly-only findings instead of scrolling through the full result set.
 
 ## Monitoring and MCP
 
