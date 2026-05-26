@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -111,5 +113,85 @@ func TestRepeaterResultRoutesToMatchingSession(t *testing.T) {
 	}
 	if got := updatedModel.repeaterSessions[1].Request; got != "GET /two HTTP/1.1\nHost: example.test\n" {
 		t.Fatalf("second session request = %q, want unchanged second request", got)
+	}
+}
+
+func TestLoadPersistedResultsMergesLatestByIdentity(t *testing.T) {
+	eng := engine.NewEngine(1, 1000, 0.01)
+	model := NewModel(eng, make(chan engine.Result), make(chan engine.LogEvent))
+	model.ConfigureHistoryPersistence("results.jsonl", appendHistoryMode)
+
+	model.LoadPersistedResults([]engine.Result{
+		{URL: "https://example.test/admin", Method: "GET", Path: "/admin", StatusCode: 200, Size: 10},
+		{URL: "https://example.test/admin", Method: "GET", Path: "/admin", StatusCode: 403, Size: 11},
+		{URL: "https://example.test/login", Method: "GET", Path: "/login", StatusCode: 200, Size: 12},
+	})
+
+	if got := len(model.logLineHits); got != 2 {
+		t.Fatalf("len(logLineHits) = %d, want 2", got)
+	}
+	if model.logLineHits[0] == nil || model.logLineHits[0].StatusCode != 403 {
+		t.Fatalf("first merged hit status = %v, want 403", model.logLineHits[0])
+	}
+	if model.logLineHits[1] == nil || model.logLineHits[1].Path != "/login" {
+		t.Fatalf("second merged hit = %v, want /login", model.logLineHits[1])
+	}
+}
+
+func TestResetAfterRestartPreservingHistoryKeepsHitsAndRepeater(t *testing.T) {
+	eng := engine.NewEngine(1, 1000, 0.01)
+	model := NewModel(eng, make(chan engine.Result), make(chan engine.LogEvent))
+	model.ConfigureHistoryPersistence("results.jsonl", appendHistoryMode)
+	model.LoadPersistedResults([]engine.Result{
+		{URL: "https://example.test/admin", Method: "GET", Path: "/admin", StatusCode: 200, Size: 10},
+	})
+	model.openRepeaterSession("https://example.test", "GET /admin HTTP/1.1\nHost: example.test\n")
+
+	model.resetAfterRestartPreservingHistory()
+
+	if got := len(model.logLineHits); got != 1 {
+		t.Fatalf("len(logLineHits) after restart reset = %d, want 1", got)
+	}
+	if got := len(model.repeaterSessions); got != 1 {
+		t.Fatalf("len(repeaterSessions) after restart reset = %d, want 1", got)
+	}
+	if !model.startTime.After(time.Now().Add(-2 * time.Second)) {
+		t.Fatal("expected startTime to be refreshed during restart reset")
+	}
+}
+
+func TestPersistedUIStateRoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	outputPath := filepath.Join(tmpDir, "results.jsonl")
+
+	eng := engine.NewEngine(1, 1000, 0.01)
+	model := NewModel(eng, make(chan engine.Result), make(chan engine.LogEvent))
+	model.ConfigureHistoryPersistence(outputPath, appendHistoryMode)
+	model.openRepeaterSession("https://example.test", "GET /one HTTP/1.1\nHost: example.test\n")
+	model.repeaterSessions[0].Response = "HTTP/1.1 200 OK\n\nok"
+	model.repeaterSessions[0].LastStatus = 200
+	model.repeaterSessions[0].LastRaw = []byte{0x01, 0x02, 0x03}
+
+	if err := model.FlushPersistedUIState(); err != nil {
+		t.Fatalf("FlushPersistedUIState error = %v", err)
+	}
+	if _, err := os.Stat(outputPath + ".ui.json"); err != nil {
+		t.Fatalf("expected sidecar file to exist: %v", err)
+	}
+
+	restored := NewModel(eng, make(chan engine.Result), make(chan engine.LogEvent))
+	restored.ConfigureHistoryPersistence(outputPath, appendHistoryMode)
+	if err := restored.LoadPersistedUIState(); err != nil {
+		t.Fatalf("LoadPersistedUIState error = %v", err)
+	}
+
+	if got := len(restored.repeaterSessions); got != 1 {
+		t.Fatalf("len(restored.repeaterSessions) = %d, want 1", got)
+	}
+	if got := restored.repeaterSessions[0].Request; got != "GET /one HTTP/1.1\nHost: example.test\n" {
+		t.Fatalf("restored request = %q", got)
+	}
+	if got := string(restored.repeaterSessions[0].LastRaw); got != string([]byte{0x01, 0x02, 0x03}) {
+		t.Fatalf("restored LastRaw = %v", restored.repeaterSessions[0].LastRaw)
 	}
 }

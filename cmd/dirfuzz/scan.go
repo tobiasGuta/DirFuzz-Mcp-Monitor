@@ -237,6 +237,15 @@ func run(cfg cliConfig) error {
 		return nil
 	}
 
+	var priorResults []engine.Result
+	if cfg.HistoryMode == HistoryModeAppend && !cfg.NoTUI {
+		results, err := loadPersistedResults(cfg.OutputFile)
+		if err != nil {
+			return fmt.Errorf("loading persisted scan history from %s: %w", cfg.OutputFile, err)
+		}
+		priorResults = results
+	}
+
 	// ── 12. Output file ───────────────────────────────────────────────────────
 	var (
 		outFile *os.File
@@ -245,7 +254,7 @@ func run(cfg cliConfig) error {
 	)
 
 	if cfg.OutputFile != "" {
-		f, err := os.OpenFile(cfg.OutputFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+		f, err := os.OpenFile(cfg.OutputFile, outputFileOpenFlags(cfg.HistoryMode), 0o600)
 		if err != nil {
 			return fmt.Errorf("creating output file %s: %w", cfg.OutputFile, err)
 		}
@@ -331,7 +340,7 @@ func run(cfg cliConfig) error {
 		defer reportMu.Unlock()
 		return writeReportIfRequested(eng, cfg, reportResults)
 	}
-	if err := runTUI(eng, cfg, writeResult); err != nil {
+	if err := runTUI(eng, cfg, writeResult, priorResults); err != nil {
 		return err
 	}
 	reportMu.Lock()
@@ -391,7 +400,7 @@ func runPlain(eng *engine.Engine, cfg cliConfig, writeResult func(engine.Result)
 //   - File output always receives every result (never dropped).
 //   - The TUI channel is fed with a non-blocking send; if full, the result is
 //     counted in eng.TUIDropped and shown in the TUI header as ⚠ TUI-dropped:N.
-func runTUI(eng *engine.Engine, cfg cliConfig, writeResult func(engine.Result)) error {
+func runTUI(eng *engine.Engine, cfg cliConfig, writeResult func(engine.Result), priorResults []engine.Result) error {
 	tuiCh := make(chan engine.Result, tuiResultBufSize)
 	logEventCh := make(chan engine.LogEvent, 5000)
 
@@ -438,9 +447,19 @@ func runTUI(eng *engine.Engine, cfg cliConfig, writeResult func(engine.Result)) 
 	}()
 
 	model := tui.NewModel(eng, tuiCh, logEventCh)
+	model.ConfigureHistoryPersistence(cfg.OutputFile, cfg.HistoryMode)
+	if len(priorResults) > 0 {
+		model.LoadPersistedResults(priorResults)
+	}
+	if err := model.LoadPersistedUIState(); err != nil {
+		fmt.Fprintf(os.Stderr, "[!] Warning: failed to load UI state: %v\n", err)
+	}
 	p := tea.NewProgram(&model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI error: %w", err)
+	}
+	if err := model.FlushPersistedUIState(); err != nil {
+		fmt.Fprintf(os.Stderr, "[!] Warning: failed to save UI state: %v\n", err)
 	}
 
 	// TUI has exited, now gracefully shut down the engine.

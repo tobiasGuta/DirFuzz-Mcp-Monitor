@@ -69,6 +69,7 @@ func parseFlags() cliConfig {
 	// ── Output ───────────────────────────────────────────────────────────────
 	outputFormat := flag.String("of", "", "Output format: jsonl | csv | url  (default: jsonl when -o is set)")
 	outputFile := flag.String("o", "", "Write results to this file")
+	historyMode := flag.String("history-mode", HistoryModeOverwrite, "Output history mode: overwrite | append  (append requires -o with JSONL)")
 	reportFile := flag.String("report", "", "Write a Markdown/HTML summary report to this file")
 	headerAudit := flag.Bool(
 		"header-audit",
@@ -223,6 +224,7 @@ func parseFlags() cliConfig {
 
 		OutputFormat: outFmt,
 		OutputFile:   *outputFile,
+		HistoryMode:  normalizeHistoryMode(*historyMode),
 		ReportFile:   *reportFile,
 		HeaderAudit:  *headerAudit,
 		ReportFormat: *reportFormat,
@@ -294,6 +296,7 @@ func parseFlags() cliConfig {
 	if cfg.OutputFormat == "" && cfg.OutputFile != "" {
 		cfg.OutputFormat = engine.DefaultOutputFormat
 	}
+	cfg.HistoryMode = normalizeHistoryMode(cfg.HistoryMode)
 	if cfg.ReportFormat == "" && cfg.ReportFile != "" {
 		cfg.ReportFormat = inferReportFormat(cfg.ReportFile)
 	}
@@ -359,6 +362,10 @@ func parseFlags() cliConfig {
 		fmt.Fprintln(os.Stderr, "error: --simhash-cluster must be >= 1")
 		os.Exit(1)
 	}
+	if err := validateHistoryMode(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 	if cfg.H2Mode && cfg.ProxyFile != "" {
 		fmt.Fprintln(os.Stderr, "error: --h2 cannot be used together with --proxy")
 		os.Exit(1)
@@ -389,6 +396,7 @@ Quick examples:
   dirfuzz -u https://example.com -w wordlists/common.txt
   dirfuzz -u https://example.com -w wordlists/common.txt -e php,html -mc 200,301,403
   dirfuzz -u https://example.com -w wordlists/common.txt --no-tui -o results.jsonl
+  dirfuzz -u https://example.com -w wordlists/common.txt -o results.jsonl --history-mode append
   dirfuzz -u https://example.com -w wordlists/common.txt -r -depth 3 --calibrate
   dirfuzz -u https://example.com -w wordlists/common.txt --eagle prev.jsonl
   dirfuzz -u https://example.com -w wordlists/common.txt --swarm --swarm-provider=lambda

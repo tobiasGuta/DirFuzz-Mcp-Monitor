@@ -3,6 +3,12 @@
 This file tracks user-facing fixes and noteworthy updates. Keep future bugfix notes here instead of scattering them across other Markdown docs. Add new entries with the date they were made.
 
 ## 2026-05-26
+- Added `--history-mode overwrite|append` so `-o` can either start fresh or keep an append-only JSONL results journal.
+- Added persistent TUI restore for append mode, including loading prior hits into the visible list when reopening the same `-o` file.
+- Added repeater session persistence in a sidecar file such as `results.jsonl.ui.json`, including restored tabs, per-session history, and saved replay state.
+- Made append-mode TUI history merge repeated findings by endpoint identity so the visible list updates to the latest snapshot instead of duplicating every rediscovery.
+- Made `:restart` preserve visible history and repeater sessions in append mode while continuing to add or update findings from the new run.
+- Extended saved JSONL results with optional raw request/response byte fields so restored hits can keep working with hex, diff, and replay workflows when `--save-raw` is enabled.
 - Replaced the markdown-looking dashboard tables with modern card sections using bordered panels.
 - Improved the selected row styling in lists to use a left accent bar (`▸`) and colorful text instead of a full purple background.
 - Redesigned the footer into a compact layout with colored minimalist key chips and muted labels.

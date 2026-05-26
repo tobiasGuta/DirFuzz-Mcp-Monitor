@@ -52,6 +52,21 @@ This is the default behavior. No distributed mode is used unless you explicitly 
 ./dirfuzz -u https://example.com -w wordlists/common.txt --no-tui -o results.jsonl
 ```
 
+### Persistent JSONL + TUI history
+
+```bash
+./dirfuzz -u https://example.com -w wordlists/common.txt -o results.jsonl --history-mode append --save-raw
+```
+
+In `append` mode, DirFuzz keeps appending JSONL hits to the same results file, restores prior hits into the TUI on startup, and stores repeater/UI state in a sidecar file next to the JSONL.
+
+- `--history-mode overwrite` is the default behavior and starts a fresh output file.
+- `--history-mode append` requires `-o` and only works with JSONL output.
+- The scan journal stays in `results.jsonl`.
+- Repeater tabs and other TUI restore state are stored in `results.jsonl.ui.json`.
+- If the same endpoint is seen again later, the JSONL journal keeps the new line while the TUI shows the latest visible snapshot for that endpoint.
+- `--save-raw` is strongly recommended with append mode when you want restored hex, replay, and diff workflows after reopening the tool.
+
 ### Save raw request and response bytes
 
 ```bash
@@ -154,6 +169,7 @@ The TUI is where the new inspection features shine.
 - `r` sends a selected request to the repeater.
 - `[` and `]` switch between open repeater sessions.
 - `Ctrl+W` closes the active repeater session.
+- `Ctrl+P` and `Ctrl+N` move backward or forward through the history inside the current repeater session.
 - `L` toggles the live log panel.
 - `m` cycles the main view between the list, dashboard, and log panel modes.
 - `1` to `5` switch between the dashboard analytics tabs.
@@ -172,12 +188,16 @@ The list, dashboard, detail, hex, repeater, and log views all advertise their ow
 4. Select another hit and press `d` to compare them.
 5. Or press `r` to send a request to the repeater. Each request opens its own repeater session and stays available until you close it or exit the app.
 6. Inside the repeater, use `[` and `]` to move between sessions, then use `D` to diff the active replayed response against the saved reference.
+7. If you ran with `-o results.jsonl --history-mode append`, those repeater sessions are restored the next time you open DirFuzz with the same output file.
 
 The diff view highlights deleted text in red on the left and added text in green on the right.
 
 ## Feature Notes
 
 - `--save-raw` is what enables the hex viewer, replay comparison, and diff screens.
+- `--history-mode append` keeps a long-lived JSONL journal and restores prior TUI hits plus repeater state on startup.
+- In append mode, `:restart` keeps the visible history and repeater sessions in the TUI while the new run adds or updates findings.
+- Eagle mode still reads the JSONL output as plain result lines, so append-mode history does not change the eagle file format.
 - The TUI includes a live system log stream, a bounded log buffer, log search/filter/export commands, and a split layout that can show logs under the main results list.
 - The dashboard includes performance, error, discovery, network, and timeline views with rolling histories.
 - `--auth` is repeatable and accepts `role=Header: Value||Header2: Value2`.
@@ -201,6 +221,7 @@ The diff view highlights deleted text in red on the left and added text in green
 6. Use `--auth` when you want to compare the same path across multiple roles.
 7. Turn on `--swarm` only for authorized distributed execution.
 8. Export with `--no-tui -o results.jsonl` when you want a clean JSONL stream.
+9. Use `-o results.jsonl --history-mode append --save-raw` when you want to close and reopen the same investigation with restored hits and repeater tabs.
 
 ## Monitoring and MCP
 

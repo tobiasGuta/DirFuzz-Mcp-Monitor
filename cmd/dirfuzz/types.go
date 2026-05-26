@@ -63,6 +63,7 @@ type cliConfig struct {
 	// ── Output ───────────────────────────────────────────────────────────────
 	OutputFormat string // jsonl | csv | url
 	OutputFile   string
+	HistoryMode  string // overwrite | append
 	ReportFile   string
 	HeaderAudit  bool
 	ReportFormat string // markdown | html

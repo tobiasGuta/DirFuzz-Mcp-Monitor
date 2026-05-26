@@ -364,7 +364,7 @@ func writeSwarmOutput(cfg cliConfig, results []engine.Result) error {
 	)
 
 	if cfg.OutputFile != "" {
-		f, err := os.OpenFile(cfg.OutputFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+		f, err := os.OpenFile(cfg.OutputFile, outputFileOpenFlags(cfg.HistoryMode), 0o600)
 		if err != nil {
 			return fmt.Errorf("creating output file %s: %w", cfg.OutputFile, err)
 		}

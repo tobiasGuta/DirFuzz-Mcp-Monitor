@@ -297,10 +297,13 @@ func (m *Model) syncActiveRepeaterSessionFromUI() {
 	session.Sending = m.repeaterSending
 	session.LastStatus = m.repeaterLastStatus
 	session.LastDuration = m.repeaterLastDuration
-	session.LastRaw = append(session.LastRaw[:0], m.repeaterLastRaw...)
+	if len(m.repeaterLastRaw) > 0 || len(session.LastRaw) == 0 {
+		session.LastRaw = append(session.LastRaw[:0], m.repeaterLastRaw...)
+	}
 	session.CancelFn = m.repeaterCancelFn
 	session.History = append(session.History[:0], m.repeaterHistory...)
 	session.HistoryIdx = m.repeaterHistoryIdx
+	m.markUIStateDirty()
 }
 
 func (m *Model) loadRepeaterSessionIntoUI(idx int) {
@@ -355,6 +358,7 @@ func (m *Model) openRepeaterSession(target, rawReq string) {
 	m.state = StateRepeater
 	m.repeaterFocusReq = true
 	m.repeaterInput.Focus()
+	m.markUIStateDirty()
 }
 
 func (m *Model) cycleRepeaterSession(delta int) {
@@ -369,6 +373,7 @@ func (m *Model) cycleRepeaterSession(delta int) {
 		next = 0
 	}
 	m.loadRepeaterSessionIntoUI(next)
+	m.markUIStateDirty()
 }
 
 func (m *Model) closeActiveRepeaterSession() {
@@ -404,6 +409,7 @@ func (m *Model) closeActiveRepeaterSession() {
 		idx = len(m.repeaterSessions) - 1
 	}
 	m.loadRepeaterSessionIntoUI(idx)
+	m.markUIStateDirty()
 }
 
 func (m *Model) repeaterSessionStrip(width int) string {
@@ -2341,6 +2347,12 @@ type Model struct {
 	logsChanged    bool
 	showLogsPanel  bool
 	logPanelHeight int
+	historyMode    string
+	historyUIPath  string
+	uiStateDirty   bool
+	uiStateDirtyAt time.Time
+	logIndexByKey  map[string]int
+	hitIndexByKey  map[string]int
 
 	// Status messages
 	statusMessage string
@@ -2417,6 +2429,8 @@ func NewModel(eng *engine.Engine, resultsCh <-chan engine.Result, logEventsCh <-
 		logSearchTerm:            "",
 		logDetailsExpanded:       false,
 		logSelectedIndex:         0,
+		logIndexByKey:            make(map[string]int),
+		hitIndexByKey:            make(map[string]int),
 		errorPulseOn:             false,
 		dashboardTab:             DashboardTabPerformance,
 		dashboardRangeIdx:        int(DashboardRange30s),
@@ -2736,7 +2750,11 @@ func (m *Model) initCommands() {
 			if err := m.Engine.Restart(); err != nil {
 				return errorStyle.Render(fmt.Sprintf("Error: %v", err))
 			}
-			m.clearScanLogs()
+			if m.historyAppendEnabled() {
+				m.resetAfterRestartPreservingHistory()
+			} else {
+				m.clearScanLogs()
+			}
 			return statusStyle.Render("[*] Scan restarted")
 		}},
 		{Name: "config", Description: "Show current config", Args: "", Handler: func(m *Model, args string) string {
@@ -2873,6 +2891,7 @@ func (m *Model) initCommands() {
 			if outputFile != "" {
 				writeLine(fmt.Sprintf("OutputFile: %s", outputFile))
 			}
+			writeLine(fmt.Sprintf("HistoryMode: %s", m.historyMode))
 			writeLine(fmt.Sprintf("Timeout: %s", timeout))
 			writeLine(fmt.Sprintf("InsecureTLS: %v", insecure))
 			writeLine(fmt.Sprintf("SmartAPI: %v", smartAPI))
@@ -3466,6 +3485,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMessage = ""
 			m.statusExpiry = time.Time{}
 		}
+		if m.uiStateDirty && time.Since(m.uiStateDirtyAt) >= uiStateAutosaveDebounceDur {
+			_ = m.FlushPersistedUIState()
+		}
 		if m.errorPulseOn && !m.errorPulseUntil.IsZero() && time.Now().After(m.errorPulseUntil) {
 			m.errorPulseOn = false
 			m.logPanelDirty = true
@@ -3566,6 +3588,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else if result.IsEagleAlert {
 			m.appendLog(yellowStyle.Render(fmt.Sprintf("[EAGLE] %s changed: %d -> %d", result.Path, result.OldStatusCode, result.StatusCode)), nil)
+			if m.historyAppendEnabled() {
+				m.appendLog(formatResult(result), &result)
+			}
 		} else {
 			m.appendLog(formatResult(result), &result)
 		}
@@ -3651,6 +3676,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if idx == m.activeRepeaterIdx {
 				m.loadRepeaterSessionIntoUI(idx)
 			}
+			m.markUIStateDirty()
 		}
 
 	case tea.KeyMsg:
@@ -3731,6 +3757,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.repeaterInput.Blur()
 				}
+				m.markUIStateDirty()
 			case "esc":
 				m.syncActiveRepeaterSessionFromUI()
 				if m.repeaterCancelFn != nil {
@@ -4338,6 +4365,8 @@ func (m *Model) clearScanLogs() {
 	m.logLineHits = []*engine.Result{}
 	m.systemLogs.reset()
 	m.hits = []engine.Result{}
+	m.logIndexByKey = make(map[string]int)
+	m.hitIndexByKey = make(map[string]int)
 	m.viewport.SetContent("")
 	m.logViewport.SetContent("")
 	m.selectedIndex = 0
@@ -4442,6 +4471,10 @@ func (m *Model) exportLogsToFile(path string) error {
 
 func (m *Model) appendLog(text string, hit *engine.Result) {
 	if text == "" {
+		return
+	}
+	if hit != nil && m.historyAppendEnabled() {
+		m.upsertHistoryHit(text, *hit)
 		return
 	}
 

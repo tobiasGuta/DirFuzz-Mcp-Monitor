@@ -39,6 +39,7 @@ type scanProfile struct {
 	RTMax                time.Duration       `yaml:"rt_max" json:"rt_max"`
 	OutputFormat         string              `yaml:"output_format" json:"output_format"`
 	OutputFile           string              `yaml:"output_file" json:"output_file"`
+	HistoryMode          string              `yaml:"history_mode" json:"history_mode"`
 	ReportFile           string              `yaml:"report_file" json:"report_file"`
 	ReportFormat         string              `yaml:"report_format" json:"report_format"`
 	SaveRaw              bool                `yaml:"save_raw" json:"save_raw"`
@@ -187,6 +188,9 @@ func applyProfile(cfg *cliConfig, set map[string]bool) error {
 	}
 	if !set["o"] && p.OutputFile != "" {
 		cfg.OutputFile = p.OutputFile
+	}
+	if !set["history-mode"] && p.HistoryMode != "" {
+		cfg.HistoryMode = normalizeHistoryMode(p.HistoryMode)
 	}
 	if !set["report"] && p.ReportFile != "" {
 		cfg.ReportFile = p.ReportFile
