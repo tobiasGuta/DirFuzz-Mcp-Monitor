@@ -208,8 +208,7 @@ func buildSwarmWorkerConfig(cfg cliConfig) (engine.SwarmWorkerConfig, error) {
 		FourOhThreeBypass:    cfg.FourOhThreeBypass,
 		ProxyFile:            cfg.ProxyFile,
 		EagleFile:            cfg.EagleFile,
-		PluginMatch:          cfg.PluginMatch,
-		PluginMutate:         cfg.PluginMutate,
+
 	}
 	if cfg.Cookie != "" {
 		if workerCfg.Headers == nil {
@@ -526,22 +525,7 @@ func prepareControllerEngine(eng *engine.Engine, cfg cliConfig) error {
 		}
 	}
 
-	if cfg.PluginMatch != "" {
-		pm, err := engine.NewPluginMatcher(cfg.PluginMatch, cfg.Timeout)
-		if err != nil {
-			return fmt.Errorf("plugin-match: %w", err)
-		}
-		defer pm.Close()
-		eng.SetMatchPlugin(pm)
-	}
-	if cfg.PluginMutate != "" {
-		pm, err := engine.NewPluginMutator(cfg.PluginMutate, cfg.Timeout)
-		if err != nil {
-			return fmt.Errorf("plugin-mutate: %w", err)
-		}
-		defer pm.Close()
-		eng.SetMutatePlugin(pm)
-	}
+
 	if cfg.ProxyFile != "" {
 		if err := eng.LoadProxies(cfg.ProxyFile); err != nil {
 			return fmt.Errorf("loading proxy list: %w", err)

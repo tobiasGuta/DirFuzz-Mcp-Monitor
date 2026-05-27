@@ -73,8 +73,7 @@ type scanProfile struct {
 	Calibrate            bool                `yaml:"calibrate" json:"calibrate"`
 	ProxyFile            string              `yaml:"proxy_file" json:"proxy_file"`
 	ProxyOut             string              `yaml:"proxy_out" json:"proxy_out"`
-	PluginMatch          string              `yaml:"plugin_match" json:"plugin_match"`
-	PluginMutate         string              `yaml:"plugin_mutate" json:"plugin_mutate"`
+
 	NoTUI                bool                `yaml:"no_tui" json:"no_tui"`
 	Verbose              bool                `yaml:"verbose" json:"verbose"`
 	AntiBotFallback      *bool               `yaml:"anti_bot_fallback" json:"anti_bot_fallback"`
@@ -292,12 +291,7 @@ func applyProfile(cfg *cliConfig, set map[string]bool) error {
 	if !set["proxy-out"] && p.ProxyOut != "" {
 		cfg.ProxyOut = p.ProxyOut
 	}
-	if !set["plugin-match"] && p.PluginMatch != "" {
-		cfg.PluginMatch = p.PluginMatch
-	}
-	if !set["plugin-mutate"] && p.PluginMutate != "" {
-		cfg.PluginMutate = p.PluginMutate
-	}
+
 	if !set["no-tui"] && p.NoTUI {
 		cfg.NoTUI = true
 	}

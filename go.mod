@@ -12,19 +12,20 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/go-rod/rod v0.116.2
+	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
 	github.com/google/uuid v1.6.0
 	github.com/mark3labs/mcp-go v0.47.1
 	github.com/muesli/reflow v0.3.0
 	github.com/projectdiscovery/interactsh v1.3.1
 	github.com/projectdiscovery/notify v0.0.0
 	github.com/sergi/go-diff v1.3.2-0.20230802210424-5b0b94c5c0d3
-	github.com/yuin/gopher-lua v1.1.1
 	go.yaml.in/yaml/v3 v3.0.4
 	golang.org/x/net v0.48.0
 	golang.org/x/time v0.5.0
 )
 
 replace github.com/go-rod/rod => ./third_party/go-rod/rod
+
 replace github.com/projectdiscovery/notify => ./third_party/notify
 
 require (
@@ -85,7 +86,6 @@ require (
 	github.com/google/go-github/v30 v30.1.0 // indirect
 	github.com/google/go-querystring v1.1.0 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
-	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect

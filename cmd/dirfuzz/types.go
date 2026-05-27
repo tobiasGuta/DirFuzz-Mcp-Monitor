@@ -120,12 +120,6 @@ type cliConfig struct {
 	ProxyFile string // path to proxy list (SOCKS5 / HTTP, one per line)
 	ProxyOut  string // forward every hit to this proxy (Burp / ZAP)
 
-	// ── Lua plugins ──────────────────────────────────────────────────────────
-	PluginMatch  string // Lua script: match(r) → bool
-	PluginMutate string // Lua script: mutate(word, ctx) → []string
-	ActivePoC    string // Lua PoC directory or script using http_send()
-	Tags         string // Tags to filter Lua templates
-	Severity     string // Severities to filter Lua templates
 
 	// ── Nuclei Integration ───────────────────────────────────────────────────
 	Nuclei     bool

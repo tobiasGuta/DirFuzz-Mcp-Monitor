@@ -1,10 +1,7 @@
 package engine
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
-	"sync/atomic"
 	"time"
 
 	interactclient "github.com/projectdiscovery/interactsh/pkg/client"
@@ -49,30 +46,7 @@ func (e *Engine) SetInteractshClient(client *interactclient.Client, payload stri
 }
 
 func (e *Engine) handleOOBHit(interaction *interactserver.Interaction) {
-	if len(e.pocPlugins) == 0 {
-		return
-	}
-	
-	b, err := json.Marshal(interaction)
-	if err != nil {
-		return
-	}
-	var data map[string]interface{}
-	if err := json.Unmarshal(b, &data); err != nil {
-		return
-	}
-
-	for _, poc := range e.pocPlugins {
-		results := poc.OnOOBHit(context.Background(), data)
-		for _, r := range results {
-			select {
-			case e.Results <- r:
-				e.resultsCollected.Add(1)
-			default:
-				atomic.AddInt64(&e.TUIDropped, 1)
-			}
-		}
-	}
+	// Lua PoC plugins were removed, so we do nothing with OOB hits currently.
 }
 
 func (e *Engine) ensureInteractshClient() error {

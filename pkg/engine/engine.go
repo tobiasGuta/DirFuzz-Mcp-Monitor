@@ -494,13 +494,7 @@ type Engine struct {
 	isRunning          atomic.Bool
 	activeWorkers      atomic.Int64
 
-	// Transform plugin
-	transformPlugin *PluginRequestTransformer
 
-	// Active PoC plugin
-	pocPlugins    []*PluginPoC
-	pocFindings   map[*PluginPoC][]Result
-	pocFindingsMu sync.Mutex
 
 	// Worker management
 	workerLock   sync.Mutex
@@ -570,9 +564,7 @@ type Engine struct {
 	matchRe  atomic.Pointer[regexp.Regexp]
 	filterRe atomic.Pointer[regexp.Regexp]
 
-	// Lua plugins
-	matchPlugin  *PluginMatcher
-	mutatePlugin *PluginMutator
+
 
 	// Out-of-band interaction client for blind vulnerability detection.
 	InteractshClient      *interactclient.Client
@@ -1015,7 +1007,6 @@ func NewEngine(numWorkers int, expectedItems uint, falsePositiveRate float64) *E
 		bypassSem:         make(chan struct{}, 20),
 		replayCh:          replayCh,
 		workerStopCh:      make(chan struct{}),
-		pocFindings:       make(map[*PluginPoC][]Result),
 	}
 
 	e.scannerCtx.Store(&scannerContext{ctx: ctx, cancel: cancel})
@@ -1498,8 +1489,7 @@ func (e *Engine) SetFilterRegex(pattern string) error {
 	return nil
 }
 
-func (e *Engine) SetMatchPlugin(plugin *PluginMatcher)  { e.matchPlugin = plugin }
-func (e *Engine) SetMutatePlugin(plugin *PluginMutator) { e.mutatePlugin = plugin }
+
 
 func (e *Engine) UpdateUserAgent(ua string) {
 	e.Config.Lock()
@@ -1913,21 +1903,7 @@ func (e *Engine) KickoffScanner(path string, startLine int64) {
 	if sc != nil {
 		runID := atomic.LoadInt64(&e.RunID)
 		
-		// Run pre_scan for all active plugins.
-		if len(e.pocPlugins) > 0 {
-			var activePlugins []*PluginPoC
-			target := e.BaseURL()
-			for _, poc := range e.pocPlugins {
-				skip, extraPaths := poc.PreScan(sc.ctx, target, target, path)
-				if !skip {
-					activePlugins = append(activePlugins, poc)
-					for _, p := range extraPaths {
-						e.Submit(Job{Path: p, Method: "GET", RunID: runID})
-					}
-				}
-			}
-			e.pocPlugins = activePlugins
-		}
+
 
 		if e.shouldRunPassiveHarvest() {
 			e.AddScanner()
@@ -3121,65 +3097,12 @@ func (e *Engine) cleanupJob(shouldExit bool) bool {
 
 // invokeOnFindingHook calls the match plugin's optional on_finding(result) hook.
 // Returns (dropped, labels, confidence). Dropped indicates the plugin requested
-// the result not be emitted to the results channel.
-func (e *Engine) invokeOnFindingHook(ctx context.Context, res *Result) (bool, []string, string) {
-	if e.matchPlugin == nil {
-		return false, nil, ""
-	}
-	// Build values to pass into the plugin.
-	var timeout time.Duration
-	var proxyOut string
-	var insecure bool
-	var allowPrivate bool
-
-	if snap := e.configSnap.Load(); snap != nil {
-		timeout = snap.Timeout
-		proxyOut = snap.ProxyOut
-	}
-	e.Config.RLock()
-	insecure = e.Config.Insecure
-	allowPrivate = e.Config.AllowPrivateTargets
-	e.Config.RUnlock()
-
-	dropped, labels, confidence := e.matchPlugin.OnFinding(ctx, timeout, proxyOut, insecure, allowPrivate, res)
-	return dropped, labels, confidence
-}
-
-// handleResultWithContext attempts to call any on_finding hook and send the
-// result to the results channel. Returns true if the context was cancelled
-// before the result could be emitted (caller should exit).
+// handleResultWithContext attempts to send the result to the results channel.
+// Returns true if the context was cancelled before the result could be emitted
+// (caller should exit).
 func (e *Engine) handleResultWithContext(ctx context.Context, res Result) bool {
-	if dropped, labels, conf := e.invokeOnFindingHook(ctx, &res); dropped {
-		// Plugin suppressed emission; treat as normal (not interrupted).
-		return false
-	} else {
-		if len(labels) > 0 {
-			res.Labels = append(res.Labels, labels...)
-		}
-		if conf != "" {
-			res.Confidence = conf
-		}
-	}
 
-	if len(e.pocPlugins) > 0 {
-		for _, poc := range e.pocPlugins {
-			go func(p *PluginPoC, r Result) {
-				pocResults := p.Execute(ctx, &r)
-				for _, pocRes := range pocResults {
-					select {
-					case e.Results <- pocRes:
-						e.resultsCollected.Add(1)
-					case <-ctx.Done():
-					}
-				}
-				if len(pocResults) > 0 {
-					e.pocFindingsMu.Lock()
-					e.pocFindings[p] = append(e.pocFindings[p], pocResults...)
-					e.pocFindingsMu.Unlock()
-				}
-			}(poc, res)
-		}
-	}
+
 
 	e.SubmitToNuclei(res.URL)
 
@@ -3192,40 +3115,11 @@ func (e *Engine) handleResultWithContext(ctx context.Context, res Result) bool {
 	}
 }
 
-// handleResultNonBlocking calls on_finding and attempts a non-blocking send.
+// handleResultNonBlocking attempts a non-blocking send.
 // If the results channel is full the result is dropped and TUIDropped is incremented.
 func (e *Engine) handleResultNonBlocking(res Result) {
-	if dropped, labels, conf := e.invokeOnFindingHook(context.Background(), &res); dropped {
-		return
-	} else {
-		if len(labels) > 0 {
-			res.Labels = append(res.Labels, labels...)
-		}
-		if conf != "" {
-			res.Confidence = conf
-		}
-	}
 
-	if len(e.pocPlugins) > 0 {
-		for _, poc := range e.pocPlugins {
-			go func(p *PluginPoC, r Result) {
-				pocResults := p.Execute(context.Background(), &r)
-				for _, pocRes := range pocResults {
-					select {
-					case e.Results <- pocRes:
-						e.resultsCollected.Add(1)
-					default:
-						atomic.AddInt64(&e.TUIDropped, 1)
-					}
-				}
-				if len(pocResults) > 0 {
-					e.pocFindingsMu.Lock()
-					e.pocFindings[p] = append(e.pocFindings[p], pocResults...)
-					e.pocFindingsMu.Unlock()
-				}
-			}(poc, res)
-		}
-	}
+
 
 	e.SubmitToNuclei(res.URL)
 
@@ -3520,40 +3414,7 @@ func (e *Engine) worker(id int) {
 				pluginMethod = "GET"
 			}
 
-			if e.transformPlugin != nil {
-				// Inject hardcoded fields into the map so Lua can transform them
-				reqHeaders["Host"] = reqHost
-				reqHeaders["User-Agent"] = ua
 
-				out := e.transformPlugin.Transform(RequestTransformInput{
-					Method:  pluginMethod,
-					Path:    reqPath,
-					Headers: reqHeaders,
-					Body:    pluginBody,
-				})
-				if job.Method != "" || out.Method != "GET" {
-					job.Method = out.Method
-				}
-				reqPath = out.Path
-				reqHeaders = out.Headers
-				pluginBody = out.Body
-
-				// Extract them back out so buildRequest uses the transformed values
-				if h, ok := reqHeaders["Host"]; ok {
-					reqHost = h
-					delete(reqHeaders, "Host")
-				} else if h, ok := reqHeaders["host"]; ok {
-					reqHost = h
-					delete(reqHeaders, "host")
-				}
-				if u, ok := reqHeaders["User-Agent"]; ok {
-					ua = u
-					delete(reqHeaders, "User-Agent")
-				} else if u, ok := reqHeaders["user-agent"]; ok {
-					ua = u
-					delete(reqHeaders, "user-agent")
-				}
-			}
 
 			var reqHdrKeys []string
 			for k := range reqHeaders {
@@ -3979,33 +3840,7 @@ func (e *Engine) worker(id int) {
 			}
 			e.eagleLock.RUnlock()
 
-			// Lua plugin match. Allocate the response body string only when a
-			// match plugin is configured to avoid unnecessary large allocations.
-			var bodyStr string
-			if e.matchPlugin != nil && bypassTechniqueLabel == "" {
-				bodyStr = string(resp.Body)
-			}
-			if e.matchPlugin != nil && bypassTechniqueLabel == "" {
-				matched, labels, confidence := e.matchPlugin.Match(resp.StatusCode, bodySize, wordCount, lineCount, bodyStr, contentType, requestTimeout)
-				if !matched {
-					if e.cleanupJob(shouldExit) {
-						return
-					}
-					continue
-				}
-				// Enrich result with any metadata provided by the matcher plugin.
-				if len(labels) > 0 {
-					result.Labels = labels
-				}
-				if confidence != "" {
-					result.Confidence = confidence
-				}
 
-				if e.cleanupJob(shouldExit) {
-					return
-				}
-				continue
-			}
 
 			if timingOracleHit {
 				result.Labels = append(result.Labels, "TIMING-ORACLE")
@@ -4394,27 +4229,7 @@ func (e *Engine) Shutdown() {
 			return true
 		})
 
-		// Run post_scan hooks before closing the result channel
-		if len(e.pocPlugins) > 0 {
-			durationMs := time.Since(time.Unix(0, e.startedAtUnix.Load())).Milliseconds()
-			totalFound := int(e.resultsCollected.Load())
-			e.pocFindingsMu.Lock()
-			for _, poc := range e.pocPlugins {
-				findings := e.pocFindings[poc]
-				if len(findings) > 0 {
-					dedup := poc.PostScan(context.Background(), findings, totalFound, durationMs)
-					for _, r := range dedup {
-						select {
-						case e.Results <- r:
-							e.resultsCollected.Add(1)
-						default:
-							atomic.AddInt64(&e.TUIDropped, 1)
-						}
-					}
-				}
-			}
-			e.pocFindingsMu.Unlock()
-		}
+
 
 		// Cleanly shut down Nuclei integration
 		e.stopNuclei()
@@ -4473,12 +4288,4 @@ func (e *Engine) DumpMeta() EngineConfigDump {
 	}
 }
 
-// SetTransformPlugin sets the Lua request transformer plugin.
-func (e *Engine) SetTransformPlugin(pt *PluginRequestTransformer) {
-	e.transformPlugin = pt
-}
 
-// SetPoCPlugins sets the active Lua PoC plugins.
-func (e *Engine) SetPoCPlugins(plugins []*PluginPoC) {
-	e.pocPlugins = plugins
-}

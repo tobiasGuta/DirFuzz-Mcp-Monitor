@@ -137,27 +137,6 @@ func parseFlags() cliConfig {
 	proxyOut := flag.String("proxy-out", "",
 		"Forward every hit to this proxy for manual review  (e.g. http://127.0.0.1:8080)")
 
-	// ── Lua plugins ──────────────────────────────────────────────────────────
-	pluginMatch := flag.String(
-		"plugin-match",
-		"",
-		"Lua plugin providing match(r) for custom hit logic",
-	)
-
-	pluginMutate := flag.String(
-		"plugin-mutate",
-		"",
-		"Lua plugin providing mutate(word) for custom payload generation",
-	)
-
-	activePoC := flag.String(
-		"active-poc",
-		"",
-		"Lua PoC directory or script with active HTTP requests via http_send()",
-	)
-
-	tags := flag.String("tags", "", "Tags to filter Lua templates (comma-separated, OR evaluated)")
-	severity := flag.String("severity", "", "Severities to filter Lua templates (comma-separated, OR evaluated)")
 
 	// ── Nuclei Integration ───────────────────────────────────────────────────
 	nuclei := flag.Bool("nuclei", false, "Enable Nuclei integration to scan discovered URLs")
@@ -280,11 +259,7 @@ func parseFlags() cliConfig {
 		ProxyFile: *proxyFile,
 		ProxyOut:  *proxyOut,
 
-		PluginMatch:  *pluginMatch,
-		PluginMutate: *pluginMutate,
-		ActivePoC:    *activePoC,
-		Tags:         *tags,
-		Severity:     *severity,
+
 		Nuclei:       *nuclei,
 		NucleiArgs:   *nucleiArgs,
 
@@ -333,7 +308,7 @@ func parseFlags() cliConfig {
 		cfg.SwarmWorker = true
 	}
 
-	if cfg.ActivePoC == "" && !cfg.SwarmWorker {
+	if !cfg.SwarmWorker {
 		if cfg.Target == "" {
 			fmt.Fprintln(os.Stderr, "error: -u <target> is required")
 			fmt.Fprintln(os.Stderr)

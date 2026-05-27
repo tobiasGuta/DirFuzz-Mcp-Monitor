@@ -75,8 +75,6 @@ type SwarmWorkerConfig struct {
 	FourOhThreeBypass    bool                `json:"four_oh_three_bypass,omitempty"`
 	ProxyFile            string              `json:"proxy_file,omitempty"`
 	EagleFile            string              `json:"eagle_file,omitempty"`
-	PluginMatch          string              `json:"plugin_match,omitempty"`
-	PluginMutate         string              `json:"plugin_mutate,omitempty"`
 }
 
 // SwarmWorkerRequest describes a single worker invocation.
