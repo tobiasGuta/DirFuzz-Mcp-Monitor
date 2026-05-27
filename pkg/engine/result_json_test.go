@@ -76,6 +76,9 @@ func TestLoadPreviousScanAcceptsExtendedResultJSON(t *testing.T) {
 	if prev.BodyHash == "" {
 		t.Fatal("expected previous scan body hash to be populated")
 	}
+	if got := string(prev.ResponseBytes); got != "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n\r\nnope drift" {
+		t.Fatalf("PreviousState response bytes = %q", got)
+	}
 }
 
 func TestApplyEagleDriftFlagsNewEndpoints(t *testing.T) {
@@ -96,10 +99,11 @@ func TestApplyEagleDriftFlagsStatusSizeAndContentChanges(t *testing.T) {
 	eng := NewEngine(1, 1000, 0.01)
 	eng.PreviousState = map[string]previousScanEntry{
 		previousScanKey("GET", "/drift"): {
-			StatusCode: 401,
-			Size:       10,
-			Words:      2,
-			BodyHash:   eagleBodyHash([]byte("old body")),
+			StatusCode:    401,
+			Size:          10,
+			Words:         2,
+			BodyHash:      eagleBodyHash([]byte("old body")),
+			ResponseBytes: []byte("HTTP/1.1 401 Unauthorized\r\n\r\nold"),
 		},
 	}
 	res := Result{Path: "/drift", Method: "GET", StatusCode: 200, Size: 25, Words: 4}
@@ -117,6 +121,9 @@ func TestApplyEagleDriftFlagsStatusSizeAndContentChanges(t *testing.T) {
 	}
 	if !res.ContentDrift || res.OldWords != 2 {
 		t.Fatalf("content drift = %v old words=%d, want true/2", res.ContentDrift, res.OldWords)
+	}
+	if got := string(res.PreviousResponseBytes); got != "HTTP/1.1 401 Unauthorized\r\n\r\nold" {
+		t.Fatalf("previous response bytes = %q", got)
 	}
 }
 

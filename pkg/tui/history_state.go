@@ -130,7 +130,9 @@ func (m *Model) trimOldestHitEntry() {
 
 func (m *Model) upsertHistoryHit(text string, hit engine.Result) {
 	m.applyMarkedHit(&hit)
-	text = formatResult(hit)
+	if text == "" {
+		text = formatResult(hit)
+	}
 	key := historyIdentityKey(hit)
 	if logIdx, ok := m.logIndexByKey[key]; ok && logIdx >= 0 && logIdx < len(m.logs) {
 		hitCopy := hit

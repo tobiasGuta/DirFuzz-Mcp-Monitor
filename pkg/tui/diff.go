@@ -22,6 +22,7 @@ var (
 	diffInsertStyle  = lipgloss.NewStyle().Foreground(DraculaGreen).Bold(true)
 	diffHeaderStyle  = lipgloss.NewStyle().Foreground(DraculaCyan).Bold(true)
 	diffWarningStyle = lipgloss.NewStyle().Foreground(DraculaOrange).Bold(true)
+	diffContextStyle = lipgloss.NewStyle().Foreground(DraculaComment).Italic(true)
 )
 
 func (m *Model) selectedDiffSample() *DiffSample {
@@ -75,6 +76,30 @@ func diffSampleFromResult(hit *engine.Result) *DiffSample {
 	}
 }
 
+func eagleBaselineDiffSample(hit *engine.Result) *DiffSample {
+	if hit == nil || len(hit.PreviousResponseBytes) == 0 {
+		return nil
+	}
+
+	title := hit.Path
+	if title == "" {
+		title = hit.URL
+	}
+	if title == "" {
+		title = "Baseline response"
+	}
+	if hit.OldStatusCode > 0 {
+		title = fmt.Sprintf("%s [baseline %d]", title, hit.OldStatusCode)
+	} else {
+		title = fmt.Sprintf("%s [baseline]", title)
+	}
+
+	return &DiffSample{
+		Title: title,
+		Bytes: append([]byte(nil), hit.PreviousResponseBytes...),
+	}
+}
+
 func (m *Model) saveDiffReferenceFromSelected() bool {
 	sample := m.selectedDiffSample()
 	if sample == nil {
@@ -104,19 +129,24 @@ func (m *Model) saveDiffReferenceFromReplay() bool {
 }
 
 func (m *Model) openDiffViewFromSelected() bool {
-	ref := m.diffReference
 	cur := m.selectedDiffSample()
-	if ref == nil {
-		m.statusMessage = errorStyle.Render("No reference saved yet. Press 'R' on a hit first.")
-		m.statusExpiry = timeNowPlus(3)
-		return false
-	}
 	if cur == nil {
 		m.statusMessage = errorStyle.Render("No current response available for diff.")
 		m.statusExpiry = timeNowPlus(3)
 		return false
 	}
 
+	ref := m.diffReference
+	if ref == nil && m.selectedIndex >= 0 && m.selectedIndex < len(m.logLineHits) {
+		ref = eagleBaselineDiffSample(m.logLineHits[m.selectedIndex])
+	}
+	if ref == nil {
+		m.statusMessage = errorStyle.Render("No reference saved yet. Press 'R' on a hit first, or use an Eagle hit with a saved baseline.")
+		m.statusExpiry = timeNowPlus(3)
+		return false
+	}
+
+	m.diffReference = ref
 	m.diffCurrent = cur
 	m.state = StateDiffView
 	m.updateDiffView()
@@ -150,21 +180,52 @@ func (m *Model) updateDiffView() {
 		return
 	}
 
-	left, right := buildSplitDiff(m.diffReference.Bytes, m.diffCurrent.Bytes)
+	left, right := buildSplitDiff(m.diffReference.Bytes, m.diffCurrent.Bytes, m.diffCompactOnly)
 	m.diffLeftViewport.SetContent(left)
 	m.diffRightViewport.SetContent(right)
 	m.diffLeftViewport.GotoTop()
 	m.diffRightViewport.GotoTop()
 }
 
-func buildSplitDiff(leftRaw, rightRaw []byte) (string, string) {
+func (m *Model) toggleDiffMode() string {
+	m.diffCompactOnly = !m.diffCompactOnly
+	m.updateDiffView()
+	if m.diffCompactOnly {
+		return "Diff mode: compact changed-only"
+	}
+	return "Diff mode: full context"
+}
+
+func buildSplitDiff(leftRaw, rightRaw []byte, compactOnly bool) (string, string) {
 	leftText := normalizeDiffBlob(leftRaw)
 	rightText := normalizeDiffBlob(rightRaw)
 
 	dmp := diffmatchpatch.New()
 	dmp.DiffTimeout = 0
-	diffs := dmp.DiffMain(leftText, rightText, true)
+	leftChars, rightChars, lineArray := dmp.DiffLinesToChars(leftText, rightText)
+	diffs := dmp.DiffMain(leftChars, rightChars, false)
 	dmp.DiffCleanupSemantic(diffs)
+	diffs = dmp.DiffCharsToLines(diffs, lineArray)
+
+	hasChanges := false
+	for _, diff := range diffs {
+		if diff.Type != diffmatchpatch.DiffEqual {
+			hasChanges = true
+			break
+		}
+	}
+	if !hasChanges {
+		if strings.TrimSpace(leftText) == "" && strings.TrimSpace(rightText) == "" {
+			msg := diffContextStyle.Render("No response content to diff.")
+			return msg, msg
+		}
+		msg := diffContextStyle.Render("Responses are identical.")
+		return msg + "\n\n" + diffEqualStyle.Render(leftText), msg + "\n\n" + diffEqualStyle.Render(rightText)
+	}
+
+	if !compactOnly {
+		return renderFullSplitDiff(diffs)
+	}
 
 	var leftOut strings.Builder
 	var rightOut strings.Builder
@@ -172,8 +233,13 @@ func buildSplitDiff(leftRaw, rightRaw []byte) (string, string) {
 	for _, diff := range diffs {
 		switch diff.Type {
 		case diffmatchpatch.DiffEqual:
-			leftOut.WriteString(diffEqualStyle.Render(diff.Text))
-			rightOut.WriteString(diffEqualStyle.Render(diff.Text))
+			placeholder := collapsedEqualPlaceholder(diff.Text)
+			if placeholder == "" {
+				continue
+			}
+			rendered := diffContextStyle.Render(placeholder)
+			leftOut.WriteString(rendered)
+			rightOut.WriteString(rendered)
 		case diffmatchpatch.DiffDelete:
 			leftOut.WriteString(diffDeleteStyle.Render(diff.Text))
 		case diffmatchpatch.DiffInsert:
@@ -182,6 +248,49 @@ func buildSplitDiff(leftRaw, rightRaw []byte) (string, string) {
 	}
 
 	return leftOut.String(), rightOut.String()
+}
+
+func renderFullSplitDiff(diffs []diffmatchpatch.Diff) (string, string) {
+	var leftOut strings.Builder
+	var rightOut strings.Builder
+
+	for _, diff := range diffs {
+		switch diff.Type {
+		case diffmatchpatch.DiffEqual:
+			rendered := diffEqualStyle.Render(diff.Text)
+			leftOut.WriteString(rendered)
+			rightOut.WriteString(rendered)
+		case diffmatchpatch.DiffDelete:
+			leftOut.WriteString(diffDeleteStyle.Render(diff.Text))
+		case diffmatchpatch.DiffInsert:
+			rightOut.WriteString(diffInsertStyle.Render(diff.Text))
+		}
+	}
+
+	return leftOut.String(), rightOut.String()
+}
+
+func collapsedEqualPlaceholder(text string) string {
+	lineCount := countDiffLines(text)
+	switch {
+	case lineCount <= 0:
+		return ""
+	case lineCount == 1:
+		return "... 1 unchanged line ...\n"
+	default:
+		return fmt.Sprintf("... %d unchanged lines ...\n", lineCount)
+	}
+}
+
+func countDiffLines(text string) int {
+	if text == "" {
+		return 0
+	}
+	count := strings.Count(text, "\n")
+	if !strings.HasSuffix(text, "\n") {
+		count++
+	}
+	return count
 }
 
 func normalizeDiffBlob(raw []byte) string {

@@ -2326,8 +2326,9 @@ type Model struct {
 	hexTarget        HexViewTarget
 
 	// Diff view state
-	diffReference *DiffSample
-	diffCurrent   *DiffSample
+	diffReference   *DiffSample
+	diffCurrent     *DiffSample
+	diffCompactOnly bool
 
 	// Telemetry display
 	startTime       time.Time
@@ -2409,6 +2410,7 @@ func NewModel(eng *engine.Engine, resultsCh <-chan engine.Result, logEventsCh <-
 		hexViewport:       hexVp,
 		diffLeftViewport:  diffLeftVp,
 		diffRightViewport: diffRightVp,
+		diffCompactOnly:   true,
 		cmdViewport:       cmdVp,
 		textInput:         ti,
 		logs:              []string{},
@@ -3649,10 +3651,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.appendLog(orangeStyle.Render(fmt.Sprintf("[!] %s: %s", result.Path, msgStr)), nil)
 			}
 		} else if result.IsEagleAlert {
-			m.appendLog(yellowStyle.Render(fmt.Sprintf("[EAGLE] %s %s", result.Path, result.EagleSummary())), nil)
-			if m.historyAppendEnabled() {
-				m.appendLog(formatResult(result), &result)
-			}
+			m.appendLog(yellowStyle.Render(fmt.Sprintf("[EAGLE] %s %s", result.Path, result.EagleSummary())), &result)
 		} else {
 			m.appendLog(formatResult(result), &result)
 		}
@@ -4216,6 +4215,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 			}
+		case "c":
+			if m.state == StateDiffView {
+				m.statusMessage = statusStyle.Render(m.toggleDiffMode())
+				m.statusExpiry = time.Now().Add(3 * time.Second)
+				return m, nil
+			}
 		case "h":
 			if m.state == StateList || m.state == StateDetail {
 				if m.openHexView(HexViewRequest) {
@@ -4611,13 +4616,15 @@ func (m *Model) exportLogsToFile(path string) error {
 }
 
 func (m *Model) appendLog(text string, hit *engine.Result) {
-	if text == "" {
+	if text == "" && hit == nil {
 		return
 	}
 	if hit != nil {
 		hitCopy := *hit
 		m.applyMarkedHit(&hitCopy)
-		text = formatResult(hitCopy)
+		if text == "" {
+			text = formatResult(hitCopy)
+		}
 		hit = &hitCopy
 	}
 	if hit != nil && m.historyAppendEnabled() {
@@ -5279,6 +5286,7 @@ func (m *Model) View() string {
 			}, "  ")
 		} else if m.state == StateDiffView {
 			leftChips = strings.Join([]string{
+				keyChip("c", "compact/full"),
 				keyChip("L", "logs"),
 				keyChip("Esc/q", "back"),
 				keyChip("Up/Down", "scroll"),

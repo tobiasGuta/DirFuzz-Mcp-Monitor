@@ -298,6 +298,78 @@ func TestAnomalyFilterShowsOnlyAnomalousHits(t *testing.T) {
 	}
 }
 
+func TestOpenDiffViewFromSelectedUsesEagleBaselineWhenNoReferenceSaved(t *testing.T) {
+	eng := engine.NewEngine(1, 1000, 0.01)
+	model := NewModel(eng, make(chan engine.Result), make(chan engine.LogEvent))
+
+	model.appendLog("[EAGLE] /api/user status 401 -> 200", &engine.Result{
+		URL:                   "https://example.test/api/user",
+		Method:                "GET",
+		Path:                  "/api/user",
+		StatusCode:            200,
+		OldStatusCode:         401,
+		IsEagleAlert:          true,
+		ResponseBytes:         []byte("HTTP/1.1 200 OK\r\n\r\nnew body"),
+		PreviousResponseBytes: []byte("HTTP/1.1 401 Unauthorized\r\n\r\nold body"),
+	})
+
+	if ok := model.openDiffViewFromSelected(); !ok {
+		t.Fatal("expected eagle diff view to open without a saved manual reference")
+	}
+	if got := model.logs[0]; got != "[EAGLE] /api/user status 401 -> 200" {
+		t.Fatalf("log line = %q, want preserved eagle summary", got)
+	}
+	if model.state != StateDiffView {
+		t.Fatalf("state = %v, want StateDiffView", model.state)
+	}
+	if model.diffReference == nil || model.diffCurrent == nil {
+		t.Fatal("expected diff samples to be populated")
+	}
+	if got := string(model.diffReference.Bytes); got != "HTTP/1.1 401 Unauthorized\r\n\r\nold body" {
+		t.Fatalf("reference bytes = %q", got)
+	}
+	if got := string(model.diffCurrent.Bytes); got != "HTTP/1.1 200 OK\r\n\r\nnew body" {
+		t.Fatalf("current bytes = %q", got)
+	}
+	if got := model.diffReference.Title; !strings.Contains(got, "baseline 401") {
+		t.Fatalf("reference title = %q, want baseline status", got)
+	}
+}
+
+func TestToggleDiffModeFlipsCompactFlag(t *testing.T) {
+	eng := engine.NewEngine(1, 1000, 0.01)
+	model := NewModel(eng, make(chan engine.Result), make(chan engine.LogEvent))
+	model.diffReference = &DiffSample{Title: "ref", Bytes: []byte("same\nold\n")}
+	model.diffCurrent = &DiffSample{Title: "cur", Bytes: []byte("same\nnew\n")}
+	model.state = StateDiffView
+	model.updateDiffView()
+
+	if !model.diffCompactOnly {
+		t.Fatal("expected diff view to start in compact mode")
+	}
+	msg := model.toggleDiffMode()
+	if model.diffCompactOnly {
+		t.Fatal("expected compact mode to turn off")
+	}
+	if !strings.Contains(msg, "full context") {
+		t.Fatalf("toggleDiffMode() = %q, want full context message", msg)
+	}
+	if got := model.diffLeftViewport.View(); !strings.Contains(got, "same") {
+		t.Fatalf("full diff should show unchanged context, got %q", got)
+	}
+
+	msg = model.toggleDiffMode()
+	if !model.diffCompactOnly {
+		t.Fatal("expected compact mode to turn back on")
+	}
+	if !strings.Contains(msg, "compact changed-only") {
+		t.Fatalf("second toggleDiffMode() = %q, want compact message", msg)
+	}
+	if got := model.diffLeftViewport.View(); strings.Contains(got, "same") {
+		t.Fatalf("compact diff should hide unchanged context, got %q", got)
+	}
+}
+
 func TestPersistedUIStateRoundTripPreservesAnomalyFilter(t *testing.T) {
 	tmpDir := t.TempDir()
 	outputPath := filepath.Join(tmpDir, "results.jsonl")
