@@ -2,6 +2,16 @@
 
 This file tracks user-facing fixes and noteworthy updates. Keep future bugfix notes here instead of scattering them across other Markdown docs. Add new entries with the date they were made.
 
+## 2026-05-27
+- Overhauled the Lua Plugin Engine, adding `pre_scan(ctx)` and `post_scan(summary)` hooks for dynamic filtering and deduplication.
+- Integrated a standard Lua library with helpers for JSON, Base64, URL encoding, regex, and Interactsh OOB URLs.
+- Replaced the heavy Lua `is_target()` execution with a zero-overhead `-- @name` metadata parsing system.
+- Added a native Nuclei Orchestrator Subprocess. When `--nuclei` is passed, DirFuzz streams discovered URLs directly into Nuclei's `stdin` via a dedicated subprocess.
+- Parsed Nuclei's JSONL `stdout` in real-time, mapping the template findings natively into DirFuzz's TUI and output log with the `NUCLEI` label.
+- Implemented concurrent deduplication (`sync.Map`) so Nuclei never double-scans the same endpoint.
+- Bulletproofed the Interactsh OOB client initialization to safely degrade and silently disable OOB-dependent Lua scripts if DNS resolution is blocked by a VPN or firewall.
+- Refactored `plugins/spring4shell.lua` and `plugins/log4j.lua` to enforce safe, non-destructive Impact Proof workflows that do not drop files on the target.
+
 ## 2026-05-26
 - Added anomaly-only TUI filtering with `a` and `:anomalies [on|off|toggle]` so the visible hit list can collapse down to eagle alerts, drift, discovered params, bypasses, auth-matrix findings, timing-oracle hits, and manual marks.
 - Added in-TUI triage marking so selected hits can be toggled as interesting with `t`, surfaced visually in the list/detail views, and restored from append-mode UI state on reopen.

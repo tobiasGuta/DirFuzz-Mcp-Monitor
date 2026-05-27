@@ -123,7 +123,13 @@ type cliConfig struct {
 	// ── Lua plugins ──────────────────────────────────────────────────────────
 	PluginMatch  string // Lua script: match(r) → bool
 	PluginMutate string // Lua script: mutate(word, ctx) → []string
-	ActivePoC    string // Lua PoC script using http_send()
+	ActivePoC    string // Lua PoC directory or script using http_send()
+	Tags         string // Tags to filter Lua templates
+	Severity     string // Severities to filter Lua templates
+
+	// ── Nuclei Integration ───────────────────────────────────────────────────
+	Nuclei     bool
+	NucleiArgs string
 
 	// ── Display ──────────────────────────────────────────────────────────────
 	NoTUI   bool // disable TUI, print to stdout

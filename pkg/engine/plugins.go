@@ -1,16 +1,19 @@
 package engine
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"dirfuzz/pkg/httpclient"
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
+	interactclient "github.com/projectdiscovery/interactsh/pkg/client"
 	lua "github.com/yuin/gopher-lua"
 )
 
@@ -473,39 +476,475 @@ func registerHTTPLib(L *lua.LState, reqCtx context.Context, timeout time.Duratio
 	}))
 }
 
-// RunActiveTemplate loads and executes a Lua PoC script with http.send available
-func RunActiveTemplate(ctx context.Context, luaPath string, timeout time.Duration, proxyAddr string, insecure bool, targetURL string, allowPrivate bool) error {
-	L := newRestrictedLuaState()
-	defer L.Close()
+// PluginPoC manages a pool of Lua VMs for Active PoC execution.
+type PluginPoC struct {
+	pool             chan *lua.LState
+	timeout          time.Duration
+	interactshClient *interactclient.Client
+	scriptPath       string
+}
 
-	registerHTTPLib(L, ctx, timeout, proxyAddr, insecure, allowPrivate)
+// NewPluginPoC initializes a pool of Lua VMs configured for Active PoCs.
+func NewPluginPoC(ctx context.Context, luaPath string, timeout time.Duration, proxyAddr string, insecure bool, targetURL string, allowPrivate bool, interactshClient *interactclient.Client) (*PluginPoC, error) {
+	// Create a modest pool size to prevent overloading CPU/memory during high finding counts.
+	poolSize := 4
+	p := &PluginPoC{
+		pool:             make(chan *lua.LState, poolSize),
+		timeout:          timeout,
+		interactshClient: interactshClient,
+		scriptPath:       luaPath,
+	}
 
-	if err := runLuaWithTimeout(L, ctx, timeout, func() error {
-		return L.DoFile(luaPath)
-	}); err != nil {
-		return fmt.Errorf("failed to load script: %w", err)
+	for i := 0; i < poolSize; i++ {
+		L := newRestrictedLuaState()
+		registerHTTPLib(L, ctx, timeout, proxyAddr, insecure, allowPrivate)
+		registerStandardLibraries(L, ctx, interactshClient)
+
+		if err := runLuaWithTimeout(L, ctx, timeout, func() error {
+			return L.DoFile(luaPath)
+		}); err != nil {
+			L.Close()
+			return nil, fmt.Errorf("failed to load script: %w", err)
+		}
+
+		p.pool <- L
+	}
+	return p, nil
+}
+
+// Close shuts down the pool.
+func (p *PluginPoC) Close() {
+	close(p.pool)
+	for L := range p.pool {
+		L.Close()
+	}
+}
+
+// Execute runs the PoC against a specific finding and returns any generated results.
+func (p *PluginPoC) Execute(ctx context.Context, res *Result) []Result {
+	L := <-p.pool
+	defer func() { p.pool <- L }()
+
+	// Create context table
+	ctxTable := L.NewTable()
+	L.SetField(ctxTable, "matched_path", lua.LString(res.Path))
+	L.SetField(ctxTable, "matched_url", lua.LString(res.URL))
+	L.SetField(ctxTable, "matched_status", lua.LNumber(res.StatusCode))
+	L.SetField(ctxTable, "matched_request", lua.LString(res.RequestBytes))
+	L.SetField(ctxTable, "matched_response", lua.LString(res.ResponseBytes))
+
+	// Pre-Flight check: is_target
+	if isTargetFunc := L.GetGlobal("is_target"); isTargetFunc.Type() == lua.LTFunction {
+		err := runLuaWithTimeout(L, ctx, p.timeout, func() error {
+			return L.CallByParam(lua.P{Fn: isTargetFunc, NRet: 1, Protect: true}, ctxTable)
+		})
+		if err != nil {
+			return nil // error evaluating is_target, skip
+		}
+		ret := L.Get(-1)
+		L.Pop(1)
+		if !lua.LVAsBool(ret) {
+			return nil // skipping based on filter
+		}
+	}
+
+	// pre_scan check
+	if preScanFunc := L.GetGlobal("pre_scan"); preScanFunc.Type() == lua.LTFunction {
+		_ = runLuaWithTimeout(L, ctx, p.timeout, func() error {
+			return L.CallByParam(lua.P{Fn: preScanFunc, NRet: 0, Protect: true}, ctxTable)
+		})
 	}
 
 	runFunc := L.GetGlobal("run")
 	if runFunc == lua.LNil {
-		return fmt.Errorf("script must define a 'run' function")
+		return nil
 	}
 
-	// Create context table
-	ctxTable := L.NewTable()
-	L.SetField(ctxTable, "url", lua.LString(targetURL))
-
-	baseURL := targetURL
-	if strings.HasSuffix(baseURL, "/") {
-		baseURL = strings.TrimSuffix(baseURL, "/")
-	}
-	L.SetField(ctxTable, "base_url", lua.LString(baseURL))
-
-	if err := runLuaWithTimeout(L, ctx, timeout, func() error {
-		return L.CallByParam(lua.P{Fn: runFunc, NRet: 0, Protect: true}, ctxTable)
+	if err := runLuaWithTimeout(L, ctx, p.timeout, func() error {
+		return L.CallByParam(lua.P{Fn: runFunc, NRet: 1, Protect: true}, ctxTable)
 	}); err != nil {
-		return fmt.Errorf("run function failed: %w", err)
+		return nil
 	}
 
+	var results []Result
+	ret := L.Get(-1)
+	L.Pop(1)
+	if tbl, ok := ret.(*lua.LTable); ok {
+		if first := tbl.RawGetInt(1); first.Type() != lua.LTNil {
+			tbl.ForEach(func(_ lua.LValue, v lua.LValue) {
+				if rTbl, isTbl := v.(*lua.LTable); isTbl {
+					if r := parseResultTable(rTbl); r != nil {
+						r.Labels = append(r.Labels, "ACTIVE-POC")
+						results = append(results, *r)
+					}
+				}
+			})
+		} else {
+			if r := parseResultTable(tbl); r != nil {
+				r.Labels = append(r.Labels, "ACTIVE-POC")
+				results = append(results, *r)
+			}
+		}
+	}
+
+	// post_scan check
+	if postScanFunc := L.GetGlobal("post_scan"); postScanFunc.Type() == lua.LTFunction {
+		_ = runLuaWithTimeout(L, ctx, p.timeout, func() error {
+			return L.CallByParam(lua.P{Fn: postScanFunc, NRet: 0, Protect: true}, ctxTable)
+		})
+	}
+
+	return results
+}
+
+// OnOOBHit runs the on_oob_hit Lua hook if defined, passing a generic map of the interaction.
+func (p *PluginPoC) OnOOBHit(ctx context.Context, interactionData map[string]interface{}) []Result {
+	L := <-p.pool
+	defer func() { p.pool <- L }()
+
+	fn := L.GetGlobal("on_oob_hit")
+	if fn.Type() != lua.LTFunction {
+		return nil
+	}
+
+	tbl := L.NewTable()
+	for k, v := range interactionData {
+		L.SetField(tbl, k, lua.LString(fmt.Sprint(v)))
+	}
+
+	if err := runLuaWithTimeout(L, ctx, p.timeout, func() error {
+		return L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}, tbl)
+	}); err != nil {
+		return nil
+	}
+
+	var results []Result
+	ret := L.Get(-1)
+	L.Pop(1)
+	if rTbl, ok := ret.(*lua.LTable); ok {
+		if first := rTbl.RawGetInt(1); first.Type() != lua.LTNil {
+			rTbl.ForEach(func(_ lua.LValue, v lua.LValue) {
+				if t, isTbl := v.(*lua.LTable); isTbl {
+					if r := parseResultTable(t); r != nil {
+						r.Labels = append(r.Labels, "OOB-POC")
+						results = append(results, *r)
+					}
+				}
+			})
+		} else {
+			if r := parseResultTable(rTbl); r != nil {
+				r.Labels = append(r.Labels, "OOB-POC")
+				results = append(results, *r)
+			}
+		}
+	}
+	return results
+}
+
+// PreScan runs the optional `pre_scan(target)` hook.
+func (p *PluginPoC) PreScan(ctx context.Context, target string, baseURL string, wordlist string) (bool, []string) {
+	L := <-p.pool
+	defer func() { p.pool <- L }()
+
+	fn := L.GetGlobal("pre_scan")
+	if fn.Type() != lua.LTFunction {
+		return false, nil // Default: do not skip if no hook defined
+	}
+
+	tbl := L.NewTable()
+	L.SetField(tbl, "target", lua.LString(target))
+	L.SetField(tbl, "base_url", lua.LString(baseURL))
+	L.SetField(tbl, "wordlist", lua.LString(wordlist))
+
+	if err := runLuaWithTimeout(L, ctx, p.timeout, func() error {
+		return L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}, tbl)
+	}); err != nil {
+		return true, nil // disable plugin if error
+	}
+
+	ret := L.Get(-1)
+	L.Pop(1)
+	
+	skip := false
+	var extraPaths []string
+	
+	if tbl, isTbl := ret.(*lua.LTable); isTbl {
+		if skipVal := tbl.RawGetString("skip"); skipVal.Type() == lua.LTBool {
+			skip = lua.LVAsBool(skipVal)
+		}
+		if pathsVal := tbl.RawGetString("extra_paths"); pathsVal.Type() == lua.LTTable {
+			pathsVal.(*lua.LTable).ForEach(func(_ lua.LValue, v lua.LValue) {
+				if v.Type() == lua.LTString {
+					extraPaths = append(extraPaths, v.String())
+				}
+			})
+		}
+	} else if ret.Type() == lua.LTBool {
+		skip = lua.LVAsBool(ret) // Fallback for backward compatibility
+	}
+	
+	return skip, extraPaths
+}
+
+// PostScan runs the optional `post_scan(summary)` hook for deduplication and reporting.
+func (p *PluginPoC) PostScan(ctx context.Context, findings []Result, totalFound int, durationMs int64) []Result {
+	L := <-p.pool
+	defer func() { p.pool <- L }()
+
+	fn := L.GetGlobal("post_scan")
+	if fn.Type() != lua.LTFunction {
+		return nil // No hook defined, engine will retain original findings
+	}
+
+	summaryTable := L.NewTable()
+	L.SetField(summaryTable, "total_found", lua.LNumber(totalFound))
+	L.SetField(summaryTable, "duration_ms", lua.LNumber(durationMs))
+
+	findingsTable := L.NewTable()
+	for i, f := range findings {
+		findingsTable.RawSetInt(i+1, resultToLuaTable(L, &f))
+	}
+	L.SetField(summaryTable, "results", findingsTable)
+
+	if err := runLuaWithTimeout(L, ctx, p.timeout, func() error {
+		return L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}, summaryTable)
+	}); err != nil {
+		return nil
+	}
+
+	ret := L.Get(-1)
+	L.Pop(1)
+	if ret.Type() == lua.LTTable {
+		var deduplicated []Result
+		ret.(*lua.LTable).ForEach(func(_ lua.LValue, v lua.LValue) {
+			if t, isTbl := v.(*lua.LTable); isTbl {
+				if r := parseResultTable(t); r != nil {
+					deduplicated = append(deduplicated, *r)
+				}
+			}
+		})
+		return deduplicated
+	}
 	return nil
+}
+
+// TemplateMetadata holds information parsed from a template's `info` block
+type TemplateMetadata struct {
+	Name     string   `json:"name"`
+	Author   string   `json:"author"`
+	Severity string   `json:"severity"`
+	CVE      string   `json:"cve"`
+	Tags     []string `json:"tags"`
+}
+
+// ParseTemplateMetadata reads the first 30 lines of a script and extracts its `-- @field value` block.
+func ParseTemplateMetadata(scriptPath string) (TemplateMetadata, error) {
+	meta := TemplateMetadata{}
+	
+	f, err := os.Open(scriptPath)
+	if err != nil {
+		return meta, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	lineCount := 0
+	for scanner.Scan() {
+		lineCount++
+		if lineCount > 30 {
+			break
+		}
+		
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "--") {
+			continue
+		}
+		
+		line = strings.TrimPrefix(line, "--")
+		line = strings.TrimSpace(line)
+		
+		if !strings.HasPrefix(line, "@") {
+			continue
+		}
+		
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		
+		field := strings.ToLower(strings.TrimPrefix(parts[0], "@"))
+		value := strings.TrimSpace(parts[1])
+		
+		switch field {
+		case "name":
+			meta.Name = value
+		case "severity":
+			meta.Severity = value
+		case "cve":
+			meta.CVE = value
+		case "author":
+			meta.Author = value
+		case "tags":
+			tags := strings.Split(value, ",")
+			for _, t := range tags {
+				t = strings.TrimSpace(t)
+				if t != "" {
+					meta.Tags = append(meta.Tags, t)
+				}
+			}
+		}
+	}
+	return meta, scanner.Err()
+}
+
+func resultToLuaTable(L *lua.LState, res *Result) *lua.LTable {
+	tbl := L.NewTable()
+	L.SetField(tbl, "path", lua.LString(res.Path))
+	L.SetField(tbl, "url", lua.LString(res.URL))
+	L.SetField(tbl, "method", lua.LString(res.Method))
+	L.SetField(tbl, "status_code", lua.LNumber(res.StatusCode))
+	L.SetField(tbl, "size", lua.LNumber(res.Size))
+	if len(res.Labels) > 0 {
+		labels := L.NewTable()
+		for i, l := range res.Labels {
+			labels.RawSetInt(i+1, lua.LString(l))
+		}
+		L.SetField(tbl, "labels", labels)
+	}
+	L.SetField(tbl, "confidence", lua.LString(res.Confidence))
+	L.SetField(tbl, "request", lua.LString(res.RequestBytes))
+	L.SetField(tbl, "response", lua.LString(res.ResponseBytes))
+	return tbl
+}
+
+func parseResultTable(t *lua.LTable) *Result {
+	if match := t.RawGetString("match"); match.Type() == lua.LTBool && !lua.LVAsBool(match) {
+		return nil
+	}
+
+	res := &Result{}
+	if p := t.RawGetString("path"); p.Type() == lua.LTString {
+		res.Path = p.String()
+	}
+	if u := t.RawGetString("url"); u.Type() == lua.LTString {
+		res.URL = u.String()
+	}
+	if m := t.RawGetString("method"); m.Type() == lua.LTString {
+		res.Method = m.String()
+	}
+	if s := t.RawGetString("status_code"); s.Type() == lua.LTNumber {
+		res.StatusCode = int(lua.LVAsNumber(s))
+	}
+	if sz := t.RawGetString("size"); sz.Type() == lua.LTNumber {
+		res.Size = int(lua.LVAsNumber(sz))
+	}
+	if lbl := t.RawGetString("label"); lbl.Type() == lua.LTString {
+		res.Labels = append(res.Labels, lbl.String())
+	}
+	if lbls := t.RawGetString("labels"); lbls.Type() == lua.LTTable {
+		lbls.(*lua.LTable).ForEach(func(_ lua.LValue, v lua.LValue) {
+			if v.Type() == lua.LTString {
+				res.Labels = append(res.Labels, v.String())
+			}
+		})
+	}
+	if c := t.RawGetString("confidence"); c.Type() == lua.LTString {
+		res.Confidence = c.String()
+	}
+	if req := t.RawGetString("request"); req.Type() == lua.LTString {
+		res.Request = req.String()
+	}
+	if rTbl := t.RawGetString("response"); rTbl.Type() == lua.LTString {
+		res.Response = rTbl.String()
+	}
+	if hdrs := t.RawGetString("headers"); hdrs.Type() == lua.LTTable {
+		res.Headers = make(map[string]string)
+		hdrs.(*lua.LTable).ForEach(func(k lua.LValue, v lua.LValue) {
+			if k.Type() == lua.LTString && v.Type() == lua.LTString {
+				res.Headers[k.String()] = v.String()
+			}
+		})
+	}
+	return res
+}
+
+// FilterPlugin evaluates a plugin's metadata against Nuclei-style tag and severity requirements.
+func FilterPlugin(meta TemplateMetadata, userTags, userSeverity string) bool {
+	if userTags == "" && userSeverity == "" {
+		return true
+	}
+
+	if userSeverity != "" {
+		sevs := strings.Split(userSeverity, ",")
+		matchedSev := false
+		for _, s := range sevs {
+			if strings.EqualFold(strings.TrimSpace(s), meta.Severity) {
+				matchedSev = true
+				break
+			}
+		}
+		if !matchedSev {
+			return false
+		}
+	}
+
+	if userTags != "" {
+		reqTags := strings.Split(userTags, ",")
+		matchedTag := false
+		for _, req := range reqTags {
+			req = strings.TrimSpace(req)
+			for _, t := range meta.Tags {
+				if strings.EqualFold(req, t) {
+					matchedTag = true
+					break
+				}
+			}
+			if matchedTag {
+				break
+			}
+		}
+		if !matchedTag {
+			return false
+		}
+	}
+
+	return true
+}
+
+// LoadPoCPlugins walks a directory or parses a single file, filtering by metadata.
+func LoadPoCPlugins(ctx context.Context, path string, userTags, userSeverity string, timeout time.Duration, proxyAddr string, insecure bool, targetURL string, allowPrivate bool, interactshClient *interactclient.Client) ([]*PluginPoC, error) {
+	var plugins []*PluginPoC
+	var files []string
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if info.IsDir() {
+		filepath.Walk(path, func(p string, fi os.FileInfo, err error) error {
+			if err == nil && !fi.IsDir() && strings.HasSuffix(p, ".lua") {
+				files = append(files, p)
+			}
+			return nil
+		})
+	} else {
+		files = append(files, path)
+	}
+
+	for _, f := range files {
+		meta, err := ParseTemplateMetadata(f)
+		if err != nil {
+			continue // Log invalid templates?
+		}
+
+		if FilterPlugin(meta, userTags, userSeverity) {
+			p, err := NewPluginPoC(ctx, f, timeout, proxyAddr, insecure, targetURL, allowPrivate, interactshClient)
+			if err != nil {
+				continue
+			}
+			plugins = append(plugins, p)
+		}
+	}
+	return plugins, nil
 }

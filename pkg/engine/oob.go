@@ -1,24 +1,25 @@
 package engine
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"sync/atomic"
+	"time"
 
 	interactclient "github.com/projectdiscovery/interactsh/pkg/client"
+	interactserver "github.com/projectdiscovery/interactsh/pkg/server"
 )
 
-const defaultInteractshServers = "oast.pro,oast.live,oast.site,oast.online,oast.fun,oast.me"
-
 func NewInteractshClient(serverURL, token string) (*interactclient.Client, error) {
-	opts := *interactclient.DefaultOptions
+	opts := interactclient.DefaultOptions
 	if serverURL != "" {
 		opts.ServerURL = serverURL
-	} else if opts.ServerURL == "" {
-		opts.ServerURL = defaultInteractshServers
 	}
 	if token != "" {
 		opts.Token = token
 	}
-	return interactclient.New(&opts)
+	return interactclient.New(opts)
 }
 
 func (e *Engine) SetInteractshClient(client *interactclient.Client, payload string, owned bool) {
@@ -36,6 +37,41 @@ func (e *Engine) SetInteractshClient(client *interactclient.Client, payload stri
 	if old != nil && oldOwned && old != client {
 		_ = old.StopPolling()
 		_ = old.Close()
+	}
+
+	if owned && client != nil {
+		go func() {
+			_ = client.StartPolling(5*time.Second, func(interaction *interactserver.Interaction) {
+				e.handleOOBHit(interaction)
+			})
+		}()
+	}
+}
+
+func (e *Engine) handleOOBHit(interaction *interactserver.Interaction) {
+	if len(e.pocPlugins) == 0 {
+		return
+	}
+	
+	b, err := json.Marshal(interaction)
+	if err != nil {
+		return
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(b, &data); err != nil {
+		return
+	}
+
+	for _, poc := range e.pocPlugins {
+		results := poc.OnOOBHit(context.Background(), data)
+		for _, r := range results {
+			select {
+			case e.Results <- r:
+				e.resultsCollected.Add(1)
+			default:
+				atomic.AddInt64(&e.TUIDropped, 1)
+			}
+		}
 	}
 }
 

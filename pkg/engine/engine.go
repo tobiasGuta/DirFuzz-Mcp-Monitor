@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
@@ -138,6 +139,8 @@ type Config struct {
 	InteractshServer     string
 	InteractshToken      string
 	WordlistPath         string
+	Nuclei               bool
+	NucleiArgs           string
 	OutputFile           string
 	Timeout              time.Duration
 	Insecure             bool
@@ -460,6 +463,13 @@ type Engine struct {
 	Results       chan Result
 	LogEvents     chan LogEvent
 
+	// Nuclei Subprocess Integration
+	nucleiCmd   *exec.Cmd
+	nucleiStdin io.WriteCloser
+	nucleiWg    sync.WaitGroup
+	nucleiMu    sync.Mutex
+	nucleiSeen  sync.Map
+
 	// Eagle Mode State
 	PreviousState map[string]previousScanEntry
 	eagleLock     sync.RWMutex
@@ -486,6 +496,11 @@ type Engine struct {
 
 	// Transform plugin
 	transformPlugin *PluginRequestTransformer
+
+	// Active PoC plugin
+	pocPlugins    []*PluginPoC
+	pocFindings   map[*PluginPoC][]Result
+	pocFindingsMu sync.Mutex
 
 	// Worker management
 	workerLock   sync.Mutex
@@ -1000,6 +1015,7 @@ func NewEngine(numWorkers int, expectedItems uint, falsePositiveRate float64) *E
 		bypassSem:         make(chan struct{}, 20),
 		replayCh:          replayCh,
 		workerStopCh:      make(chan struct{}),
+		pocFindings:       make(map[*PluginPoC][]Result),
 	}
 
 	e.scannerCtx.Store(&scannerContext{ctx: ctx, cancel: cancel})
@@ -1895,11 +1911,29 @@ func (e *Engine) KickoffScanner(path string, startLine int64) {
 	e.AddScanner()
 	sc := e.scannerCtx.Load()
 	if sc != nil {
+		runID := atomic.LoadInt64(&e.RunID)
+		
+		// Run pre_scan for all active plugins.
+		if len(e.pocPlugins) > 0 {
+			var activePlugins []*PluginPoC
+			target := e.BaseURL()
+			for _, poc := range e.pocPlugins {
+				skip, extraPaths := poc.PreScan(sc.ctx, target, target, path)
+				if !skip {
+					activePlugins = append(activePlugins, poc)
+					for _, p := range extraPaths {
+						e.Submit(Job{Path: p, Method: "GET", RunID: runID})
+					}
+				}
+			}
+			e.pocPlugins = activePlugins
+		}
+
 		if e.shouldRunPassiveHarvest() {
 			e.AddScanner()
-			go e.StartPassiveHarvesting(sc.ctx, atomic.LoadInt64(&e.RunID), e.BaseURL())
+			go e.StartPassiveHarvesting(sc.ctx, runID, e.BaseURL())
 		}
-		go e.StartWordlistScanner(sc.ctx, atomic.LoadInt64(&e.RunID), path, startLine)
+		go e.StartWordlistScanner(sc.ctx, runID, path, startLine)
 	}
 }
 
@@ -2440,11 +2474,16 @@ func (e *Engine) Start() {
 	e.workerLock.Lock()
 	defer e.workerLock.Unlock()
 	if err := e.ensureInteractshClient(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to initialize interactsh client: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[WARN] OOB client offline (network block detected)\n")
 	}
 	now := time.Now().UTC().UnixNano()
 	e.startedAtUnix.CompareAndSwap(0, now)
 	e.isRunning.Store(true)
+
+	if err := e.startNuclei(); err != nil {
+		fmt.Fprintf(os.Stderr, "[!] Warning: failed to start Nuclei integration: %v\n", err)
+	}
+
 	for i := 0; i < e.numWorkers; i++ {
 		e.wg.Add(1)
 		e.activeWorkers.Add(1)
@@ -3122,6 +3161,28 @@ func (e *Engine) handleResultWithContext(ctx context.Context, res Result) bool {
 		}
 	}
 
+	if len(e.pocPlugins) > 0 {
+		for _, poc := range e.pocPlugins {
+			go func(p *PluginPoC, r Result) {
+				pocResults := p.Execute(ctx, &r)
+				for _, pocRes := range pocResults {
+					select {
+					case e.Results <- pocRes:
+						e.resultsCollected.Add(1)
+					case <-ctx.Done():
+					}
+				}
+				if len(pocResults) > 0 {
+					e.pocFindingsMu.Lock()
+					e.pocFindings[p] = append(e.pocFindings[p], pocResults...)
+					e.pocFindingsMu.Unlock()
+				}
+			}(poc, res)
+		}
+	}
+
+	e.SubmitToNuclei(res.URL)
+
 	select {
 	case e.Results <- res:
 		e.resultsCollected.Add(1)
@@ -3144,6 +3205,29 @@ func (e *Engine) handleResultNonBlocking(res Result) {
 			res.Confidence = conf
 		}
 	}
+
+	if len(e.pocPlugins) > 0 {
+		for _, poc := range e.pocPlugins {
+			go func(p *PluginPoC, r Result) {
+				pocResults := p.Execute(context.Background(), &r)
+				for _, pocRes := range pocResults {
+					select {
+					case e.Results <- pocRes:
+						e.resultsCollected.Add(1)
+					default:
+						atomic.AddInt64(&e.TUIDropped, 1)
+					}
+				}
+				if len(pocResults) > 0 {
+					e.pocFindingsMu.Lock()
+					e.pocFindings[p] = append(e.pocFindings[p], pocResults...)
+					e.pocFindingsMu.Unlock()
+				}
+			}(poc, res)
+		}
+	}
+
+	e.SubmitToNuclei(res.URL)
 
 	select {
 	case e.Results <- res:
@@ -3423,6 +3507,54 @@ func (e *Engine) worker(id int) {
 			}
 
 			headerSafePayload := sanitizeHeaderToken(payload)
+			for k, v := range reqHeaders {
+				reqHeaders[k] = strings.ReplaceAll(v, "{PAYLOAD}", headerSafePayload)
+			}
+
+			var pluginBody string
+			if requestBody != "" {
+				pluginBody = strings.ReplaceAll(requestBody, "{PAYLOAD}", payload)
+			}
+			pluginMethod := job.Method
+			if pluginMethod == "" {
+				pluginMethod = "GET"
+			}
+
+			if e.transformPlugin != nil {
+				// Inject hardcoded fields into the map so Lua can transform them
+				reqHeaders["Host"] = reqHost
+				reqHeaders["User-Agent"] = ua
+
+				out := e.transformPlugin.Transform(RequestTransformInput{
+					Method:  pluginMethod,
+					Path:    reqPath,
+					Headers: reqHeaders,
+					Body:    pluginBody,
+				})
+				if job.Method != "" || out.Method != "GET" {
+					job.Method = out.Method
+				}
+				reqPath = out.Path
+				reqHeaders = out.Headers
+				pluginBody = out.Body
+
+				// Extract them back out so buildRequest uses the transformed values
+				if h, ok := reqHeaders["Host"]; ok {
+					reqHost = h
+					delete(reqHeaders, "Host")
+				} else if h, ok := reqHeaders["host"]; ok {
+					reqHost = h
+					delete(reqHeaders, "host")
+				}
+				if u, ok := reqHeaders["User-Agent"]; ok {
+					ua = u
+					delete(reqHeaders, "User-Agent")
+				} else if u, ok := reqHeaders["user-agent"]; ok {
+					ua = u
+					delete(reqHeaders, "user-agent")
+				}
+			}
+
 			var reqHdrKeys []string
 			for k := range reqHeaders {
 				reqHdrKeys = append(reqHdrKeys, k)
@@ -3431,7 +3563,7 @@ func (e *Engine) worker(id int) {
 			var headersBuilder strings.Builder
 			for _, k := range reqHdrKeys {
 				safeK := sanitizeHeaderToken(k)
-				safeV := sanitizeHeaderToken(strings.ReplaceAll(reqHeaders[k], "{PAYLOAD}", headerSafePayload))
+				safeV := sanitizeHeaderToken(reqHeaders[k])
 				headersBuilder.WriteString(fmt.Sprintf("%s: %s\r\n", safeK, safeV))
 			}
 			headersStr := headersBuilder.String()
@@ -3477,10 +3609,10 @@ func (e *Engine) worker(id int) {
 				} else {
 					if bodyFilterActive || e.isHeadRejected(reqHost) || followRedirects || oracleEnabled {
 						successfulMethod = "GET"
-						rawRequest = buildRequest("GET", reqPath, reqHost, ua, headersStr, "")
+						rawRequest = buildRequest("GET", reqPath, reqHost, ua, headersStr, pluginBody)
 					} else {
 						successfulMethod = "HEAD"
-						rawRequest = buildRequest("HEAD", reqPath, reqHost, ua, headersStr, "")
+						rawRequest = buildRequest("HEAD", reqPath, reqHost, ua, headersStr, pluginBody)
 					}
 
 					if oracleEnabled {
@@ -3497,7 +3629,7 @@ func (e *Engine) worker(id int) {
 						if err == nil && successfulMethod == "HEAD" && (resp.StatusCode == 405 || resp.StatusCode == 501) {
 							e.markHeadRejected(reqHost)
 							successfulMethod = "GET"
-							rawRequest = buildRequest("GET", reqPath, reqHost, ua, headersStr, "")
+							rawRequest = buildRequest("GET", reqPath, reqHost, ua, headersStr, pluginBody)
 							if fbResp, fbErr := e.executeRequestWithRetry(localCtx, currentBaseURL, rawRequest, requestTimeout, proxyAddr); fbErr == nil {
 								resp = fbResp
 							} else {
@@ -3521,8 +3653,8 @@ func (e *Engine) worker(id int) {
 					}
 				}
 
-				if requestBody != "" && (job.Method == "POST" || job.Method == "PUT" || job.Method == "PATCH") {
-					bodyContent = strings.ReplaceAll(requestBody, "{PAYLOAD}", payload)
+				bodyContent = pluginBody
+				if bodyContent != "" && (job.Method == "POST" || job.Method == "PUT" || job.Method == "PATCH") {
 					methodHdrBuf.WriteString(fmt.Sprintf("Content-Length: %d\r\n", len(bodyContent)))
 					if !hasContentType {
 						methodHdrBuf.WriteString("Content-Type: application/x-www-form-urlencoded\r\n")
@@ -3818,12 +3950,13 @@ func (e *Engine) worker(id int) {
 				result.Duration = timingMedian
 			}
 
-			// Only include raw request/response when SaveRaw is enabled.
+			// Unconditionally capture byte slices for plugin and internal use.
+			// SaveRaw only dictates whether they are mapped to the JSON strings.
+			result.RequestBytes = append([]byte(nil), rawRequest...)
+			result.ResponseBytes = append([]byte(nil), resp.Raw...)
 			if saveRaw {
 				result.Request = string(rawRequest)
 				result.Response = string(resp.Raw)
-				result.RequestBytes = append([]byte(nil), rawRequest...)
-				result.ResponseBytes = append([]byte(nil), resp.Raw...)
 			}
 
 			if resp.StatusCode >= 300 && resp.StatusCode < 400 && !followRedirects {
@@ -4261,6 +4394,32 @@ func (e *Engine) Shutdown() {
 			return true
 		})
 
+		// Run post_scan hooks before closing the result channel
+		if len(e.pocPlugins) > 0 {
+			durationMs := time.Since(time.Unix(0, e.startedAtUnix.Load())).Milliseconds()
+			totalFound := int(e.resultsCollected.Load())
+			e.pocFindingsMu.Lock()
+			for _, poc := range e.pocPlugins {
+				findings := e.pocFindings[poc]
+				if len(findings) > 0 {
+					dedup := poc.PostScan(context.Background(), findings, totalFound, durationMs)
+					for _, r := range dedup {
+						select {
+						case e.Results <- r:
+							e.resultsCollected.Add(1)
+						default:
+							atomic.AddInt64(&e.TUIDropped, 1)
+						}
+					}
+				}
+			}
+			e.pocFindingsMu.Unlock()
+		}
+
+		// Cleanly shut down Nuclei integration
+		e.stopNuclei()
+
+		// Finally, shut down the main results channel
 		close(e.LogEvents)
 		close(e.Results)
 	})
@@ -4317,4 +4476,9 @@ func (e *Engine) DumpMeta() EngineConfigDump {
 // SetTransformPlugin sets the Lua request transformer plugin.
 func (e *Engine) SetTransformPlugin(pt *PluginRequestTransformer) {
 	e.transformPlugin = pt
+}
+
+// SetPoCPlugins sets the active Lua PoC plugins.
+func (e *Engine) SetPoCPlugins(plugins []*PluginPoC) {
+	e.pocPlugins = plugins
 }

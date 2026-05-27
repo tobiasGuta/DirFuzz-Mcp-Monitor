@@ -10,11 +10,11 @@ function match(response)
     -- response.body (string)
     -- response.content_type (string)
     
-    local body = response.body
-    
-    -- Simple check: body contains "success": true
-    if string.find(body, '"success"%s*:%s*true') then
-        return true
+    local parsed, err = json_parse(response.body)
+    if parsed and type(parsed) == "table" then
+        if parsed.success == true then
+            return true
+        end
     end
     
     return false

@@ -1,12 +1,8 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"os/signal"
-
-	"dirfuzz/pkg/engine"
 )
 
 func main() {
@@ -20,24 +16,6 @@ func main() {
 		return
 	}
 
-	if cfg.ActivePoC != "" {
-		fmt.Fprintf(os.Stderr, "[*] Running Active PoC plugin: %s\n", cfg.ActivePoC)
-		
-		proxy := cfg.ProxyOut
-		if proxy == "" && cfg.ProxyFile != "" {
-			fmt.Fprintf(os.Stderr, "[!] Warning: --proxy (file) is ignored by Active PoC. Use --proxy-out for a single proxy.\n")
-		}
-
-		reqCtx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-		defer cancel()
-
-		err := engine.RunActiveTemplate(reqCtx, cfg.ActivePoC, cfg.Timeout, proxy, cfg.Insecure, cfg.Target, cfg.AllowPrivate)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: active poc failed: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
 
 	if !cfg.NoTUI {
 		// Print a brief startup banner to stderr before the TUI takes over.

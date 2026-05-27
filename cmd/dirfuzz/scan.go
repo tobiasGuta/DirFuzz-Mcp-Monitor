@@ -16,6 +16,7 @@ import (
 	"dirfuzz/pkg/tui"
 
 	tea "github.com/charmbracelet/bubbletea"
+	interactclient "github.com/projectdiscovery/interactsh/pkg/client"
 )
 
 // tuiResultBufSize mirrors engine.ResultsChannelSize so the fanout goroutine
@@ -115,6 +116,8 @@ func run(cfg cliConfig) error {
 		c.FourOhThreeBypass = cfg.FourOhThreeBypass
 		c.AntiBotFallback = cfg.AntiBotFallback
 		c.AllowPrivateTargets = cfg.AllowPrivate
+		c.Nuclei = cfg.Nuclei
+		c.NucleiArgs = cfg.NucleiArgs
 		if cfg.OutputFile != "" {
 			c.OutputFile = cfg.OutputFile
 			c.OutputFormat = cfg.OutputFormat
@@ -154,18 +157,47 @@ func run(cfg cliConfig) error {
 		eng.SetMutatePlugin(pm)
 	}
 
-	// ── 7. Proxy rotation ─────────────────────────────────────────────────────
+	// ── 7. Proxy rotation & OOB ───────────────────────────────────────────────
 	if cfg.ProxyFile != "" {
 		if err := eng.LoadProxies(cfg.ProxyFile); err != nil {
 			return fmt.Errorf("loading proxy list: %w", err)
 		}
 	}
+
+	var interactClient *interactclient.Client
 	if cfg.OOB {
 		eng.UpdateConfig(func(c *engine.Config) {
 			c.OOBEnabled = true
 			c.InteractshServer = cfg.OOBServer
 			c.InteractshToken = cfg.OOBToken
 		})
+		
+		client, err := engine.NewInteractshClient(cfg.OOBServer, cfg.OOBToken)
+		if err == nil {
+			interactClient = client
+			eng.SetInteractshClient(client, client.URL(), true)
+		}
+	}
+
+	if cfg.ActivePoC != "" {
+		proxy := cfg.ProxyOut
+		if proxy == "" && cfg.ProxyFile != "" {
+			fmt.Fprintf(os.Stderr, "[!] Warning: --proxy (file) is ignored by Active PoC. Use --proxy-out for a single proxy.\n")
+		}
+
+		pocs, err := engine.LoadPoCPlugins(context.Background(), cfg.ActivePoC, cfg.Tags, cfg.Severity, cfg.Timeout, proxy, cfg.Insecure, cfg.Target, cfg.AllowPrivate, interactClient)
+		if err != nil {
+			return fmt.Errorf("active-poc load: %w", err)
+		}
+		for _, poc := range pocs {
+			defer poc.Close()
+		}
+		eng.SetPoCPlugins(pocs)
+		if len(pocs) > 0 {
+			fmt.Fprintf(os.Stderr, "[+] Loaded %d Active PoC template(s)\n", len(pocs))
+		} else {
+			fmt.Fprintf(os.Stderr, "[!] Warning: No Active PoC templates matched the provided path, tags, or severity filters.\n")
+		}
 	}
 	if cfg.ProxyOut != "" && cfg.Insecure {
 		fmt.Fprintf(os.Stderr, "[!] Warning: --proxy-out is using insecure TLS verification because --insecure is enabled\n")

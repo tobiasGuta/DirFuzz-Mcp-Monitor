@@ -24,7 +24,8 @@ DirFuzz is a memory-efficient, high-performance web security testing and directo
 - In-TUI triage marking so interesting hits can be flagged during review and restored with append-mode history.
 - Anomaly-only filtering in the TUI so you can instantly surface eagle alerts, content drift, discovered params, bypasses, auth-matrix findings, timing-oracle hits, and manual marks.
 - Live system logs, a multi-tab metrics dashboard, log search/filter/export, and context-aware related logs in the TUI.
-- Lua plugins for transformers, matchers, mutators, and active proof-of-concept flows.
+- Lua plugins for transformers, matchers, mutators, and active proof-of-concept flows with pre/post scan hooks and a native standard library.
+- Native Nuclei subprocess integration for streaming confirmed paths directly into Nuclei templates.
 - Swarm mode for authorized distributed execution. It is opt-in only and stays disabled unless `--swarm` is provided.
 - Eagle mode, resume support, and continuous monitoring with webhook alerts.
 - MCP integration for scoped AI workflows.
@@ -161,6 +162,14 @@ Swarm mode is completely opt-in. Without `--swarm`, DirFuzz stays local and sing
 ```bash
 ./dirfuzz -u https://target.com -active-poc plugins/spring4shell.lua
 ```
+
+### Nuclei Subprocess Integration
+
+```bash
+./dirfuzz -u https://target.com -w wordlists/common.txt --nuclei --nuclei-args "-tags cve,misconfig -severity critical"
+```
+
+Nuclei runs concurrently as a subprocess. DirFuzz pipes discovered URLs to Nuclei's `stdin` and parses its JSONL output back into the TUI.
 
 ### Eagle mode
 

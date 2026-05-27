@@ -153,10 +153,17 @@ func parseFlags() cliConfig {
 	activePoC := flag.String(
 		"active-poc",
 		"",
-		"Lua PoC plugin with active HTTP requests via http_send()",
+		"Lua PoC directory or script with active HTTP requests via http_send()",
 	)
 
-	// ── Ssrf Protection ──────────────────────────────────────────────────────────
+	tags := flag.String("tags", "", "Tags to filter Lua templates (comma-separated, OR evaluated)")
+	severity := flag.String("severity", "", "Severities to filter Lua templates (comma-separated, OR evaluated)")
+
+	// ── Nuclei Integration ───────────────────────────────────────────────────
+	nuclei := flag.Bool("nuclei", false, "Enable Nuclei integration to scan discovered URLs")
+	nucleiArgs := flag.String("nuclei-args", "", "Custom arguments to pass to the Nuclei subprocess (e.g. \"-tags cve -severity critical\")")
+
+	// ── Display ───────────────────────────────────────────────────────────────────
 
 	allowPrivate := flag.Bool(
 		"allow-private",
@@ -276,6 +283,10 @@ func parseFlags() cliConfig {
 		PluginMatch:  *pluginMatch,
 		PluginMutate: *pluginMutate,
 		ActivePoC:    *activePoC,
+		Tags:         *tags,
+		Severity:     *severity,
+		Nuclei:       *nuclei,
+		NucleiArgs:   *nucleiArgs,
 
 		NoTUI:   *noTUI,
 		Verbose: *verbose,

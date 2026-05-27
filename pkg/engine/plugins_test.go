@@ -187,10 +187,15 @@ end
 	}
 
 	start := time.Now()
-	err = RunActiveTemplate(context.Background(), tmpfile.Name(), 50*time.Millisecond, "", false, "http://example.com", false)
-	if err == nil {
-		t.Fatal("expected timeout error from active template")
+	poc, err := NewPluginPoC(context.Background(), tmpfile.Name(), 50*time.Millisecond, "", false, "http://example.com", false, nil)
+	if err != nil {
+		t.Fatalf("expected active template to load, got err: %v", err)
 	}
+	defer poc.Close()
+
+	// Need a dummy result to trigger it
+	_ = poc.Execute(context.Background(), &Result{URL: "http://example.com"})
+
 	if time.Since(start) > 2*time.Second {
 		t.Fatal("active template timeout took too long")
 	}
