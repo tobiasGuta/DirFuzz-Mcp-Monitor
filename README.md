@@ -262,6 +262,10 @@ The included `docker-compose.yml` can build and run the monitoring workflow.
 2. Place wordlists in `./wordlists`.
 3. Run `docker compose up --build -d`.
 
+## Screenshots
+
+https://github.com/user-attachments/assets/e724f650-323b-4b71-8d15-8c88be345948
+
 ## Final Notes
 
 - Normal scans are local and single-node by default.
