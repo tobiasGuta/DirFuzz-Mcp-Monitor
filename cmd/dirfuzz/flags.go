@@ -122,7 +122,7 @@ func parseFlags() cliConfig {
 
 	// ── Eagle mode ───────────────────────────────────────────────────────────
 	eagleFile := flag.String("eagle", "",
-		"Eagle mode: path to a previous scan JSONL — highlights changed/new endpoints")
+		"Eagle mode: path to a previous scan JSONL — highlights new endpoints plus status, size, and content drift")
 
 	// ── Resume ───────────────────────────────────────────────────────────────
 	resume := flag.Bool("resume", false, "Resume a previous scan from the saved state file")

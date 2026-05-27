@@ -260,34 +260,44 @@ type Job struct {
 // Callers that need a stable absolute target should prefer URL when present and
 // fall back to Path only for scans that were not started with SetTarget.
 type Result struct {
-	Path              string            `json:"path"`
-	Method            string            `json:"method,omitempty"`
-	StatusCode        int               `json:"status"`
-	Forbidden403Type  string            `json:"forbidden_403_type,omitempty"`
-	Size              int               `json:"length"`
-	Words             int               `json:"words,omitempty"`
-	Lines             int               `json:"lines,omitempty"`
-	ContentType       string            `json:"content_type,omitempty"`
-	Labels            []string          `json:"labels,omitempty"`
-	Confidence        string            `json:"confidence,omitempty"`
-	Duration          time.Duration     `json:"duration,omitempty"`
-	Redirect          string            `json:"redirect,omitempty"`
-	Headers           map[string]string `json:"headers,omitempty"`
-	IsEagleAlert      bool              `json:"eagle_alert,omitempty"`
-	OldStatusCode     int               `json:"old_status,omitempty"`
-	IsAutoFilter      bool              `json:"auto_filter,omitempty"`
-	URL               string            `json:"url,omitempty"`
-	Request           string            `json:"request,omitempty"`  // only populated when SaveRaw=true
-	Response          string            `json:"response,omitempty"` // only populated when SaveRaw=true
-	RequestBytes      []byte            `json:"-"`
-	ResponseBytes     []byte            `json:"-"`
-	Note              string            `json:"note,omitempty"`
-	MarkedInteresting bool              `json:"marked_interesting,omitempty"`
-	ContentDrift      bool              `json:"content_drift,omitempty"`
-	OldSize           int               `json:"old_size,omitempty"`
-	OldWords          int               `json:"old_words,omitempty"`
-	DriftDeltaBytes   int               `json:"drift_delta_bytes,omitempty"`
-	DiscoveredParams  []string          `json:"discovered_params,omitempty"`
+	Path               string            `json:"path"`
+	Method             string            `json:"method,omitempty"`
+	StatusCode         int               `json:"status"`
+	Forbidden403Type   string            `json:"forbidden_403_type,omitempty"`
+	Size               int               `json:"length"`
+	Words              int               `json:"words,omitempty"`
+	Lines              int               `json:"lines,omitempty"`
+	ContentType        string            `json:"content_type,omitempty"`
+	Labels             []string          `json:"labels,omitempty"`
+	Confidence         string            `json:"confidence,omitempty"`
+	Duration           time.Duration     `json:"duration,omitempty"`
+	Redirect           string            `json:"redirect,omitempty"`
+	Headers            map[string]string `json:"headers,omitempty"`
+	IsEagleAlert       bool              `json:"eagle_alert,omitempty"`
+	IsEagleNewEndpoint bool              `json:"eagle_new_endpoint,omitempty"`
+	StatusDrift        bool              `json:"status_drift,omitempty"`
+	SizeDrift          bool              `json:"size_drift,omitempty"`
+	OldStatusCode      int               `json:"old_status,omitempty"`
+	IsAutoFilter       bool              `json:"auto_filter,omitempty"`
+	URL                string            `json:"url,omitempty"`
+	Request            string            `json:"request,omitempty"`  // only populated when SaveRaw=true
+	Response           string            `json:"response,omitempty"` // only populated when SaveRaw=true
+	RequestBytes       []byte            `json:"-"`
+	ResponseBytes      []byte            `json:"-"`
+	Note               string            `json:"note,omitempty"`
+	MarkedInteresting  bool              `json:"marked_interesting,omitempty"`
+	ContentDrift       bool              `json:"content_drift,omitempty"`
+	OldSize            int               `json:"old_size,omitempty"`
+	OldWords           int               `json:"old_words,omitempty"`
+	DriftDeltaBytes    int               `json:"drift_delta_bytes,omitempty"`
+	DiscoveredParams   []string          `json:"discovered_params,omitempty"`
+}
+
+type previousScanEntry struct {
+	StatusCode int
+	Size       int
+	Words      int
+	BodyHash   string
 }
 
 // replayTask carries everything needed to replay a hit through an outbound proxy.
@@ -449,7 +459,7 @@ type Engine struct {
 	LogEvents     chan LogEvent
 
 	// Eagle Mode State
-	PreviousState map[string]int
+	PreviousState map[string]previousScanEntry
 	eagleLock     sync.RWMutex
 
 	// Proxy Rotation
@@ -825,6 +835,30 @@ func (r Result) String() string {
 		methodStr, r.Path, r.StatusCode, r.Size, r.Words, r.Lines, extras)
 }
 
+func (r Result) EagleSummary() string {
+	parts := make([]string, 0, 4)
+	if r.IsEagleNewEndpoint {
+		parts = append(parts, fmt.Sprintf("new endpoint [%d]", r.StatusCode))
+	}
+	if r.StatusDrift {
+		parts = append(parts, fmt.Sprintf("status %d -> %d", r.OldStatusCode, r.StatusCode))
+	}
+	if r.SizeDrift {
+		parts = append(parts, fmt.Sprintf("size %d -> %d bytes", r.OldSize, r.Size))
+	}
+	if r.ContentDrift {
+		if r.OldWords != r.Words && (r.OldWords > 0 || r.Words > 0) {
+			parts = append(parts, fmt.Sprintf("content changed (%d -> %d words)", r.OldWords, r.Words))
+		} else {
+			parts = append(parts, "content changed")
+		}
+	}
+	if len(parts) == 0 {
+		return "change detected"
+	}
+	return strings.Join(parts, "; ")
+}
+
 // ToCSV returns a CSV-formatted line for the result.
 func (r Result) ToCSV() []string {
 	methodStr := r.Method
@@ -1032,6 +1066,101 @@ func (e *Engine) GetNextProxy() string {
 
 // ─── Scan state / Eagle Mode ─────────────────────────────────────────────────
 
+const maxPreviousScanLineBytes = 16 * 1024 * 1024
+
+type previousScanRow struct {
+	Result
+	BodyHash string `json:"body_hash,omitempty"`
+}
+
+func previousScanKey(method, path string) string {
+	method = strings.ToUpper(strings.TrimSpace(method))
+	if method == "" {
+		return path
+	}
+	return method + "\x00" + path
+}
+
+func extractStoredResponseBody(raw []byte) []byte {
+	if len(raw) == 0 {
+		return nil
+	}
+	if idx := bytes.Index(raw, []byte("\r\n\r\n")); idx >= 0 {
+		return raw[idx+4:]
+	}
+	if idx := bytes.Index(raw, []byte("\n\n")); idx >= 0 {
+		return raw[idx+2:]
+	}
+	return raw
+}
+
+func eagleBodyHash(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(body)
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func previousBodyHashFromRow(row previousScanRow) string {
+	if row.BodyHash != "" {
+		return row.BodyHash
+	}
+	if len(row.ResponseBytes) > 0 {
+		return eagleBodyHash(extractStoredResponseBody(row.ResponseBytes))
+	}
+	if row.Response != "" {
+		return eagleBodyHash(extractStoredResponseBody([]byte(row.Response)))
+	}
+	return ""
+}
+
+func (e *Engine) lookupPreviousScan(method, path string) (previousScanEntry, bool) {
+	if e.PreviousState == nil {
+		return previousScanEntry{}, false
+	}
+	if prev, ok := e.PreviousState[previousScanKey(method, path)]; ok {
+		return prev, true
+	}
+	prev, ok := e.PreviousState[path]
+	return prev, ok
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+func (e *Engine) applyEagleDrift(result *Result, bodyHash string) {
+	prev, exists := e.lookupPreviousScan(result.Method, result.Path)
+	if !exists {
+		result.IsEagleAlert = true
+		result.IsEagleNewEndpoint = true
+		return
+	}
+	if prev.StatusCode != result.StatusCode {
+		result.IsEagleAlert = true
+		result.StatusDrift = true
+		result.OldStatusCode = prev.StatusCode
+	}
+	if prev.Size >= 0 && result.Size >= 0 && prev.Size != result.Size {
+		result.IsEagleAlert = true
+		result.SizeDrift = true
+		result.OldSize = prev.Size
+		result.DriftDeltaBytes = absInt(result.Size - prev.Size)
+	}
+	if prev.BodyHash != "" && bodyHash != "" && prev.BodyHash != bodyHash {
+		result.IsEagleAlert = true
+		result.ContentDrift = true
+		if result.OldSize == 0 && prev.Size != 0 {
+			result.OldSize = prev.Size
+		}
+		result.OldWords = prev.Words
+	}
+}
+
 // LoadPreviousScan loads a previous JSONL scan file for differential scanning.
 func (e *Engine) LoadPreviousScan(path string) error {
 	file, err := os.Open(path)
@@ -1044,16 +1173,22 @@ func (e *Engine) LoadPreviousScan(path string) error {
 	defer e.eagleLock.Unlock()
 
 	if e.PreviousState == nil {
-		e.PreviousState = make(map[string]int)
+		e.PreviousState = make(map[string]previousScanEntry)
 	}
 
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxPreviousScanLineBytes)
 	for scanner.Scan() {
-		var res Result
-		if err := json.Unmarshal(scanner.Bytes(), &res); err != nil {
+		var row previousScanRow
+		if err := json.Unmarshal(scanner.Bytes(), &row); err != nil {
 			continue
 		}
-		e.PreviousState[res.Path] = res.StatusCode
+		e.PreviousState[previousScanKey(row.Method, row.Path)] = previousScanEntry{
+			StatusCode: row.StatusCode,
+			Size:       row.Size,
+			Words:      row.Words,
+			BodyHash:   previousBodyHashFromRow(row),
+		}
 	}
 	return scanner.Err()
 }
@@ -3688,13 +3823,10 @@ func (e *Engine) worker(id int) {
 				result.Labels = append(result.Labels, bypassTechniqueLabel)
 			}
 
-			// Eagle Mode.
+			// Eagle mode compares the current hit against the previous JSONL baseline.
 			e.eagleLock.RLock()
 			if e.PreviousState != nil {
-				if oldStatus, exists := e.PreviousState[payload]; exists && oldStatus != resp.StatusCode {
-					result.IsEagleAlert = true
-					result.OldStatusCode = oldStatus
-				}
+				e.applyEagleDrift(&result, eagleBodyHash(resp.Body))
 			}
 			e.eagleLock.RUnlock()
 

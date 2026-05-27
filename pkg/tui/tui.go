@@ -1249,10 +1249,10 @@ func (m *Model) renderDiscoveryDashboard() string {
 		switch {
 		case len(hit.DiscoveredParams) > 0:
 			interesting = append(interesting, fmt.Sprintf("%s discovered params: %s", hit.Path, strings.Join(hit.DiscoveredParams, ", ")))
+		case hit.IsEagleAlert:
+			interesting = append(interesting, fmt.Sprintf("%s %s", hit.Path, hit.EagleSummary()))
 		case hit.ContentDrift:
 			interesting = append(interesting, fmt.Sprintf("%s content drift detected (%d -> %d bytes)", hit.Path, hit.OldSize, hit.Size))
-		case hit.IsEagleAlert:
-			interesting = append(interesting, fmt.Sprintf("%s status changed %d -> %d", hit.Path, hit.OldStatusCode, hit.StatusCode))
 		}
 	}
 	if len(interesting) == 0 {
@@ -3649,7 +3649,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.appendLog(orangeStyle.Render(fmt.Sprintf("[!] %s: %s", result.Path, msgStr)), nil)
 			}
 		} else if result.IsEagleAlert {
-			m.appendLog(yellowStyle.Render(fmt.Sprintf("[EAGLE] %s changed: %d -> %d", result.Path, result.OldStatusCode, result.StatusCode)), nil)
+			m.appendLog(yellowStyle.Render(fmt.Sprintf("[EAGLE] %s %s", result.Path, result.EagleSummary())), nil)
 			if m.historyAppendEnabled() {
 				m.appendLog(formatResult(result), &result)
 			}

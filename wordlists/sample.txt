@@ -8,3 +8,5 @@ sitemap.xml
 backup
 config
 admin
+profile
+user

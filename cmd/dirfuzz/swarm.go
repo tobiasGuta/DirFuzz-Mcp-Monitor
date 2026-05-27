@@ -407,7 +407,7 @@ func writeSwarmOutput(cfg cliConfig, results []engine.Result) error {
 
 	for _, res := range results {
 		if res.IsEagleAlert {
-			fmt.Printf("[EAGLE] %s  %d → %d\n", res.Path, res.OldStatusCode, res.StatusCode)
+			fmt.Printf("[EAGLE] %s  %s\n", res.Path, res.EagleSummary())
 		} else {
 			fmt.Println(res.String())
 		}

@@ -374,7 +374,7 @@ func runPlain(eng *engine.Engine, cfg cliConfig, writeResult func(engine.Result)
 		}
 		collectedResults = append(collectedResults, res)
 		if res.IsEagleAlert {
-			line := fmt.Sprintf("[EAGLE] %s  %d → %d", res.Path, res.OldStatusCode, res.StatusCode)
+			line := fmt.Sprintf("[EAGLE] %s  %s", res.Path, res.EagleSummary())
 			fmt.Println(line)
 		} else {
 			fmt.Println(res.String())
