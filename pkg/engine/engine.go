@@ -1634,6 +1634,19 @@ func (e *Engine) isSimhashSoftFour(bodyHash uint64) bool {
 		}
 	}
 
+	const maxSimhashCentroids = 5000
+	if len(e.simhashClusters) >= maxSimhashCentroids {
+		var lowestCentroid uint64
+		lowestCount := int(1e9)
+		for centroid, count := range e.simhashClusters {
+			if count < lowestCount {
+				lowestCount = count
+				lowestCentroid = centroid
+			}
+		}
+		delete(e.simhashClusters, lowestCentroid)
+	}
+
 	e.simhashClusters[bodyHash] = 1
 	return false
 }

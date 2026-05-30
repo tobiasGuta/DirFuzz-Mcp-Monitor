@@ -3,37 +3,54 @@ package engine
 import (
 	"hash/fnv"
 	"math/bits"
-	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
-// simhashBody computes a 64-bit SimHash fingerprint for a response body.
+// simhashBody computes a 64-bit SimHash fingerprint for a response body without allocating.
 func simhashBody(body []byte) uint64 {
-	text := string(body)
-	tokens := strings.FieldsFunc(text, func(r rune) bool {
-		return unicode.IsSpace(r) || unicode.IsPunct(r)
-	})
-	if len(tokens) == 0 {
+	if len(body) == 0 {
 		return 0
 	}
 
 	var vector [64]int
-	for _, token := range tokens {
-		if token == "" {
-			continue
-		}
+	hasTokens := false
 
-		hasher := fnv.New64a()
-		_, _ = hasher.Write([]byte(token))
-		h := hasher.Sum64()
+	inToken := false
+	tokenStart := 0
 
-		for bit := 0; bit < 64; bit++ {
-			if h&(uint64(1)<<bit) != 0 {
-				vector[bit]++
-			} else {
-				vector[bit]--
+	for i := 0; i < len(body); {
+		r, size := utf8.DecodeRune(body[i:])
+		isBoundary := unicode.IsSpace(r) || unicode.IsPunct(r)
+
+		if isBoundary {
+			if inToken {
+				token := body[tokenStart:i]
+				if len(token) > 0 {
+					hashToken(token, &vector)
+					hasTokens = true
+				}
+				inToken = false
+			}
+		} else {
+			if !inToken {
+				tokenStart = i
+				inToken = true
 			}
 		}
+		i += size
+	}
+
+	if inToken {
+		token := body[tokenStart:]
+		if len(token) > 0 {
+			hashToken(token, &vector)
+			hasTokens = true
+		}
+	}
+
+	if !hasTokens {
+		return 0
 	}
 
 	var fingerprint uint64
@@ -43,6 +60,20 @@ func simhashBody(body []byte) uint64 {
 		}
 	}
 	return fingerprint
+}
+
+func hashToken(token []byte, vector *[64]int) {
+	hasher := fnv.New64a()
+	_, _ = hasher.Write(token)
+	h := hasher.Sum64()
+
+	for bit := 0; bit < 64; bit++ {
+		if h&(uint64(1)<<bit) != 0 {
+			vector[bit]++
+		} else {
+			vector[bit]--
+		}
+	}
 }
 
 func hammingDistance(a, b uint64) int {

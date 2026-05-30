@@ -365,3 +365,12 @@ func containsStringIgnoreCase(values []string, want string) bool {
 	}
 	return false
 }
+
+func TestExtractParamHintsFromEmptyBodyURL(t *testing.T) {
+	hints := extractParamHints("http://example.com/form?token=xyz&api_key=123", "text/html", nil)
+	for _, want := range []string{"token", "api_key"} {
+		if !containsStringIgnoreCase(hints, want) {
+			t.Fatalf("expected extracted URL hint %q in %v when body is empty", want, hints)
+		}
+	}
+}

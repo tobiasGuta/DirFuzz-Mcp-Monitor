@@ -2886,6 +2886,15 @@ func (m *Model) initCommands() {
 			maxRetries := m.Engine.Config.MaxRetries
 			saveRaw := m.Engine.Config.SaveRaw
 			spidering := m.Engine.Config.Spidering
+			bypass403 := m.Engine.Config.FourOhThreeBypass
+			wafEvasion := m.Engine.Config.WAFEvasion
+			verbTamper := m.Engine.Config.VerbTamper
+			antiBot := m.Engine.Config.AntiBotFallback
+			allowPrivate := m.Engine.Config.AllowPrivateTargets
+			excludePaths := make([]string, len(m.Engine.Config.ExcludePathPatterns))
+			copy(excludePaths, m.Engine.Config.ExcludePathPatterns)
+			oobEnabled := m.Engine.Config.OOBEnabled
+			interactshServer := m.Engine.Config.InteractshServer
 			m.Engine.Config.RUnlock()
 
 			sort.Ints(filters)
@@ -2921,6 +2930,10 @@ func (m *Model) initCommands() {
 				sb.WriteString(wrapText(line, wrapWidth))
 				sb.WriteString("\n")
 			}
+
+			writeLine("=== Command Line Invocation ===")
+			writeLine(strings.Join(os.Args, " "))
+			writeLine("")
 
 			writeLine("=== Current Config ===")
 			writeLine(fmt.Sprintf("Target: %s", target))
@@ -2966,6 +2979,18 @@ func (m *Model) initCommands() {
 			writeLine(fmt.Sprintf("H2ConcurrentStreams: %d", h2Streams))
 			writeLine(fmt.Sprintf("Retries: %d", maxRetries))
 			writeLine(fmt.Sprintf("Spidering: %v", spidering))
+			writeLine(fmt.Sprintf("Bypass403: %v", bypass403))
+			writeLine(fmt.Sprintf("WAFEvasion: %v", wafEvasion))
+			writeLine(fmt.Sprintf("VerbTamper: %v", verbTamper))
+			writeLine(fmt.Sprintf("AntiBotFallback: %v", antiBot))
+			writeLine(fmt.Sprintf("AllowPrivate: %v", allowPrivate))
+			if len(excludePaths) > 0 {
+				writeLine(fmt.Sprintf("ExcludePaths: %s", strings.Join(excludePaths, ", ")))
+			}
+			writeLine(fmt.Sprintf("OOBEnabled: %v", oobEnabled))
+			if oobEnabled && interactshServer != "" {
+				writeLine(fmt.Sprintf("InteractshServer: %s", interactshServer))
+			}
 			if matchRegex != "" {
 				writeLine(fmt.Sprintf("MatchRegex: %s", matchRegex))
 			}
@@ -3147,6 +3172,30 @@ func (m *Model) initCommands() {
 			}
 			if maxRetries > 0 {
 				writeLine(fmt.Sprintf("  -retry %d", maxRetries))
+			}
+			if bypass403 {
+				writeLine("  --bypass-403")
+			}
+			if wafEvasion {
+				writeLine("  --waf-evasion")
+			}
+			if verbTamper {
+				writeLine("  --verb-tamper")
+			}
+			if !antiBot {
+				writeLine("  --anti-bot-fallback=false")
+			}
+			if allowPrivate {
+				writeLine("  --allow-private")
+			}
+			for _, pat := range excludePaths {
+				writeLine(fmt.Sprintf("  --exclude-path %q", pat))
+			}
+			if oobEnabled {
+				writeLine("  --oob")
+			}
+			if oobEnabled && interactshServer != "" {
+				writeLine(fmt.Sprintf("  --oob-server %s", interactshServer))
 			}
 
 			return strings.TrimRight(sb.String(), "\n")

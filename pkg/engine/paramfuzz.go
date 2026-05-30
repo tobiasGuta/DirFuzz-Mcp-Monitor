@@ -932,14 +932,12 @@ func paramHitIdentity(hit ParamHit) string {
 }
 
 func extractParamHints(targetURL string, contentType string, body []byte) []string {
-	if len(body) == 0 {
-		return nil
-	}
-
 	var hints []string
 	hints = append(hints, extractParamHintsFromURL(targetURL)...)
-	hints = append(hints, extractParamHintsFromText(string(body))...)
-	hints = append(hints, extractParamHintsFromHTML(body)...)
+	if len(body) > 0 {
+		hints = append(hints, extractParamHintsFromText(string(body))...)
+		hints = append(hints, extractParamHintsFromHTML(body)...)
+	}
 	return uniqueStrings(hints)
 }
 
