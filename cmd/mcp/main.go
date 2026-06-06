@@ -697,7 +697,7 @@ func main() {
 			mcp.Description("Comma-separated HTTP methods, e.g. GET,POST,PUT (optional)"),
 		),
 		mcp.WithString("body",
-			mcp.Description("Request body for POST/PUT/PATCH; {PAYLOAD} is substituted (optional)"),
+			mcp.Description("Request body for POST/PUT/PATCH; {PAYLOAD} fuzzes the body without appending to the URL unless the target URL also has {PAYLOAD} (optional)"),
 		),
 		mcp.WithArray("headers",
 			mcp.Description("Custom headers as 'Key: Value' strings (optional)"),

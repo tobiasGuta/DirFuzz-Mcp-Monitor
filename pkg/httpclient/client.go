@@ -280,8 +280,12 @@ func SendRawRequestWithContext(
 
 	// Try to get a pooled connection (only when no proxy, proxy conns aren't trivially reusable).
 	var conn net.Conn
+	pooled := false
 	if proxyAddr == "" {
 		conn = DefaultPool.Get(poolKey)
+		if conn != nil {
+			pooled = true
+		}
 	}
 
 	// Dial a new connection if pool miss.
@@ -295,30 +299,27 @@ func SendRawRequestWithContext(
 	// Send the request.
 	err = conn.SetDeadline(time.Now().Add(timeout))
 	if err != nil {
+		conn.Close()
 		return nil, err
 	}
 
 	if ctx.Err() != nil {
-		err := conn.Close()
-		if err != nil {
-			return nil, err
-		}
+		conn.Close()
 		return nil, ctx.Err()
 	}
 
 	_, writeErr := conn.Write(rawRequest)
 	if writeErr != nil {
 		// Stale pooled connection — discard and retry with a fresh connection.
-		err := conn.Close()
-		if err != nil {
-			return nil, err
-		}
+		conn.Close()
+		pooled = false
 		conn, err = dialNew(ctx, u.Scheme, address, host, proxyAddr, proxyIsHTTP, timeout, insecure)
 		if err != nil {
 			return nil, err
 		}
 		err = conn.SetDeadline(time.Now().Add(timeout))
 		if err != nil {
+			conn.Close()
 			return nil, err
 		}
 		if _, err = conn.Write(rawRequest); err != nil {
@@ -331,7 +332,31 @@ func SendRawRequestWithContext(
 	resp, parseErr := parseRawResponse(conn)
 	if parseErr != nil {
 		conn.Close()
-		return nil, parseErr
+		// If we used a pooled connection and it failed on read, it might have been stale/half-closed by the server
+		// after the write succeeded but before/during the read. Try once more on a fresh connection.
+		if pooled {
+			pooled = false
+			conn, err = dialNew(ctx, u.Scheme, address, host, proxyAddr, proxyIsHTTP, timeout, insecure)
+			if err != nil {
+				return nil, err
+			}
+			err = conn.SetDeadline(time.Now().Add(timeout))
+			if err != nil {
+				conn.Close()
+				return nil, err
+			}
+			if _, err = conn.Write(rawRequest); err != nil {
+				conn.Close()
+				return nil, fmt.Errorf("failed to write request: %w", err)
+			}
+			resp, parseErr = parseRawResponse(conn)
+			if parseErr != nil {
+				conn.Close()
+				return nil, parseErr
+			}
+		} else {
+			return nil, parseErr
+		}
 	}
 	resp.Duration = time.Since(start)
 

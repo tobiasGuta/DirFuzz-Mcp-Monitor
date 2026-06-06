@@ -43,7 +43,7 @@ func parseFlags() cliConfig {
 		false,
 		"Inject X-HTTP-Method-Override / X-Forwarded-Method headers alongside every non-GET method (requires -m with non-GET verbs)",
 	)
-	body := flag.String("d", "", "Request body for POST / PUT")
+	body := flag.String("d", "", "Request body for POST / PUT / PATCH; {PAYLOAD} fuzzes the body without appending to the URL")
 	follow := flag.Bool("follow", false, "Follow HTTP redirects")
 	maxRedirects := flag.Int("max-redirects", engine.DefaultMaxRedirects, "Maximum redirects to follow")
 	timeout := flag.Duration("timeout", engine.DefaultHTTPTimeout, "Per-request timeout  (e.g. 5s)")
@@ -136,7 +136,6 @@ func parseFlags() cliConfig {
 	proxyFile := flag.String("proxy", "", "Path to proxy list  (HTTP / SOCKS5 URLs, one per line)")
 	proxyOut := flag.String("proxy-out", "",
 		"Forward every hit to this proxy for manual review  (e.g. http://127.0.0.1:8080)")
-
 
 	// ── Nuclei Integration ───────────────────────────────────────────────────
 	nuclei := flag.Bool("nuclei", false, "Enable Nuclei integration to scan discovered URLs")
@@ -259,9 +258,8 @@ func parseFlags() cliConfig {
 		ProxyFile: *proxyFile,
 		ProxyOut:  *proxyOut,
 
-
-		Nuclei:       *nuclei,
-		NucleiArgs:   *nucleiArgs,
+		Nuclei:     *nuclei,
+		NucleiArgs: *nucleiArgs,
 
 		NoTUI:   *noTUI,
 		Verbose: *verbose,

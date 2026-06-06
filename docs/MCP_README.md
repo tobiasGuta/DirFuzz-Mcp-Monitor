@@ -57,7 +57,7 @@ Parameters:
 - `extensions` `string` optional: comma-separated extensions to append to every path.
 - `match_codes` `string` optional: comma-separated HTTP status codes to keep.
 - `methods` `string` optional: comma-separated HTTP methods to try.
-- `body` `string` optional: request body with `{PAYLOAD}` substitution.
+- `body` `string` optional: request body with `{PAYLOAD}` substitution. If the target URL has no `{PAYLOAD}`, body fuzzing keeps the URL fixed and inserts each wordlist entry only in the body.
 - `headers` `string[]` optional: extra headers as `Key: Value` strings.
 - `rps` `number` optional: global requests-per-second cap.
 - `timeout_seconds` `number` optional: per-request timeout in seconds.

@@ -494,8 +494,6 @@ type Engine struct {
 	isRunning          atomic.Bool
 	activeWorkers      atomic.Int64
 
-
-
 	// Worker management
 	workerLock   sync.Mutex
 	workerStopCh chan struct{}
@@ -563,8 +561,6 @@ type Engine struct {
 	// Compiled regexes (cached)
 	matchRe  atomic.Pointer[regexp.Regexp]
 	filterRe atomic.Pointer[regexp.Regexp]
-
-
 
 	// Out-of-band interaction client for blind vulnerability detection.
 	InteractshClient      *interactclient.Client
@@ -1489,8 +1485,6 @@ func (e *Engine) SetFilterRegex(pattern string) error {
 	return nil
 }
 
-
-
 func (e *Engine) UpdateUserAgent(ua string) {
 	e.Config.Lock()
 	normalized := normalizeUserAgent(ua)
@@ -1632,6 +1626,19 @@ func (e *Engine) isSimhashSoftFour(bodyHash uint64) bool {
 			e.simhashClusters[centroid] = count
 			return count >= limit
 		}
+	}
+
+	const maxSimhashCentroids = 5000
+	if len(e.simhashClusters) >= maxSimhashCentroids {
+		var lowestCentroid uint64
+		lowestCount := int(1e9)
+		for centroid, count := range e.simhashClusters {
+			if count < lowestCount {
+				lowestCount = count
+				lowestCentroid = centroid
+			}
+		}
+		delete(e.simhashClusters, lowestCentroid)
 	}
 
 	e.simhashClusters[bodyHash] = 1
@@ -1902,8 +1909,6 @@ func (e *Engine) KickoffScanner(path string, startLine int64) {
 	sc := e.scannerCtx.Load()
 	if sc != nil {
 		runID := atomic.LoadInt64(&e.RunID)
-		
-
 
 		if e.shouldRunPassiveHarvest() {
 			e.AddScanner()
@@ -2887,6 +2892,20 @@ func rawResponseFromHTTPResponse(resp *http.Response, start time.Time) (*httpcli
 
 // ─── Worker ───────────────────────────────────────────────────────────────────
 
+func fullURLForPayload(baseURL, payload, requestBody string) string {
+	if strings.Contains(baseURL, "{PAYLOAD}") {
+		return strings.Replace(baseURL, "{PAYLOAD}", payload, 1)
+	}
+	if strings.Contains(requestBody, "{PAYLOAD}") {
+		return baseURL
+	}
+	word := payload
+	if !strings.HasPrefix(word, "/") {
+		word = "/" + word
+	}
+	return strings.TrimRight(baseURL, "/") + word
+}
+
 // buildRequest constructs a raw HTTP request byte slice.
 func buildRequest(method, reqPath, reqHost, ua, headersStr, bodyContent string) []byte {
 	// Prevent CRLF injection in the request line.
@@ -3102,8 +3121,6 @@ func (e *Engine) cleanupJob(shouldExit bool) bool {
 // (caller should exit).
 func (e *Engine) handleResultWithContext(ctx context.Context, res Result) bool {
 
-
-
 	e.SubmitToNuclei(res.URL)
 
 	select {
@@ -3118,8 +3135,6 @@ func (e *Engine) handleResultWithContext(ctx context.Context, res Result) bool {
 // handleResultNonBlocking attempts a non-blocking send.
 // If the results channel is full the result is dropped and TUIDropped is incremented.
 func (e *Engine) handleResultNonBlocking(res Result) {
-
-
 
 	e.SubmitToNuclei(res.URL)
 
@@ -3325,17 +3340,9 @@ func (e *Engine) worker(id int) {
 			currentBaseURL := e.baseURL
 			e.targetLock.RUnlock()
 
-			// Build full URL.
-			var fullURL string
-			word := payload
-			if strings.Contains(currentBaseURL, "{PAYLOAD}") {
-				fullURL = strings.Replace(currentBaseURL, "{PAYLOAD}", word, 1)
-			} else {
-				if !strings.HasPrefix(word, "/") {
-					word = "/" + word
-				}
-				fullURL = strings.TrimRight(currentBaseURL, "/") + word
-			}
+			// Build full URL. If the body contains a payload placeholder and
+			// the target URL does not, keep the URL fixed and fuzz only the body.
+			fullURL := fullURLForPayload(currentBaseURL, payload, requestBody)
 
 			parsedURL, errURL := url.Parse(fullURL)
 			if errURL != nil {
@@ -3413,8 +3420,6 @@ func (e *Engine) worker(id int) {
 			if pluginMethod == "" {
 				pluginMethod = "GET"
 			}
-
-
 
 			var reqHdrKeys []string
 			for k := range reqHeaders {
@@ -3840,8 +3845,6 @@ func (e *Engine) worker(id int) {
 			}
 			e.eagleLock.RUnlock()
 
-
-
 			if timingOracleHit {
 				result.Labels = append(result.Labels, "TIMING-ORACLE")
 				oracleConfidence := fmt.Sprintf("z=%.1f", timingOracleZ)
@@ -4229,8 +4232,6 @@ func (e *Engine) Shutdown() {
 			return true
 		})
 
-
-
 		// Cleanly shut down Nuclei integration
 		e.stopNuclei()
 
@@ -4287,5 +4288,3 @@ func (e *Engine) DumpMeta() EngineConfigDump {
 		SmartAPI:   e.Config.SmartAPI,
 	}
 }
-
-

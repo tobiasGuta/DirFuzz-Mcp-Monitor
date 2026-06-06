@@ -605,7 +605,10 @@ func EvasionStrategiesFor(vendor string) []EvasionTechnique {
 			{
 				Name: "path-dotslash",
 				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
-					return "/%2e" + p, cloneHeadersMap(h)
+					mutated := mutatePathOnly(p, func(path string) string {
+						return "/%2e" + path
+					})
+					return mutated, cloneHeadersMap(h)
 				},
 			},
 		}
@@ -638,25 +641,37 @@ func EvasionStrategiesFor(vendor string) []EvasionTechnique {
 			{
 				Name: "trailing-slash",
 				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
-					return strings.TrimRight(p, "/") + "/", cloneHeadersMap(h)
+					mutated := mutatePathOnly(p, func(path string) string {
+						return strings.TrimRight(path, "/") + "/"
+					})
+					return mutated, cloneHeadersMap(h)
 				},
 			},
 			{
 				Name: "dot-slash",
 				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
-					return p + "/./", cloneHeadersMap(h)
+					mutated := mutatePathOnly(p, func(path string) string {
+						return path + "/./"
+					})
+					return mutated, cloneHeadersMap(h)
 				},
 			},
 			{
 				Name: "url-encoded-slash",
 				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
-					return strings.Replace(p, "/", "%2f", 1), cloneHeadersMap(h)
+					mutated := mutatePathOnly(p, func(path string) string {
+						return strings.Replace(path, "/", "%2f", 1)
+					})
+					return mutated, cloneHeadersMap(h)
 				},
 			},
 			{
 				Name: "double-slash-prefix",
 				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
-					return "//" + strings.TrimPrefix(p, "/"), cloneHeadersMap(h)
+					mutated := mutatePathOnly(p, func(path string) string {
+						return "//" + strings.TrimPrefix(path, "/")
+					})
+					return mutated, cloneHeadersMap(h)
 				},
 			},
 			{
@@ -676,16 +691,22 @@ func EvasionStrategiesFor(vendor string) []EvasionTechnique {
 			{
 				Name: "trailing-dot-slash",
 				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
-					return p + "/./", cloneHeadersMap(h)
+					mutated := mutatePathOnly(p, func(path string) string {
+						return path + "/./"
+					})
+					return mutated, cloneHeadersMap(h)
 				},
 			},
 			{
 				Name: "unicode-first-char",
 				ModifyRequest: func(p string, h map[string]string, method string) (string, map[string]string) {
-					if len(p) > 1 {
-						return fmt.Sprintf("/%s%s", "%C0%AF", p[1:]), cloneHeadersMap(h)
-					}
-					return p, cloneHeadersMap(h)
+					mutated := mutatePathOnly(p, func(path string) string {
+						if len(path) > 1 {
+							return fmt.Sprintf("/%s%s", "%C0%AF", path[1:])
+						}
+						return path
+					})
+					return mutated, cloneHeadersMap(h)
 				},
 			},
 		}
@@ -773,25 +794,37 @@ func Bypass403Techniques(rawPath string, headers map[string]string) []EvasionTec
 		{
 			Name: "trailing-slash",
 			ModifyRequest: func(p string, h map[string]string, _ string) (string, map[string]string) {
-				return strings.TrimRight(p, "/") + "/", cloneHeaders(h)
+				mutated := mutatePathOnly(p, func(path string) string {
+					return strings.TrimRight(path, "/") + "/"
+				})
+				return mutated, cloneHeaders(h)
 			},
 		},
 		{
 			Name: "dot-slash",
 			ModifyRequest: func(p string, h map[string]string, _ string) (string, map[string]string) {
-				return p + "/./", cloneHeaders(h)
+				mutated := mutatePathOnly(p, func(path string) string {
+					return path + "/./"
+				})
+				return mutated, cloneHeaders(h)
 			},
 		},
 		{
 			Name: "url-encoded-slash",
 			ModifyRequest: func(p string, h map[string]string, _ string) (string, map[string]string) {
-				return strings.Replace(p, "/", "%2f", 1), cloneHeaders(h)
+				mutated := mutatePathOnly(p, func(path string) string {
+					return strings.Replace(path, "/", "%2f", 1)
+				})
+				return mutated, cloneHeaders(h)
 			},
 		},
 		{
 			Name: "double-slash-prefix",
 			ModifyRequest: func(p string, h map[string]string, _ string) (string, map[string]string) {
-				return "//" + strings.TrimPrefix(p, "/"), cloneHeaders(h)
+				mutated := mutatePathOnly(p, func(path string) string {
+					return "//" + strings.TrimPrefix(path, "/")
+				})
+				return mutated, cloneHeaders(h)
 			},
 		},
 		{
@@ -803,4 +836,14 @@ func Bypass403Techniques(rawPath string, headers map[string]string) []EvasionTec
 			},
 		},
 	}
+}
+
+func mutatePathOnly(p string, mutate func(string) string) string {
+	idx := strings.Index(p, "?")
+	if idx < 0 {
+		return mutate(p)
+	}
+	path := p[:idx]
+	query := p[idx:]
+	return mutate(path) + query
 }

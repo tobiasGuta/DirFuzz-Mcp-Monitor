@@ -722,6 +722,65 @@ func TestVerbTamperHeaders(t *testing.T) {
 	}
 }
 
+func TestWorkerFuzzesBodyPayloadWithoutAppendingURL(t *testing.T) {
+	type observed struct {
+		method string
+		path   string
+		otp    string
+		action string
+	}
+
+	observedCh := make(chan observed, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm() failed: %v", err)
+		}
+		observedCh <- observed{
+			method: r.Method,
+			path:   r.URL.Path,
+			otp:    r.Form.Get("otp"),
+			action: r.Form.Get("action"),
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	eng := NewEngine(1, 100, 0.01)
+	eng.UpdateConfig(func(c *Config) {
+		c.AllowPrivateTargets = true
+		c.RequestBody = "otp={PAYLOAD}&action="
+	})
+	if err := eng.SetTarget(server.URL + "/two_fa"); err != nil {
+		t.Fatalf("SetTarget() failed: %v", err)
+	}
+
+	eng.Start()
+	defer eng.Shutdown()
+
+	runID := atomic.LoadInt64(&eng.RunID)
+	eng.Submit(Job{Path: "1111", Depth: 0, Method: "POST", RunID: runID})
+	eng.Wait()
+
+	select {
+	case got := <-observedCh:
+		if got.method != "POST" {
+			t.Fatalf("method = %q, want POST", got.method)
+		}
+		if got.path != "/two_fa" {
+			t.Fatalf("path = %q, want /two_fa", got.path)
+		}
+		if got.otp != "1111" {
+			t.Fatalf("otp = %q, want 1111", got.otp)
+		}
+		if got.action != "" {
+			t.Fatalf("action = %q, want empty", got.action)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for worker request")
+	}
+}
+
 func TestWorkerVerbTamperHonorsManualOverrideHeader(t *testing.T) {
 	type observed struct {
 		xHTTPMethodOverride string
