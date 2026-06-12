@@ -428,6 +428,10 @@ func findResultCluster(clusters []resultCluster, fp uint64, threshold int) int {
 
 func resultIdentityKey(res Result) string {
 	var b strings.Builder
+	b.WriteString(strings.TrimSpace(res.URL))
+	b.WriteByte('|')
+	b.WriteString(strings.TrimSpace(res.Path))
+	b.WriteByte('|')
 	b.WriteString(strconv.Itoa(res.StatusCode))
 	b.WriteByte('|')
 	b.WriteString(res.Method)

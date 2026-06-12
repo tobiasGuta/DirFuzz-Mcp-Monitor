@@ -301,20 +301,24 @@ func (e *Engine) ProbeWAF(ctx context.Context, targetURL, rawPath, method string
 
 	snap := e.configSnap.Load()
 	ua := "DirFuzz/2.0"
-	headersTemplate := ""
+	baseHeaders := make(map[string]string)
 	if snap != nil {
 		if snap.UserAgent != "" {
 			ua = snap.UserAgent
 		}
-		headersTemplate = snap.HeadersTemplate
+		for k, v := range snap.Headers {
+			baseHeaders[k] = v
+		}
+	}
+	for k, v := range headers {
+		baseHeaders[k] = v
 	}
 	if timeout <= 0 {
 		timeout = DefaultHTTPTimeout
 	}
 
-	baseHeaders := cloneHeadersMap(headers)
 	basePath := reqPath
-	rawRequest := buildRequest(method, basePath, parsed.Host, ua, headersTemplate, "")
+	rawRequest := buildRequest(method, basePath, parsed.Host, ua, renderHeaderBlock(baseHeaders), "")
 	resp, err := e.executeRequestWithRetry(ctx, parsed.String(), rawRequest, timeout, proxyAddr)
 	if err != nil {
 		return report, err

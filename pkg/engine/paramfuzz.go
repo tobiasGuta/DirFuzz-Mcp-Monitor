@@ -18,6 +18,7 @@ import (
 type ParamTask struct {
 	URL                 string
 	Method              string
+	Headers             map[string]string
 	BaselineHash        uint64
 	BaselineStatusCode  int
 	BaselineSize        int
@@ -381,14 +382,13 @@ func (e *Engine) FuzzParams(ctx context.Context, task ParamTask, customWordlist 
 			reqPath += "?" + parsed.RawQuery
 		}
 		ua := "DirFuzz/2.0"
-		headersTemplate := ""
+		headersTemplate := paramHeadersTemplate(snap, task.Headers)
 		timeout := DefaultHTTPTimeout
 		proxyOut := ""
 		if snap != nil {
 			if snap.UserAgent != "" {
 				ua = snap.UserAgent
 			}
-			headersTemplate = snap.HeadersTemplate
 			if snap.Timeout > 0 {
 				timeout = snap.Timeout
 			}
@@ -474,7 +474,7 @@ func (e *Engine) probeParamSubset(
 		return ParamHit{}, false, nil
 	}
 
-	probeURL, rawReq, err := buildParamProbeRequest(task.URL, params, snap)
+	probeURL, rawReq, err := buildParamProbeRequest(task.URL, params, snap, task.Headers)
 	if err != nil {
 		return ParamHit{}, false, err
 	}
@@ -550,7 +550,7 @@ func (e *Engine) paramNoiseControls(
 
 	controls := make([]paramResponseFingerprint, 0, len(controlParams))
 	for _, controlParam := range controlParams {
-		probeURL, rawReq, err := buildParamProbeRequest(task.URL, []string{controlParam}, snap)
+		probeURL, rawReq, err := buildParamProbeRequest(task.URL, []string{controlParam}, snap, task.Headers)
 		if err != nil {
 			continue
 		}
@@ -596,7 +596,7 @@ func chooseParamControlNames(taskURL string, candidates []string) []string {
 	return controls
 }
 
-func buildParamProbeRequest(taskURL string, params []string, snap *configSnapshot) (string, []byte, error) {
+func buildParamProbeRequest(taskURL string, params []string, snap *configSnapshot, headers map[string]string) (string, []byte, error) {
 	u, err := url.Parse(taskURL)
 	if err != nil {
 		return "", nil, fmt.Errorf("invalid param fuzz target URL: %w", err)
@@ -620,15 +620,28 @@ func buildParamProbeRequest(taskURL string, params []string, snap *configSnapsho
 	}
 
 	ua := "DirFuzz/2.0"
-	headersTemplate := ""
+	headersTemplate := paramHeadersTemplate(snap, headers)
 	if snap != nil {
 		if snap.UserAgent != "" {
 			ua = snap.UserAgent
 		}
-		headersTemplate = snap.HeadersTemplate
 	}
 
 	return u.String(), buildRequest("GET", reqPath, u.Host, ua, headersTemplate, ""), nil
+}
+
+func paramHeadersTemplate(snap *configSnapshot, headers map[string]string) string {
+	if snap == nil {
+		return renderHeaderBlock(headers)
+	}
+	if len(headers) == 0 {
+		return snap.HeadersTemplate
+	}
+	merged := cloneHeadersMap(snap.Headers)
+	for k, v := range headers {
+		merged[k] = v
+	}
+	return renderHeaderBlock(merged)
 }
 
 func responseDiffersFromBaseline(baseline paramBaseline, statusCode, size int, bodyHash uint64) bool {
@@ -786,6 +799,7 @@ func (e *Engine) ProbeHiddenParams(ctx context.Context, targetURL, rawPath, meth
 	task := ParamTask{
 		URL:                 parsed.String(),
 		Method:              method,
+		Headers:             cloneHeadersMap(headers),
 		BaselineHash:        bodyHash,
 		BaselineStatusCode:  resp.StatusCode,
 		BaselineSize:        bodySize,

@@ -257,6 +257,36 @@ The diff view highlights deleted text in red on the left and added text in green
 - `cmd/monitor` runs recurring scans and can alert on new findings.
 - `cmd/mcp` exposes the scanner through MCP for scoped AI workflows.
 
+### Safe Codex Desktop MCP Configuration
+
+For day-to-day Codex Desktop use, keep MCP scanning disabled. Read-only MCP tools such as `dirfuzz_list_scope` and `dirfuzz_build_scan` continue to work, but `dirfuzz_scan` fails before scope checks, wordlist resolution, engine setup, or network activity.
+
+```json
+{
+  "mcpServers": {
+    "dirfuzz": {
+      "command": "D:\\Tools\\DirFuzz-Mcp-Monitor\\dirfuzz-mcp.exe",
+      "args": [],
+      "env": {
+        "DIRFUZZ_WORDLIST_DIR": "D:\\Tools\\DirFuzz-Mcp-Monitor\\wordlists",
+        "DIRFUZZ_SCOPE_DIR": "D:\\Tools\\H1-Scope-Watcher\\definitions",
+        "DIRFUZZ_OUTPUT_DIR": "D:\\Tools\\DirFuzz-Mcp-Monitor\\output",
+        "DIRFUZZ_SCAN_ENABLED": "false"
+      }
+    }
+  }
+}
+```
+
+For a deliberately approved scan session, temporarily restart Codex Desktop with both scan approval settings:
+
+```json
+"DIRFUZZ_SCAN_ENABLED": "true",
+"DIRFUZZ_SCAN_APPROVAL_TOKEN": "<my-secret-token>"
+```
+
+When `DIRFUZZ_SCAN_APPROVAL_TOKEN` is configured, every `dirfuzz_scan` call must include an exactly matching `approval_token` argument. The token is redacted from MCP audit logs.
+
 ## Docker / Compose
 
 The included `docker-compose.yml` can build and run the monitoring workflow.

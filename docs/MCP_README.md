@@ -51,9 +51,16 @@ Structured prompt for REST or JSON API targets that emphasizes API-prefix discov
 
 Run a directory-fuzzing scan against a scoped target and write the structured results to `DIRFUZZ_OUTPUT_DIR`.
 
+Server-side safety gate:
+- `DIRFUZZ_SCAN_ENABLED` must be set to exactly `true`; by default scans are disabled.
+- When `DIRFUZZ_SCAN_APPROVAL_TOKEN` is configured, the tool call must include a matching `approval_token`.
+- Failed approval checks happen before scope validation, wordlist resolution, engine setup, or network activity.
+- `approval_token` is redacted from audit logs.
+
 Parameters:
 - `target` `string` required: full target URL to fuzz.
 - `wordlist` `string` required: wordlist filename from `DIRFUZZ_WORDLIST_DIR`.
+- `approval_token` `string` required when `DIRFUZZ_SCAN_APPROVAL_TOKEN` is configured.
 - `extensions` `string` optional: comma-separated extensions to append to every path.
 - `match_codes` `string` optional: comma-separated HTTP status codes to keep.
 - `methods` `string` optional: comma-separated HTTP methods to try.
@@ -389,6 +396,8 @@ If `DIRFUZZ_OUTPUT_DIR` is missing, the server now prints a copy-paste Claude De
   - `DIRFUZZ_OUTPUT_DIR` — Directory for results tracking and analytical constraints.
 
 - **Optional Modifications**:
+  - `DIRFUZZ_SCAN_ENABLED` — Must be exactly `true` to allow `dirfuzz_scan` (Default: disabled).
+  - `DIRFUZZ_SCAN_APPROVAL_TOKEN` — Optional server-side approval token. When set, `dirfuzz_scan` requires a matching `approval_token` argument.
   - `DIRFUZZ_MAX_THREADS` — Positive integer limit of worker concurrency configurations (Default: 15).
   - `DIRFUZZ_MAX_RESULTS` — Artificial ceiling truncating result sets to lower LLM Context overhead (Default: 200).
   - `DIRFUZZ_MAX_CONCURRENT_SCANS` — Maximum number of concurrent scans the MCP server will allow at once (Default: 5).
@@ -401,10 +410,41 @@ If `DIRFUZZ_OUTPUT_DIR` is missing, the server now prints a copy-paste Claude De
 export DIRFUZZ_WORDLIST_DIR=/srv/dirfuzz/wordlists
 export DIRFUZZ_SCOPE_DIR=/srv/h1-scope-definitions
 export DIRFUZZ_OUTPUT_DIR=/srv/dirfuzz/results
+export DIRFUZZ_SCAN_ENABLED=false
 export DIRFUZZ_MAX_THREADS=25
 export DIRFUZZ_AUDIT_LOG=/srv/dirfuzz/logs/dirfuzz-audit.jsonl
 ./dirfuzz-mcp
 ```
+
+### Safe Codex Desktop configuration
+
+Keep scans disabled for normal Codex Desktop sessions:
+
+```json
+{
+  "mcpServers": {
+    "dirfuzz": {
+      "command": "D:\\Tools\\DirFuzz-Mcp-Monitor\\dirfuzz-mcp.exe",
+      "args": [],
+      "env": {
+        "DIRFUZZ_WORDLIST_DIR": "D:\\Tools\\DirFuzz-Mcp-Monitor\\wordlists",
+        "DIRFUZZ_SCOPE_DIR": "D:\\Tools\\H1-Scope-Watcher\\definitions",
+        "DIRFUZZ_OUTPUT_DIR": "D:\\Tools\\DirFuzz-Mcp-Monitor\\output",
+        "DIRFUZZ_SCAN_ENABLED": "false"
+      }
+    }
+  }
+}
+```
+
+For a deliberately approved scan session, temporarily set:
+
+```json
+"DIRFUZZ_SCAN_ENABLED": "true",
+"DIRFUZZ_SCAN_APPROVAL_TOKEN": "<my-secret-token>"
+```
+
+Then include the same secret as the `approval_token` argument on the `dirfuzz_scan` tool call.
 
 On Windows, either double every backslash in the JSON file or use forward slashes in the paths. A ready-to-paste Windows-specific example is provided in [claude_desktop_config.example.windows.json](D:/projects/DirFuzzV3/claude_desktop_config.example.windows.json).
 

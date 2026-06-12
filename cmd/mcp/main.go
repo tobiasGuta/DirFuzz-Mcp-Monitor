@@ -15,6 +15,8 @@
 //
 //	DIRFUZZ_MAX_THREADS    max concurrent workers per scan      (default 15)
 //	DIRFUZZ_MAX_RESULTS    max results returned to the AI       (default 200)
+//	DIRFUZZ_SCAN_ENABLED   set to "true" to allow dirfuzz_scan  (default false)
+//	DIRFUZZ_SCAN_APPROVAL_TOKEN optional token required by dirfuzz_scan
 package main
 
 import (
@@ -70,6 +72,8 @@ type mcpConfig struct {
 	rateLimitWindow    time.Duration
 	defaultToolLimit   int
 	scanToolLimit      int
+	scanEnabled        bool
+	scanApprovalToken  string
 }
 
 type rateLimitRule struct {
@@ -456,6 +460,9 @@ func loadConfig(exePath string) (mcpConfig, error) {
 		cfg.scanToolLimit = n
 	}
 
+	cfg.scanEnabled = strings.TrimSpace(os.Getenv("DIRFUZZ_SCAN_ENABLED")) == "true"
+	cfg.scanApprovalToken = os.Getenv("DIRFUZZ_SCAN_APPROVAL_TOKEN")
+
 	if raw := strings.TrimSpace(os.Getenv("DIRFUZZ_AUDIT_LOG")); raw != "" {
 		cfg.auditLogPath = raw
 	} else {
@@ -687,6 +694,9 @@ func main() {
 			mcp.Required(),
 			mcp.Description("Wordlist filename (without path) from the server's wordlist directory, e.g. common.txt"),
 		),
+		mcp.WithString("approval_token",
+			mcp.Description("Approval token required when DIRFUZZ_SCAN_APPROVAL_TOKEN is configured."),
+		),
 		mcp.WithString("extensions",
 			mcp.Description("Comma-separated extensions to append to every path, e.g. php,html,js (optional)"),
 		),
@@ -753,8 +763,8 @@ func main() {
 		return handleExpand(ctx, req, cfg)
 	}))
 
-	log.Printf("dirfuzz-mcp: starting (wordlist_dir=%s scope_dir=%s output_dir=%s audit_log=%s max_threads=%d max_results=%d max_concurrent_scans=%d scan_limit=%d/%s tool_limit=%d/%s)",
-		cfg.wordlistDir, cfg.scopeDir, cfg.outputDir, cfg.auditLogPath, cfg.maxThreads, cfg.maxResults, cfg.maxConcurrentScans, cfg.scanToolLimit, cfg.rateLimitWindow, cfg.defaultToolLimit, cfg.rateLimitWindow)
+	log.Printf("dirfuzz-mcp: starting (wordlist_dir=%s scope_dir=%s output_dir=%s audit_log=%s scan_enabled=%t approval_token_configured=%t max_threads=%d max_results=%d max_concurrent_scans=%d scan_limit=%d/%s tool_limit=%d/%s)",
+		cfg.wordlistDir, cfg.scopeDir, cfg.outputDir, cfg.auditLogPath, cfg.scanEnabled, cfg.scanApprovalToken != "", cfg.maxThreads, cfg.maxResults, cfg.maxConcurrentScans, cfg.scanToolLimit, cfg.rateLimitWindow, cfg.defaultToolLimit, cfg.rateLimitWindow)
 
 	if err := server.ServeStdio(s); err != nil {
 		log.Fatalf("dirfuzz-mcp: stdio server error: %v", err)
@@ -764,6 +774,10 @@ func main() {
 // ── tool handler ─────────────────────────────────────────────────────────────
 
 func handleScan(ctx context.Context, req mcp.CallToolRequest, cfg mcpConfig, registry *scanRegistry) (*mcp.CallToolResult, error) {
+	if err := validateScanApproval(req, cfg); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
 	// ── 1. Parse arguments ────────────────────────────────────────────────────
 	// Use req.GetString (mcp-go v0.47.1) which safely handles type assertion
 	// from the Arguments map and returns the default on any miss.
@@ -895,6 +909,23 @@ func handleScan(ctx context.Context, req mcp.CallToolRequest, cfg mcpConfig, reg
 		return mcp.NewToolResultError(fmt.Sprintf("scan completed but failed to encode JSON: %v", err)), nil
 	}
 	return mcp.NewToolResultText(string(raw)), nil
+}
+
+func validateScanApproval(req mcp.CallToolRequest, cfg mcpConfig) error {
+	if !cfg.scanEnabled {
+		return errors.New("Scanning is disabled. Set DIRFUZZ_SCAN_ENABLED=true and provide approval_token to run scans.")
+	}
+	if cfg.scanApprovalToken == "" {
+		return nil
+	}
+	token, err := requireStringArg(req, "approval_token")
+	if err != nil {
+		return errors.New("approval_token is required to run scans")
+	}
+	if token != cfg.scanApprovalToken {
+		return errors.New("approval_token is invalid")
+	}
+	return nil
 }
 
 // ── scan runner ───────────────────────────────────────────────────────────────
@@ -1348,18 +1379,30 @@ func sanitizeAuditArguments(raw any) any {
 	case map[string]any:
 		out := make(map[string]any, len(v))
 		for key, value := range v {
+			if isSensitiveAuditKey(key) {
+				out[key] = "[REDACTED]"
+				continue
+			}
 			out[key] = sanitizeAuditArguments(value)
 		}
 		return out
 	case map[string]string:
 		out := make(map[string]string, len(v))
 		for key, value := range v {
+			if isSensitiveAuditKey(key) {
+				out[key] = "[REDACTED]"
+				continue
+			}
 			out[key] = redactBearerTokens(value)
 		}
 		return out
 	default:
 		return v
 	}
+}
+
+func isSensitiveAuditKey(key string) bool {
+	return strings.EqualFold(key, "approval_token")
 }
 
 func redactBearerTokens(raw string) string {
@@ -1475,7 +1518,7 @@ func handleParamFuzz(ctx context.Context, req mcp.CallToolRequest, registry *sca
 	targetURL := resolveProbeTarget(target, rawPath)
 	report := engine.ParamProbeReport{Target: targetURL, Path: rawPath, Method: method}
 	if len(customWordlist) > 0 {
-		hits, err := eng.FuzzParams(ctx, engine.ParamTask{URL: targetURL, Method: method}, customWordlist)
+		hits, err := eng.FuzzParams(ctx, engine.ParamTask{URL: targetURL, Method: method, Headers: headers}, customWordlist)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("param fuzz failed: %v", err)), nil
 		}

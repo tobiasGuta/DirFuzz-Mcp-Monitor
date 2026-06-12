@@ -264,7 +264,7 @@ func TestFuzzParamsMergesResponseHintsIntoConfiguredWordlist(t *testing.T) {
 }
 
 func TestFuzzParamsUsesNumericProbeValuesForIdentifierParams(t *testing.T) {
-	probeURL, _, err := buildParamProbeRequest("http://example.com/api/user", []string{"id", "user_id", "token"}, nil)
+	probeURL, _, err := buildParamProbeRequest("http://example.com/api/user", []string{"id", "user_id", "token"}, nil, nil)
 	if err != nil {
 		t.Fatalf("buildParamProbeRequest returned error: %v", err)
 	}
@@ -276,6 +276,32 @@ func TestFuzzParamsUsesNumericProbeValuesForIdentifierParams(t *testing.T) {
 	}
 	if !strings.Contains(probeURL, "token=c") {
 		t.Fatalf("expected non-id param to use generic probe value, got %s", probeURL)
+	}
+}
+
+func TestBuildParamProbeRequestIncludesConfiguredAndPerCallHeaders(t *testing.T) {
+	snap := &configSnapshot{
+		Headers: map[string]string{
+			"Cookie": "session=abc",
+		},
+		HeadersTemplate: "Cookie: session=abc\r\n",
+	}
+
+	_, rawReq, err := buildParamProbeRequest(
+		"http://example.com/api/user",
+		[]string{"id"},
+		snap,
+		map[string]string{"Authorization": "Bearer test-token"},
+	)
+	if err != nil {
+		t.Fatalf("buildParamProbeRequest returned error: %v", err)
+	}
+	raw := string(rawReq)
+	if !strings.Contains(raw, "Cookie: session=abc\r\n") {
+		t.Fatalf("expected configured Cookie header in raw request, got:\n%s", raw)
+	}
+	if !strings.Contains(raw, "Authorization: Bearer test-token\r\n") {
+		t.Fatalf("expected per-call Authorization header in raw request, got:\n%s", raw)
 	}
 }
 
