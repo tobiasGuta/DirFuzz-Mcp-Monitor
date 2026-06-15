@@ -3,7 +3,6 @@ package engine
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -87,6 +86,7 @@ func (e *Engine) HarvestEndpoints(ctx context.Context) ([]string, error) {
 	}
 	insecure := e.Config.Insecure
 	h2Mode := e.Config.H2Mode
+	allowPrivate := e.Config.AllowPrivateTargets
 	e.Config.RUnlock()
 
 	if !enabled {
@@ -98,7 +98,7 @@ func (e *Engine) HarvestEndpoints(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("harvest requires a target URL")
 	}
 
-	client, err := newHarvestClient(baseURL, timeout, insecure, h2Mode)
+	client, err := newHarvestClient(baseURL, timeout, insecure, h2Mode, allowPrivate)
 	if err != nil {
 		return nil, err
 	}
@@ -124,14 +124,12 @@ func (e *Engine) HarvestEndpoints(ctx context.Context) ([]string, error) {
 	return harvestEndpointsWithOptions(e, ctx, baseURL, client, opts), nil
 }
 
-func newHarvestClient(baseURL string, timeout time.Duration, insecure bool, h2Mode bool) (*http.Client, error) {
+func newHarvestClient(baseURL string, timeout time.Duration, insecure bool, h2Mode bool, allowPrivateTargets bool) (*http.Client, error) {
 	if h2Mode {
-		return httpclient.NewH2Client(baseURL, timeout, insecure, DefaultH2MaxHeaderListSize)
+		return httpclient.NewH2ClientWithPrivatePolicy(baseURL, timeout, insecure, DefaultH2MaxHeaderListSize, allowPrivateTargets)
 	}
 
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure},
-	}
+	tr := httpclient.NewTransport(timeout, insecure, allowPrivateTargets)
 	return &http.Client{
 		Transport: tr,
 		Timeout:   timeout,

@@ -55,6 +55,7 @@ type monitorConfig struct {
 	NotifyProviderConfig string
 	StateFile            string
 	ScanInterval         time.Duration
+	MaxScanDuration      time.Duration
 	Jitter               time.Duration
 	Workers              int
 	MatchCodes           []int
@@ -122,6 +123,7 @@ func main() {
 		"wordlist", cfg.Wordlist,
 		"state_file", cfg.StateFile,
 		"scan_interval", cfg.ScanInterval.String(),
+		"max_scan_duration", cfg.MaxScanDuration.String(),
 		"jitter", cfg.Jitter.String(),
 		"workers", cfg.Workers,
 		"match_codes", cfg.MatchCodes,
@@ -334,12 +336,9 @@ func runScanCycle(
 		eng.Shutdown()
 	}()
 
-	results := make([]engine.Result, 0, 128)
-	for res := range eng.Results {
-		if !res.IsAutoFilter {
-			results = append(results, res)
-		}
-	}
+	results, timedOut := collectScanCycleResults(eng.Results, cfg.MaxScanDuration, func() {
+		go eng.Shutdown()
+	}, logger)
 
 	engineMu.Lock()
 	if *currentEngine == eng {
@@ -402,7 +401,40 @@ func runScanCycle(
 		}
 	}
 
+	if timedOut {
+		return len(interesting), fmt.Errorf("scan cycle timed out after %s", cfg.MaxScanDuration)
+	}
 	return len(interesting), nil
+}
+
+func collectScanCycleResults(resultsCh <-chan engine.Result, maxDuration time.Duration, abort func(), logger *slog.Logger) ([]engine.Result, bool) {
+	if maxDuration <= 0 {
+		maxDuration = defaultMaxScanDuration(defaultScanInterval)
+	}
+
+	results := make([]engine.Result, 0, 128)
+	timeoutTimer := time.NewTimer(maxDuration)
+	defer timeoutTimer.Stop()
+
+	for {
+		select {
+		case res, ok := <-resultsCh:
+			if !ok {
+				return results, false
+			}
+			if !res.IsAutoFilter {
+				results = append(results, res)
+			}
+		case <-timeoutTimer.C:
+			if logger != nil {
+				logger.Warn("scan cycle exceeded maximum duration; aborting current engine", "max_scan_duration", maxDuration.String())
+			}
+			if abort != nil {
+				abort()
+			}
+			return results, true
+		}
+	}
 }
 
 // ─── Findings ────────────────────────────────────────────────────────────────
@@ -712,6 +744,19 @@ func loadConfigFromEnv() (monitorConfig, error) {
 		}
 		cfg.ScanInterval = d
 	}
+	cfg.MaxScanDuration = defaultMaxScanDuration(cfg.ScanInterval)
+
+	maxScanDurationRaw := strings.TrimSpace(os.Getenv("MAX_SCAN_DURATION"))
+	if maxScanDurationRaw != "" {
+		d, err := time.ParseDuration(maxScanDurationRaw)
+		if err != nil {
+			return monitorConfig{}, fmt.Errorf("invalid MAX_SCAN_DURATION: %w", err)
+		}
+		if d <= 0 {
+			return monitorConfig{}, errors.New("MAX_SCAN_DURATION must be > 0")
+		}
+		cfg.MaxScanDuration = d
+	}
 
 	// Optional jitter to randomise schedule and avoid synchronized scans.
 	jitterRaw := strings.TrimSpace(os.Getenv("SCAN_JITTER"))
@@ -808,6 +853,17 @@ func loadConfigFromEnv() (monitorConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+func defaultMaxScanDuration(scanInterval time.Duration) time.Duration {
+	if scanInterval <= 0 {
+		return defaultScanInterval * 9 / 10
+	}
+	d := scanInterval * 9 / 10
+	if d <= 0 {
+		return scanInterval
+	}
+	return d
 }
 
 func parseStatusCodes(raw string) ([]int, error) {

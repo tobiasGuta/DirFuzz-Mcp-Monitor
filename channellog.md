@@ -1,14 +1,81 @@
-# Update Log
+# DirFuzz MCP Monitor Change Log
 
-This file tracks user-facing fixes and noteworthy updates. Keep future bugfix notes here instead of scattering them across other Markdown docs. Add new entries with the date they were made.
+This file is the single place for update notes and changelog entries.
 
-## 2026-05-27
+## Security and Reliability Fixes
+
+### MCP scan approval and scope enforcement
+
+- Added approval-token enforcement to `dirfuzz_expand`.
+- Added scope validation for `dirfuzz_expand` using the configured scope directory.
+- Changed `dirfuzz_expand` to use the stricter scan rate limit.
+- Added `approval_token` as a documented `dirfuzz_expand` argument.
+- Updated the tool description so expansion is described as approved and scope-checked.
+
+### MCP probe target validation
+
+- Updated WAF probe, parameter fuzzing, and auth-test target resolution.
+- Absolute probe URLs are now rejected unless their hostname matches the original scan target hostname.
+- Relative probe paths continue to resolve against the original scan target.
+
+### MCP token and scan-state safety
+
+- Replaced direct approval-token string comparison with constant-time comparison.
+- Cleared completed scan engine pointers so finished scans can release engine memory.
+- Moved `scanState.canceled` reads under the existing scan-state lock to avoid a data race.
+
+### Dial-time private IP filtering
+
+- Added reusable private-IP checking in `pkg/netutil`.
+- Added dial-time DNS resolution and private-IP rejection in the raw HTTP client.
+- Direct dials now resolve once, reject private or loopback IPs when private targets are disabled, and dial the validated IP.
+- Added HTTP/2 client support for the same private-target policy.
+- Threaded `AllowPrivateTargets` through engine raw requests, HTTP/2 client refresh, and harvest clients.
+
+### Monitor scan timeout
+
+- Added `MAX_SCAN_DURATION` support for the monitor.
+- Default monitor max scan duration is now 90% of `SCAN_INTERVAL`.
+- Monitor scan result collection now aborts the current engine when the max duration is exceeded.
+- Timed-out scan cycles return an explicit timeout error so the scheduler can continue.
+
+### Configuration and audit-log hygiene
+
+- Added `DIRFUZZ_SCAN_ENABLED=false` to `dirfuzz-mcp.env.example`.
+- Added a commented `DIRFUZZ_SCAN_APPROVAL_TOKEN` example with a safety note.
+- Added local `dirfuzz-audit.jsonl` paths to `.gitignore`.
+
+## Tests Added or Updated
+
+- Added MCP tests for `dirfuzz_expand` rejecting disabled scans, missing approval tokens, and out-of-scope targets.
+- Added MCP tests for rejecting different-host absolute probe URLs and allowing same-host absolute probe URLs.
+- Added MCP test to verify completed scan states clear their engine pointer.
+- Added DNS rebinding regression coverage in `pkg/httpclient`.
+- Added monitor timeout and `MAX_SCAN_DURATION` config tests.
+
+## Verification Run
+
+The focused packages touched by these changes passed:
+
+```powershell
+go test ./pkg/netutil
+go test ./pkg/httpclient
+go test ./cmd/mcp
+go test ./cmd/monitor
+```
+
+`go test ./pkg/engine` was also attempted, but the package timed out in the existing `TestChangeWordlistConcurrency` test.
+
+## Historical Updates
+
+### 2026-05-27
+
 - Added a native Nuclei Orchestrator Subprocess. When `--nuclei` is passed, DirFuzz streams discovered URLs directly into Nuclei's `stdin` via a dedicated subprocess.
 - Parsed Nuclei's JSONL `stdout` in real-time, mapping the template findings natively into DirFuzz's TUI and output log with the `NUCLEI` label.
 - Implemented concurrent deduplication (`sync.Map`) so Nuclei never double-scans the same endpoint.
 
+### 2026-05-26
 
-## 2026-05-26
 - Added anomaly-only TUI filtering with `a` and `:anomalies [on|off|toggle]` so the visible hit list can collapse down to eagle alerts, drift, discovered params, bypasses, auth-matrix findings, timing-oracle hits, and manual marks.
 - Added in-TUI triage marking so selected hits can be toggled as interesting with `t`, surfaced visually in the list/detail views, and restored from append-mode UI state on reopen.
 - Added repeatable `--exclude-path` regex support so authenticated, recursive, and harvested scan work can skip unsafe routes such as logout, delete, destroy, or reset endpoints before they ever hit the queue.
@@ -21,13 +88,14 @@ This file tracks user-facing fixes and noteworthy updates. Keep future bugfix no
 - Made `:restart` preserve visible history and repeater sessions in append mode while continuing to add or update findings from the new run.
 - Extended saved JSONL results with optional raw request/response byte fields so restored hits can keep working with hex, diff, and replay workflows when `--save-raw` is enabled.
 - Replaced the markdown-looking dashboard tables with modern card sections using bordered panels.
-- Improved the selected row styling in lists to use a left accent bar (`▸`) and colorful text instead of a full purple background.
+- Improved the selected row styling in lists to use a left accent bar (`>`) and colorful text instead of a full purple background.
 - Redesigned the footer into a compact layout with colored minimalist key chips and muted labels.
-- Upgraded the command panel to a full "⌘ Command Palette" featuring descriptions for each command and streamlined selected-item styling.
-- Added a blinking live status indicator (`● SCANNING` or `● PAUSED`) to the right side of the footer.
+- Upgraded the command panel to a full "Command Palette" featuring descriptions for each command and streamlined selected-item styling.
+- Added a blinking live status indicator (`SCANNING` or `PAUSED`) to the right side of the footer.
 - Fixed an issue where the Repeater's text area rendered an opaque background that obscured transparent terminal backgrounds.
 
-## 2026-05-25
+### 2026-05-25
+
 - Added bounded asynchronous 401/403 bypass micro-tasks that try standard path normalization and IP-spoofing headers, and emit labeled `[BYPASS: ...]` findings when a permutation returns a successful response.
 - Added JavaScript source map harvesting so `.js` responses can discover hidden routes from `SourceMap` / `X-SourceMap` headers or `sourceMappingURL` directives and feed them back into the fuzzing queue.
 - Replaced the monitor's hardcoded Slack/Discord webhook formatter with ProjectDiscovery-style notify provider config loading, so alerts can go through Slack, Discord, Telegram, Pushover, Teams, Gotify, Google Chat, SMTP, or custom webhooks from a standard `provider-config.yaml`.
@@ -38,7 +106,8 @@ This file tracks user-facing fixes and noteworthy updates. Keep future bugfix no
 - Added default-on recursive pruning through `--recursive-prune` to report low-value static/resource branches once, then avoid spending recursive depth under paths like `includes/fonts`.
 - Made recursive pruning conservative for pentest workflows: static-looking branches are still recursively scanned when their listings expose interesting names such as `config`, `.bak`, `.old`, `.env`, `secret`, `admin`, `api`, or `upload`.
 
-## 2026-05-23
+### 2026-05-23
+
 - Removed the built-in hidden-parameter brute-force list and made parameter fuzzing opt-in through `--param-wordlist` / `--param-wordlists`.
 - Disabled automatic parameter fuzzing when no parameter wordlist is provided.
 - Added smart parameter hint extraction from response text, error messages, HTML forms, and links to augment configured parameter wordlists.

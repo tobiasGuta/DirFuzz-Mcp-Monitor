@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"dirfuzz/pkg/engine"
+
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -90,6 +92,83 @@ func TestHandleScanFailsWhenApprovalTokenWrong(t *testing.T) {
 	}
 	assertToolError(t, result, "approval_token is invalid")
 	assertNoRegisteredScans(t, registry)
+}
+
+func TestHandleExpandFailsWhenScanningDisabled(t *testing.T) {
+	cfg := mcpConfig{scanEnabled: false, scanApprovalToken: "secret"}
+	req := scanRequest(map[string]any{
+		"base_target":    "https://api.example.com",
+		"hits_jsonl":     "scan-results.jsonl",
+		"approval_token": "secret",
+	})
+
+	result, err := handleExpand(context.Background(), req, cfg)
+	if err != nil {
+		t.Fatalf("handleExpand returned protocol error: %v", err)
+	}
+	assertToolError(t, result, "Scanning is disabled. Set DIRFUZZ_SCAN_ENABLED=true and provide approval_token to run scans.")
+}
+
+func TestHandleExpandFailsWhenApprovalTokenMissing(t *testing.T) {
+	cfg := mcpConfig{scanEnabled: true, scanApprovalToken: "secret"}
+	req := scanRequest(map[string]any{
+		"base_target": "https://api.example.com",
+		"hits_jsonl":  "scan-results.jsonl",
+	})
+
+	result, err := handleExpand(context.Background(), req, cfg)
+	if err != nil {
+		t.Fatalf("handleExpand returned protocol error: %v", err)
+	}
+	assertToolError(t, result, "approval_token is required to run scans")
+}
+
+func TestHandleExpandFailsWhenBaseTargetOutOfScope(t *testing.T) {
+	scopeDir := t.TempDir()
+	writeScopeFile(t, scopeDir, `[{"asset_type":"URL","asset_identifier":"api.example.com","eligible_for_bounty":true}]`)
+	cfg := mcpConfig{scanEnabled: true, scanApprovalToken: "secret", scopeDir: scopeDir}
+	req := scanRequest(map[string]any{
+		"base_target":    "https://out-of-scope.example",
+		"hits_jsonl":     "scan-results.jsonl",
+		"approval_token": "secret",
+	})
+
+	result, err := handleExpand(context.Background(), req, cfg)
+	if err != nil {
+		t.Fatalf("handleExpand returned protocol error: %v", err)
+	}
+	assertToolErrorContains(t, result, "target blocked by scope validator")
+}
+
+func TestResolveProbeTargetRejectsDifferentAbsoluteHost(t *testing.T) {
+	_, err := resolveProbeTarget("https://api.example.com/base", "https://evil.example/path")
+	if err == nil {
+		t.Fatal("expected different-host absolute probe URL to fail")
+	}
+	if !strings.Contains(err.Error(), "does not match scan target host") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestResolveProbeTargetAllowsSameAbsoluteHost(t *testing.T) {
+	got, err := resolveProbeTarget("https://api.example.com/base", "https://api.example.com/admin")
+	if err != nil {
+		t.Fatalf("resolveProbeTarget returned error: %v", err)
+	}
+	if got != "https://api.example.com/admin" {
+		t.Fatalf("resolveProbeTarget() = %q", got)
+	}
+}
+
+func TestScanStateFinishClearsEngine(t *testing.T) {
+	state := &scanState{engine: &engine.Engine{}}
+	state.finish("scan.jsonl", filepath.Join(t.TempDir(), "scan.jsonl"), false)
+
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+	if state.engine != nil {
+		t.Fatal("expected finish to clear engine pointer")
+	}
 }
 
 func TestApprovalTokenRedactedInAuditLog(t *testing.T) {
@@ -220,6 +299,26 @@ func assertToolError(t *testing.T, result *mcp.CallToolResult, want string) {
 	}
 	if got := toolResultText(t, result); got != want {
 		t.Fatalf("unexpected error text:\nwant: %q\n got: %q", want, got)
+	}
+}
+
+func assertToolErrorContains(t *testing.T, result *mcp.CallToolResult, want string) {
+	t.Helper()
+	if result == nil {
+		t.Fatal("expected result, got nil")
+	}
+	if !result.IsError {
+		t.Fatalf("expected tool error, got success: %#v", result)
+	}
+	if got := toolResultText(t, result); !strings.Contains(got, want) {
+		t.Fatalf("unexpected error text:\nwant substring: %q\n           got: %q", want, got)
+	}
+}
+
+func writeScopeFile(t *testing.T, dir, contents string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "scope.json"), []byte(contents), 0o644); err != nil {
+		t.Fatalf("write scope file: %v", err)
 	}
 }
 

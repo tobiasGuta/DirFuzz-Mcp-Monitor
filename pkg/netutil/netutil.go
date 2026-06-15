@@ -41,6 +41,20 @@ func IsPrivateHost(host string) bool {
 		return true
 	}
 
+	for _, testIP := range ips {
+		if IsPrivateIP(testIP) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsPrivateIP reports whether ip is loopback, private, link-local, or otherwise
+// local-only for DirFuzz outbound safety checks.
+func IsPrivateIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
 	for _, cidr := range []string{
 		"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
 		"169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10",
@@ -49,10 +63,8 @@ func IsPrivateHost(host string) bool {
 		if err != nil {
 			continue
 		}
-		for _, testIP := range ips {
-			if network.Contains(testIP) {
-				return true
-			}
+		if network.Contains(ip) {
+			return true
 		}
 	}
 	return false

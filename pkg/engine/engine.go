@@ -1778,6 +1778,7 @@ func (e *Engine) RefreshH2Client() error {
 	streams := e.Config.H2ConcurrentStreams
 	timeout := e.Config.Timeout
 	insecure := e.Config.Insecure
+	allowPrivate := e.Config.AllowPrivateTargets
 	e.Config.RUnlock()
 
 	if !h2Mode {
@@ -1794,7 +1795,7 @@ func (e *Engine) RefreshH2Client() error {
 		streams = DefaultH2ConcurrentStreams
 	}
 
-	client, err := httpclient.NewH2Client(baseURL, timeout, insecure, DefaultH2MaxHeaderListSize)
+	client, err := httpclient.NewH2ClientWithPrivatePolicy(baseURL, timeout, insecure, DefaultH2MaxHeaderListSize, allowPrivate)
 	if err != nil {
 		return err
 	}

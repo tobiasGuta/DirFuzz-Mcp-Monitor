@@ -16,6 +16,12 @@ import (
 // scheme. HTTPS targets negotiate h2 over TLS, while HTTP targets use h2c
 // cleartext via the http2 transport's AllowHTTP path.
 func NewH2Client(targetURL string, timeout time.Duration, insecure bool, maxHeaderListSize uint32) (*http.Client, error) {
+	return NewH2ClientWithPrivatePolicy(targetURL, timeout, insecure, maxHeaderListSize, true)
+}
+
+// NewH2ClientWithPrivatePolicy builds an HTTP/2 client with explicit
+// private-network enforcement at dial time.
+func NewH2ClientWithPrivatePolicy(targetURL string, timeout time.Duration, insecure bool, maxHeaderListSize uint32, allowPrivateTargets bool) (*http.Client, error) {
 	u, err := url.Parse(targetURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid H2 target URL: %w", err)
@@ -30,10 +36,9 @@ func NewH2Client(targetURL string, timeout time.Duration, insecure bool, maxHead
 		MaxHeaderListSize: maxHeaderListSize,
 	}
 
-	dialer := &net.Dialer{Timeout: timeout}
 	if allowHTTP {
 		transport.DialTLSContext = func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-			return dialer.DialContext(ctx, network, addr)
+			return dialContextResolved(ctx, network, addr, timeout, allowPrivateTargets, nil)
 		}
 	} else {
 		transport.TLSClientConfig = &tls.Config{
@@ -48,7 +53,16 @@ func NewH2Client(targetURL string, timeout time.Duration, insecure bool, maxHead
 			if len(cfg.NextProtos) == 0 {
 				cfg.NextProtos = []string{http2.NextProtoTLS}
 			}
-			return tls.DialWithDialer(dialer, network, addr, cfg)
+			rawConn, err := dialContextResolved(ctx, network, addr, timeout, allowPrivateTargets, nil)
+			if err != nil {
+				return nil, err
+			}
+			tlsConn := tls.Client(rawConn, cfg)
+			if err := tlsConn.HandshakeContext(ctx); err != nil {
+				rawConn.Close()
+				return nil, err
+			}
+			return tlsConn, nil
 		}
 	}
 

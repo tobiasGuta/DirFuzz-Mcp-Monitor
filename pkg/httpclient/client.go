@@ -20,12 +20,16 @@ import (
 	"syscall"
 	"time"
 
+	"dirfuzz/pkg/netutil"
+
 	"github.com/andybalholm/brotli"
 	"golang.org/x/net/proxy"
 )
 
 // MaxBodySize limits response body reading to prevent memory exhaustion.
 const MaxBodySize = 5 * 1024 * 1024 // 5 MB
+
+var lookupIPAddrContext = net.DefaultResolver.LookupIPAddr
 
 // RawResponse holds the unparsed, raw response data.
 type RawResponse struct {
@@ -240,6 +244,21 @@ func SendRawRequestWithContext(
 	proxyAddr string,
 	insecure bool,
 ) (*RawResponse, error) {
+	return SendRawRequestWithContextPolicy(ctx, targetURL, rawRequest, timeout, proxyAddr, insecure, true)
+}
+
+// SendRawRequestWithContextPolicy is SendRawRequestWithContext with an explicit
+// private-network policy. When allowPrivateTargets is false, direct dials
+// resolve the target once, reject private IPs, and dial the validated IP.
+func SendRawRequestWithContextPolicy(
+	ctx context.Context,
+	targetURL string,
+	rawRequest []byte,
+	timeout time.Duration,
+	proxyAddr string,
+	insecure bool,
+	allowPrivateTargets bool,
+) (*RawResponse, error) {
 	start := time.Now()
 
 	u, err := url.Parse(targetURL)
@@ -261,7 +280,11 @@ func SendRawRequestWithContext(
 	if insecure {
 		insecureSuffix = "+insecure"
 	}
-	poolKey := u.Scheme + insecureSuffix + "://" + address
+	privatePolicySuffix := ""
+	if allowPrivateTargets {
+		privatePolicySuffix = "+allow-private"
+	}
+	poolKey := u.Scheme + insecureSuffix + privatePolicySuffix + "://" + address
 
 	// Detect HTTP vs SOCKS5 proxy.
 	proxyIsHTTP := false
@@ -277,6 +300,11 @@ func SendRawRequestWithContext(
 	if proxyIsHTTP && u.Scheme == "http" {
 		rawRequest = rewriteHTTPProxyRequest(rawRequest, u, proxyAddr)
 	}
+	if proxyAddr != "" && !allowPrivateTargets {
+		if err := validateDialAddress(ctx, "tcp", address, timeout, allowPrivateTargets); err != nil {
+			return nil, err
+		}
+	}
 
 	// Try to get a pooled connection (only when no proxy, proxy conns aren't trivially reusable).
 	var conn net.Conn
@@ -290,7 +318,7 @@ func SendRawRequestWithContext(
 
 	// Dial a new connection if pool miss.
 	if conn == nil {
-		conn, err = dialNew(ctx, u.Scheme, address, host, proxyAddr, proxyIsHTTP, timeout, insecure)
+		conn, err = dialNew(ctx, u.Scheme, address, host, proxyAddr, proxyIsHTTP, timeout, insecure, allowPrivateTargets)
 		if err != nil {
 			return nil, err
 		}
@@ -313,7 +341,7 @@ func SendRawRequestWithContext(
 		// Stale pooled connection — discard and retry with a fresh connection.
 		conn.Close()
 		pooled = false
-		conn, err = dialNew(ctx, u.Scheme, address, host, proxyAddr, proxyIsHTTP, timeout, insecure)
+		conn, err = dialNew(ctx, u.Scheme, address, host, proxyAddr, proxyIsHTTP, timeout, insecure, allowPrivateTargets)
 		if err != nil {
 			return nil, err
 		}
@@ -336,7 +364,7 @@ func SendRawRequestWithContext(
 		// after the write succeeded but before/during the read. Try once more on a fresh connection.
 		if pooled {
 			pooled = false
-			conn, err = dialNew(ctx, u.Scheme, address, host, proxyAddr, proxyIsHTTP, timeout, insecure)
+			conn, err = dialNew(ctx, u.Scheme, address, host, proxyAddr, proxyIsHTTP, timeout, insecure, allowPrivateTargets)
 			if err != nil {
 				return nil, err
 			}
@@ -375,14 +403,14 @@ func SendRawRequestWithContext(
 
 // ─── Dial helpers ─────────────────────────────────────────────────────────────
 
-func dialNew(ctx context.Context, scheme, address, host, proxyAddr string, proxyIsHTTP bool, timeout time.Duration, insecure bool) (net.Conn, error) {
+func dialNew(ctx context.Context, scheme, address, host, proxyAddr string, proxyIsHTTP bool, timeout time.Duration, insecure bool, allowPrivateTargets bool) (net.Conn, error) {
 	if scheme == "https" {
-		return dialHTTPS(ctx, address, host, proxyAddr, proxyIsHTTP, timeout, insecure)
+		return dialHTTPS(ctx, address, host, proxyAddr, proxyIsHTTP, timeout, insecure, allowPrivateTargets)
 	}
-	return dialHTTP(ctx, address, proxyAddr, proxyIsHTTP, timeout)
+	return dialHTTP(ctx, address, proxyAddr, proxyIsHTTP, timeout, allowPrivateTargets)
 }
 
-func dialHTTPS(ctx context.Context, address, host, proxyAddr string, proxyIsHTTP bool, timeout time.Duration, insecure bool) (net.Conn, error) {
+func dialHTTPS(ctx context.Context, address, host, proxyAddr string, proxyIsHTTP bool, timeout time.Duration, insecure bool, allowPrivateTargets bool) (net.Conn, error) {
 	ciphers := []uint16{
 		tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
 		tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
@@ -404,11 +432,16 @@ func dialHTTPS(ctx context.Context, address, host, proxyAddr string, proxyIsHTTP
 	}
 
 	if proxyAddr == "" {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		rawConn, err := dialContextResolved(ctx, "tcp", address, timeout, allowPrivateTargets, nil)
+		if err != nil {
+			return nil, err
 		}
-		dialer := &net.Dialer{Timeout: timeout}
-		return tls.DialWithDialer(dialer, "tcp", address, tlsCfg)
+		tlsConn := tls.Client(rawConn, tlsCfg)
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			rawConn.Close()
+			return nil, err
+		}
+		return tlsConn, nil
 	}
 
 	if proxyIsHTTP {
@@ -442,18 +475,11 @@ func dialHTTPS(ctx context.Context, address, host, proxyAddr string, proxyIsHTTP
 	return tlsConn, nil
 }
 
-func dialHTTP(ctx context.Context, address, proxyAddr string, proxyIsHTTP bool, timeout time.Duration) (net.Conn, error) {
+func dialHTTP(ctx context.Context, address, proxyAddr string, proxyIsHTTP bool, timeout time.Duration, allowPrivateTargets bool) (net.Conn, error) {
 	if proxyAddr == "" {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		dialer := &net.Dialer{
-			Timeout: timeout,
-			Control: func(network, address string, c syscall.RawConn) error {
-				return setSocketLinger(c)
-			},
-		}
-		return dialer.Dial("tcp", address)
+		return dialContextResolved(ctx, "tcp", address, timeout, allowPrivateTargets, func(network, address string, c syscall.RawConn) error {
+			return setSocketLinger(c)
+		})
 	}
 
 	if proxyIsHTTP {
@@ -466,6 +492,73 @@ func dialHTTP(ctx context.Context, address, proxyAddr string, proxyIsHTTP bool, 
 		return nil, fmt.Errorf("proxy init failed: %w", err)
 	}
 	return d.Dial("tcp", address)
+}
+
+// NewTransport builds a standard HTTP transport with the same dial-time
+// private-address enforcement used by the raw client.
+func NewTransport(timeout time.Duration, insecure bool, allowPrivateTargets bool) *http.Transport {
+	return &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure},
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialContextResolved(ctx, network, address, timeout, allowPrivateTargets, nil)
+		},
+	}
+}
+
+func validateDialAddress(ctx context.Context, network, address string, timeout time.Duration, allowPrivateTargets bool) error {
+	_, err := resolveDialAddress(ctx, network, address, timeout, allowPrivateTargets)
+	return err
+}
+
+func dialContextResolved(ctx context.Context, network, address string, timeout time.Duration, allowPrivateTargets bool, control func(network, address string, c syscall.RawConn) error) (net.Conn, error) {
+	resolvedAddress, err := resolveDialAddress(ctx, network, address, timeout, allowPrivateTargets)
+	if err != nil {
+		return nil, err
+	}
+	dialer := &net.Dialer{
+		Timeout: timeout,
+		Control: control,
+	}
+	return dialer.DialContext(ctx, network, resolvedAddress)
+}
+
+func resolveDialAddress(ctx context.Context, network, address string, timeout time.Duration, allowPrivateTargets bool) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", fmt.Errorf("invalid dial address %q: %w", address, err)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !allowPrivateTargets && netutil.IsPrivateIP(ip) {
+			return "", fmt.Errorf("SSRF protection: resolved target %q is private or loopback", ip.String())
+		}
+		return net.JoinHostPort(ip.String(), port), nil
+	}
+
+	lookupCtx := ctx
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		lookupCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	addrs, err := lookupIPAddrContext(lookupCtx, host)
+	if err != nil {
+		return "", fmt.Errorf("DNS lookup failed for %q: %w", host, err)
+	}
+	if len(addrs) == 0 {
+		return "", fmt.Errorf("DNS lookup returned no addresses for %q", host)
+	}
+	for _, addr := range addrs {
+		if !allowPrivateTargets && netutil.IsPrivateIP(addr.IP) {
+			return "", fmt.Errorf("SSRF protection: resolved target %q is private or loopback", addr.IP.String())
+		}
+	}
+	return net.JoinHostPort(addrs[0].IP.String(), port), nil
 }
 
 func dialPlainHTTPProxy(ctx context.Context, proxyAddr string, timeout time.Duration) (net.Conn, error) {

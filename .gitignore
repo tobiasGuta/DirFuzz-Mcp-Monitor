@@ -59,6 +59,9 @@ secrets.*
 # Local Data Store & Scan Results
 # Ignore the local state folder if created in project root
 .dirfuzz-suite/
+# Local MCP audit logs may contain sensitive request metadata.
+dirfuzz-audit.jsonl
+**/dirfuzz-audit.jsonl
 # Ignore various result formats
 *.jsonl
 *.csv

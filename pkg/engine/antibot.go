@@ -220,8 +220,11 @@ func (e *Engine) executeRequestOnce(ctx context.Context, targetURL string, rawRe
 	if h2Mode && e.H2Client != nil {
 		return e.executeH2RequestWithRetry(ctx, targetURL, rawRequest, timeout)
 	}
+	e.Config.RLock()
+	allowPrivate := e.Config.AllowPrivateTargets
+	e.Config.RUnlock()
 	e.requestsDispatched.Add(1)
-	return httpclient.SendRawRequestWithContext(ctx, targetURL, rawRequest, timeout, proxyAddr, insecure)
+	return httpclient.SendRawRequestWithContextPolicy(ctx, targetURL, rawRequest, timeout, proxyAddr, insecure, allowPrivate)
 }
 
 // executeRequestOnceQuiet sends a single request without retry logging.
@@ -239,8 +242,11 @@ func (e *Engine) executeRequestOnceQuiet(ctx context.Context, targetURL string, 
 		return e.executeH2Request(ctx, targetURL, rawRequest, timeout)
 	}
 
+	e.Config.RLock()
+	allowPrivate := e.Config.AllowPrivateTargets
+	e.Config.RUnlock()
 	e.requestsDispatched.Add(1)
-	return httpclient.SendRawRequestWithContext(ctx, targetURL, rawRequest, timeout, proxyAddr, insecure)
+	return httpclient.SendRawRequestWithContextPolicy(ctx, targetURL, rawRequest, timeout, proxyAddr, insecure, allowPrivate)
 }
 
 func (e *Engine) mergeResponseCookies(targetURL string, resp *httpclient.RawResponse) {

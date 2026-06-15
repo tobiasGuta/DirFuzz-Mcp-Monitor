@@ -22,6 +22,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -247,6 +248,7 @@ func (s *scanState) finish(resultsFile, resultsPath string, capped bool) {
 	s.resultsFile = resultsFile
 	s.resultsPath = resultsPath
 	s.capped = capped
+	s.engine = nil
 	s.mu.Unlock()
 }
 
@@ -280,6 +282,7 @@ func (s *scanState) snapshot() scanStatusOutput {
 	finishedAt := s.finishedAt
 	running := s.running
 	capped := s.capped
+	canceled := s.canceled
 	resultsFile := s.resultsFile
 	resultsPath := s.resultsPath
 	eng := s.engine
@@ -300,7 +303,7 @@ func (s *scanState) snapshot() scanStatusOutput {
 		CurrentWorkerCount: 0,
 		CurrentRPS:         0,
 		Running:            running,
-		Canceled:           s.canceled,
+		Canceled:           canceled,
 		Capped:             capped,
 		ResultsFile:        resultsFile,
 		ResultsPath:        resultsPath,
@@ -752,14 +755,15 @@ func main() {
 	}))
 
 	expandTool := mcp.NewTool("dirfuzz_expand",
-		mcp.WithDescription("Autonomously expand discovered endpoints with recursive sub-scans."),
+		mcp.WithDescription("Expand discovered endpoints with approved, scope-checked recursive sub-scans."),
 		mcp.WithString("base_target", mcp.Required(), mcp.Description("The original base URL.")),
 		mcp.WithString("hits_jsonl", mcp.Required(), mcp.Description("Path to JSONL results file.")),
+		mcp.WithString("approval_token", mcp.Description("Approval token required when DIRFUZZ_SCAN_APPROVAL_TOKEN is configured.")),
 		mcp.WithNumber("max_depth", mcp.Description("Maximum expansion depth (default 2, max 4).")),
 		mcp.WithNumber("max_targets", mcp.Description("Maximum sub-paths to expand (default 10).")),
 		mcp.WithString("wordlist", mcp.Description("Wordlist path for sub-scans.")),
 	)
-	s.AddTool(expandTool, wrapToolHandler("dirfuzz_expand", rateLimitRule{Limit: cfg.defaultToolLimit, Window: cfg.rateLimitWindow}, limiter, auditLogger, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.AddTool(expandTool, wrapToolHandler("dirfuzz_expand", rateLimitRule{Limit: cfg.scanToolLimit, Window: cfg.rateLimitWindow}, limiter, auditLogger, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return handleExpand(ctx, req, cfg)
 	}))
 
@@ -922,7 +926,7 @@ func validateScanApproval(req mcp.CallToolRequest, cfg mcpConfig) error {
 	if err != nil {
 		return errors.New("approval_token is required to run scans")
 	}
-	if token != cfg.scanApprovalToken {
+	if subtle.ConstantTimeCompare([]byte(token), []byte(cfg.scanApprovalToken)) != 1 {
 		return errors.New("approval_token is invalid")
 	}
 	return nil
@@ -1463,7 +1467,10 @@ func handleWAFProbe(ctx context.Context, req mcp.CallToolRequest, registry *scan
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid headers: %v", err)), nil
 	}
-	targetURL := resolveProbeTarget(target, rawPath)
+	targetURL, err := resolveProbeTarget(target, rawPath)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 	report, err := eng.ProbeWAF(ctx, targetURL, rawPath, method, headers, 0, "")
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("waf probe failed: %v", err)), nil
@@ -1515,7 +1522,10 @@ func handleParamFuzz(ctx context.Context, req mcp.CallToolRequest, registry *sca
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid headers: %v", err)), nil
 	}
-	targetURL := resolveProbeTarget(target, rawPath)
+	targetURL, err := resolveProbeTarget(target, rawPath)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 	report := engine.ParamProbeReport{Target: targetURL, Path: rawPath, Method: method}
 	if len(customWordlist) > 0 {
 		hits, err := eng.FuzzParams(ctx, engine.ParamTask{URL: targetURL, Method: method, Headers: headers}, customWordlist)
@@ -1590,7 +1600,11 @@ func handleAuthTest(ctx context.Context, req mcp.CallToolRequest, registry *scan
 		if rawPath == "" {
 			continue
 		}
-		fullPaths = append(fullPaths, resolveProbeTarget(target, rawPath))
+		fullPath, err := resolveProbeTarget(target, rawPath)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		fullPaths = append(fullPaths, fullPath)
 	}
 	findings, err := eng.TestAuthMatrix(ctx, fullPaths, authMatrix)
 	if err != nil {
@@ -1607,20 +1621,31 @@ func handleAuthTest(ctx context.Context, req mcp.CallToolRequest, registry *scan
 	return mcp.NewToolResultText(string(raw)), nil
 }
 
-func resolveProbeTarget(baseTarget, rawPath string) string {
+func resolveProbeTarget(baseTarget, rawPath string) (string, error) {
 	rawPath = strings.TrimSpace(rawPath)
 	if rawPath == "" {
-		return baseTarget
+		return baseTarget, nil
 	}
 	if strings.HasPrefix(rawPath, "http://") || strings.HasPrefix(rawPath, "https://") {
-		return rawPath
+		baseURL, err := url.Parse(baseTarget)
+		if err != nil || baseURL.Hostname() == "" {
+			return "", fmt.Errorf("base target %q is not a valid URL", baseTarget)
+		}
+		probeURL, err := url.Parse(rawPath)
+		if err != nil || probeURL.Hostname() == "" {
+			return "", fmt.Errorf("probe URL %q is not valid", rawPath)
+		}
+		if !strings.EqualFold(probeURL.Hostname(), baseURL.Hostname()) {
+			return "", fmt.Errorf("probe URL host %q does not match scan target host %q", probeURL.Hostname(), baseURL.Hostname())
+		}
+		return rawPath, nil
 	}
 	if baseTarget == "" {
-		return rawPath
+		return rawPath, nil
 	}
 	u, err := url.Parse(baseTarget)
 	if err != nil {
-		return strings.TrimRight(baseTarget, "/") + "/" + strings.TrimLeft(rawPath, "/")
+		return strings.TrimRight(baseTarget, "/") + "/" + strings.TrimLeft(rawPath, "/"), nil
 	}
 	if !strings.HasPrefix(rawPath, "/") {
 		rawPath = "/" + rawPath
@@ -1629,7 +1654,7 @@ func resolveProbeTarget(baseTarget, rawPath string) string {
 	if u.Path == "" {
 		u.Path = rawPath
 	}
-	return u.String()
+	return u.String(), nil
 }
 
 // ── parameter parsers ─────────────────────────────────────────────────────────
@@ -2361,10 +2386,27 @@ func contains(s string, subs ...string) bool {
 // ── MCP Tool: dirfuzz_expand ──────────────────────────────────────────────────
 
 func handleExpand(ctx context.Context, req mcp.CallToolRequest, cfg mcpConfig) (*mcp.CallToolResult, error) {
+	if err := validateScanApproval(req, cfg); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
 	baseTarget, err := requireStringArg(req, "base_target")
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
+
+	assets, warnings, err := scope.LoadDir(cfg.scopeDir)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to read scope directory: %v", err)), nil
+	}
+	for _, warning := range warnings {
+		log.Printf("dirfuzz-mcp: %s", warning)
+	}
+	allowed, reason := scope.IsAllowed(baseTarget, assets)
+	if !allowed {
+		return mcp.NewToolResultError(fmt.Sprintf("Error: target blocked by scope validator: %s", reason)), nil
+	}
+
 	hitsJSONL, err := requireStringArg(req, "hits_jsonl")
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
